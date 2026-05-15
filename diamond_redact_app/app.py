@@ -120,8 +120,8 @@ if _old_logo.exists():
     _old_logo.unlink()
 
 default_logo = Path(__file__).parent / "logo_pure_carbon.png"
-if default_logo.exists() and not (LOGOS_DIR / "Pure Carbon Group.png").exists():
-    import shutil; shutil.copy(default_logo, LOGOS_DIR / "Pure Carbon Group.png")
+if default_logo.exists() and not (LOGOS_DIR / "Pure Carbon.png").exists():
+    import shutil; shutil.copy(default_logo, LOGOS_DIR / "Pure Carbon.png")
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def load_history():
