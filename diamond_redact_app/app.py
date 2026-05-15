@@ -66,23 +66,18 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; }
 .hb-giac { background: rgba(74,122,86,0.12);  color: #4a7a56; }
 .hb-igi  { background: rgba(37,99,168,0.12);  color: #2563a8; }
 .divider { border: none; border-top: 1px solid rgba(128,128,128,0.12); margin: 1.3rem 0; }
-/* Make cert select buttons feel like part of the card */
-div[data-testid="stButton"] button[kind="secondary"] {
+/* Cert selector — invisible button overlays the card */
+div[data-testid="stButton"]:has(button[kind="secondary"]) {
+    margin-top: -130px !important;
+    position: relative !important;
+    z-index: 10 !important;
+    opacity: 0 !important;
+    height: 130px !important;
+}
+div[data-testid="stButton"]:has(button[kind="secondary"]) button {
+    height: 130px !important;
+    background: transparent !important;
     border: none !important;
-    background: transparent !important;
-    color: rgba(255,255,255,0.25) !important;
-    font-size: 11px !important;
-    padding: 4px !important;
-    margin-top: -4px !important;
-}
-div[data-testid="stButton"] button[kind="secondary"]:hover {
-    color: rgba(255,255,255,0.5) !important;
-    background: transparent !important;
-}
-div[data-testid="stButton"] button[kind="primary"] {
-    font-size: 11px !important;
-    padding: 4px !important;
-    margin-top: -4px !important;
 }
 .link-box { background:#111; border:1px solid #1e1e1e; border-radius:10px; padding:14px 16px; margin-top:8px; }
 .link-label { font-size:11px; opacity:0.35; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:8px; }
@@ -266,15 +261,18 @@ with tab1:
     for i,(key,cfg) in enumerate(CERT_ZONES.items()):
         with cols[i]:
             active = st.session_state.cert_type==key
-            border = f"1.5px solid {'#2563a8' if key=='IGI' else '#B8963E' if key=='GIA' else '#4a7a56'}" if active else "1px solid rgba(128,128,128,0.15)"
-            bg = f"{'rgba(37,99,168,0.07)' if key=='IGI' else 'rgba(184,150,62,0.07)' if key=='GIA' else 'rgba(74,122,86,0.07)'}" if active else "transparent"
-            st.markdown(f'''<div style="border-radius:12px;padding:18px 12px 10px;text-align:center;border:{border};background:{bg};margin-bottom:4px;">
-              <img style="width:52px;height:52px;border-radius:50%;object-fit:cover;margin:0 auto 10px;display:block;" src="data:image/png;base64,{cfg["logo_b64"]}"/>
-              <div style="font-size:13px;font-weight:600;margin-bottom:2px;">{key}</div>
-              <div style="font-size:11px;opacity:0.4;">{cfg["short"]}</div>
+            border_col = '#2563a8' if key=='IGI' else '#B8963E' if key=='GIA' else '#4a7a56'
+            border = f"2px solid {border_col}" if active else "1px solid rgba(128,128,128,0.2)"
+            bg = f"{'rgba(37,99,168,0.08)' if key=='IGI' else 'rgba(184,150,62,0.08)' if key=='GIA' else 'rgba(74,122,86,0.08)'}" if active else "rgba(255,255,255,0.02)"
+            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:6px;">✓ SELECTED</div>' if active else '<div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.06em;margin-top:6px;">tap to select</div>'
+            st.markdown(f'''<div style="border-radius:12px;padding:16px 8px 12px;text-align:center;border:{border};background:{bg};">
+              <img style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin:0 auto 8px;display:block;" src="data:image/png;base64,{cfg["logo_b64"]}"/>
+              <div style="font-size:13px;font-weight:600;margin-bottom:1px;">{key}</div>
+              <div style="font-size:10px;opacity:0.35;">{cfg["short"]}</div>
+              {check}
             </div>''', unsafe_allow_html=True)
-            if st.button("✓ Selected" if active else "Select", key=f"c_{key}",
-                         type="primary" if active else "secondary", use_container_width=True):
+            # Invisible full-width button overlaid — clicking anywhere triggers it
+            if st.button("​", key=f"c_{key}", use_container_width=True):
                 st.session_state.cert_type=key; st.session_state.results=None
                 st.session_state.upkey+=1; st.rerun()
 
@@ -384,15 +382,17 @@ with tab2:
     for i,(key,cfg) in enumerate(CERT_ZONES.items()):
         with cols2[i]:
             active = st.session_state.cert_type==key
-            border = f"1.5px solid {'#2563a8' if key=='IGI' else '#B8963E' if key=='GIA' else '#4a7a56'}" if active else "1px solid rgba(128,128,128,0.15)"
-            bg = f"{'rgba(37,99,168,0.07)' if key=='IGI' else 'rgba(184,150,62,0.07)' if key=='GIA' else 'rgba(74,122,86,0.07)'}" if active else "transparent"
-            st.markdown(f'''<div style="border-radius:12px;padding:18px 12px 10px;text-align:center;border:{border};background:{bg};margin-bottom:4px;">
-              <img style="width:52px;height:52px;border-radius:50%;object-fit:cover;margin:0 auto 10px;display:block;" src="data:image/png;base64,{cfg["logo_b64"]}"/>
-              <div style="font-size:13px;font-weight:600;margin-bottom:2px;">{key}</div>
-              <div style="font-size:11px;opacity:0.4;">{cfg["short"]}</div>
+            border_col = '#2563a8' if key=='IGI' else '#B8963E' if key=='GIA' else '#4a7a56'
+            border = f"2px solid {border_col}" if active else "1px solid rgba(128,128,128,0.2)"
+            bg = f"{'rgba(37,99,168,0.08)' if key=='IGI' else 'rgba(184,150,62,0.08)' if key=='GIA' else 'rgba(74,122,86,0.08)'}" if active else "rgba(255,255,255,0.02)"
+            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:6px;">✓ SELECTED</div>' if active else '<div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.06em;margin-top:6px;">tap to select</div>'
+            st.markdown(f'''<div style="border-radius:12px;padding:16px 8px 12px;text-align:center;border:{border};background:{bg};">
+              <img style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin:0 auto 8px;display:block;" src="data:image/png;base64,{cfg["logo_b64"]}"/>
+              <div style="font-size:13px;font-weight:600;margin-bottom:1px;">{key}</div>
+              <div style="font-size:10px;opacity:0.35;">{cfg["short"]}</div>
+              {check}
             </div>''', unsafe_allow_html=True)
-            if st.button("✓ Selected" if active else "Select", key=f"qc_{key}",
-                         type="primary" if active else "secondary", use_container_width=True):
+            if st.button("​", key=f"qc_{key}", use_container_width=True):
                 st.session_state.cert_type=key; st.rerun()
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
@@ -500,17 +500,8 @@ with tab2:
                     long_url = f"{QUOTE_BASE}/q/{qid}"
                     link     = shorten(long_url)
                     st.session_state.quote_link = link
-                    st.success("✅ Quote created — link copied to clipboard!")
-                    # Auto copy to clipboard via JS
-                    st.components.v1.html(f"""
-                    <script>
-                    navigator.clipboard.writeText("{link}").catch(()=>{{
-                        const ta=document.createElement('textarea');
-                        ta.value="{link}";ta.style.position='fixed';ta.style.opacity='0';
-                        document.body.appendChild(ta);ta.focus();ta.select();
-                        document.execCommand('copy');document.body.removeChild(ta);
-                    }});
-                    </script>""", height=0)
+                    st.success("✅ Quote created!")
+                    st.session_state.copy_link = link
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
 
@@ -520,6 +511,7 @@ with tab2:
           <div class="link-label">Quote link — copy and send to {q_client}</div>
           <div class="link-url">{link}</div>
         </div>""", unsafe_allow_html=True)
+        st.caption("👆 Click the copy icon on the right to copy your link")
         st.code(link, language=None)
-        if st.button("Clear", key="clr_quote"):
+        if st.button("Clear", key="clr_quote", use_container_width=True):
             st.session_state.quote_link=None; st.rerun()
