@@ -197,106 +197,221 @@ for i,(key,cfg) in enumerate(CERT_ZONES.items()):
             st.session_state.upkey+=1; st.rerun()
 
 cert_type = st.session_state.cert_type
-st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-# ── Logo selector ─────────────────────────────────────────────────────────────
-st.markdown('<div class="section-label">Logo for QR replacement</div>', unsafe_allow_html=True)
-logo_files = sorted(list(LOGOS_DIR.glob("*.png"))+list(LOGOS_DIR.glob("*.jpg")))
-logo_names = [f.stem for f in logo_files]
+tab1, tab2 = st.tabs(["  💎 Redact  ", "  🔗 Generate Quote  "])
 
-if logo_names:
-    lcols = st.columns(min(len(logo_names), 4))
-    for i, name in enumerate(logo_names):
-        with lcols[i % 4]:
-            sel = st.session_state.sel_logo == name
-            if st.button(("✓ " if sel else "")+name, key=f"l_{name}",
-                         type="primary" if sel else "secondary", use_container_width=True):
-                st.session_state.sel_logo=name; st.rerun()
+with tab1:
+  st.markdown('<hr class="divider">', unsafe_allow_html=True)
+  st.markdown('<hr class="divider">', unsafe_allow_html=True)
+  
+  # ── Logo selector ─────────────────────────────────────────────────────────────
+  st.markdown('<div class="section-label">Logo for QR replacement</div>', unsafe_allow_html=True)
+  logo_files = sorted(list(LOGOS_DIR.glob("*.png"))+list(LOGOS_DIR.glob("*.jpg")))
+  logo_names = [f.stem for f in logo_files]
+  
+  if logo_names:
+      lcols = st.columns(min(len(logo_names), 4))
+      for i, name in enumerate(logo_names):
+          with lcols[i % 4]:
+              sel = st.session_state.sel_logo == name
+              if st.button(("✓ " if sel else "")+name, key=f"l_{name}",
+                           type="primary" if sel else "secondary", use_container_width=True):
+                  st.session_state.sel_logo=name; st.rerun()
+  
+  with st.expander("➕  Add a new logo"):
+      new_name = st.text_input("Company name", placeholder="e.g. Vendor ABC")
+      new_file = st.file_uploader("Logo image (PNG recommended)", type=["png","jpg","jpeg","webp"], key="nl")
+      if st.button("Save logo") and new_name and new_file:
+          img=Image.open(new_file).convert("RGBA")
+          img.save(LOGOS_DIR/f"{new_name.strip()}.png")
+          st.session_state.sel_logo=new_name.strip()
+          st.success(f"Saved: {new_name}"); st.rerun()
+  
+  logo_img=None
+  for ext in [".png",".jpg"]:
+      p=LOGOS_DIR/f"{st.session_state.sel_logo}{ext}"
+      if p.exists(): logo_img=Image.open(p).convert("RGBA"); break
+  
+  if logo_img:
+      c1,c2=st.columns([1,6])
+      with c1: st.image(logo_img, width=44)
+      with c2: st.caption(f"Using **{st.session_state.sel_logo}**")
+  
+  st.markdown('<hr class="divider">', unsafe_allow_html=True)
+  
+  # ── Uploader ──────────────────────────────────────────────────────────────────
+  st.markdown(f'<div class="section-label">Upload {cert_type} certificates</div>', unsafe_allow_html=True)
+  uploaded = st.file_uploader(f"Drop {cert_type} PDFs here", type="pdf",
+      accept_multiple_files=True, key=f"up_{st.session_state.upkey}",
+      label_visibility="collapsed")
+  
+  if uploaded:
+      st.write(f"**{len(uploaded)} file(s) ready**")
+      if st.button("▶  Redact all", type="primary", use_container_width=True):
+          results={}; prog=st.progress(0); status=st.empty()
+          for i,f in enumerate(uploaded):
+              status.text(f"Processing {f.name} …")
+              try:
+                  out=redact_pdf(f.read(), cert_type, logo_img)
+                  last4=''.join(filter(str.isdigit, Path(f.name).stem))[-4:]
+                  name=f"{last4}.pdf"
+                  results[name]=out
+                  add_history(f.name, name, cert_type)
+              except Exception as e:
+                  st.error(f"Error on {f.name}: {e}")
+              prog.progress((i+1)/len(uploaded))
+          status.empty(); prog.empty()
+          st.session_state.results=results; st.session_state.upkey+=1; st.rerun()
+  
+  # ── Downloads ─────────────────────────────────────────────────────────────────
+  if st.session_state.results:
+      res=st.session_state.results
+      st.success(f"✅  {len(res)} certificate(s) redacted")
+      if len(res)==1:
+          name,data=next(iter(res.items()))
+          st.download_button(f"⬇  Download  {name}", data, name, "application/pdf", use_container_width=True)
+      else:
+          zb=io.BytesIO()
+          with zipfile.ZipFile(zb,"w",zipfile.ZIP_DEFLATED) as zf:
+              [zf.writestr(n,d) for n,d in res.items()]
+          st.download_button(f"⬇  Download all ({len(res)}) as ZIP",
+              zb.getvalue(),"redacted_certificates.zip","application/zip",use_container_width=True)
+      if st.button("Clear & redact more", use_container_width=True):
+          st.session_state.results=None; st.rerun()
+  
+  st.markdown('<hr class="divider">', unsafe_allow_html=True)
+  
+  # ── History ───────────────────────────────────────────────────────────────────
+  history=load_history()
+  hc1,hc2=st.columns([4,1])
+  with hc1: st.markdown('<div class="section-label" style="margin-bottom:0">Recent files</div>', unsafe_allow_html=True)
+  with hc2:
+      if history and st.button("Clear", use_container_width=True):
+          save_history([]); st.rerun()
+  
+  badge_map={"GIA":"hb-gia","GIA Colour":"hb-giac","IGI":"hb-igi"}
+  if history:
+      for entry in reversed(history[-25:]):
+          bcls=badge_map.get(entry["type"],"hb-gia")
+          st.markdown(f"""
+          <div class="history-row">
+            <div>
+              <div class="h-orig">{entry["original"]}</div>
+              <div class="h-clean">&#8594; {entry["cleaned"]}</div>
+            </div>
+            <div class="h-meta">
+              <span class="h-badge {bcls}">{entry["type"]}</span><br>{entry["time"]}
+            </div>
+          </div>""", unsafe_allow_html=True)
+  else:
+      st.caption("No files processed yet — history will appear here.")
 
-with st.expander("➕  Add a new logo"):
-    new_name = st.text_input("Company name", placeholder="e.g. Vendor ABC")
-    new_file = st.file_uploader("Logo image (PNG recommended)", type=["png","jpg","jpeg","webp"], key="nl")
-    if st.button("Save logo") and new_name and new_file:
-        img=Image.open(new_file).convert("RGBA")
-        img.save(LOGOS_DIR/f"{new_name.strip()}.png")
-        st.session_state.sel_logo=new_name.strip()
-        st.success(f"Saved: {new_name}"); st.rerun()
+with tab2:
+  import requests, random, datetime as dt
 
-logo_img=None
-for ext in [".png",".jpg"]:
-    p=LOGOS_DIR/f"{st.session_state.sel_logo}{ext}"
-    if p.exists(): logo_img=Image.open(p).convert("RGBA"); break
+  QUOTE_BASE_URL = "https://quote.alldiamondeverything.com"
+  SUPABASE_URL   = "https://srlbevzrkovruyerixdi.supabase.co"
+  SUPABASE_ANON  = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNybGJldnpya292cnV5ZXJpeGRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NTk0NjQsImV4cCI6MjA5NDQzNTQ2NH0.wB8eSR-MClr9CLwj8V998aJbCNAVlw2wK9PppB_DnIA"
 
-if logo_img:
-    c1,c2=st.columns([1,6])
-    with c1: st.image(logo_img, width=44)
-    with c2: st.caption(f"Using **{st.session_state.sel_logo}**")
+  def gen_id(n=8):
+    chars = "abcdefghijkmnpqrstuvwxyz23456789"
+    return "".join(random.choices(chars, k=n))
 
-st.markdown('<hr class="divider">', unsafe_allow_html=True)
+  def upload_pdf(pdf_bytes, filename):
+    url = f"{SUPABASE_URL}/storage/v1/object/certificates/{filename}"
+    r = requests.post(url, headers={
+      "apikey": SUPABASE_ANON,
+      "Authorization": f"Bearer {SUPABASE_ANON}",
+      "Content-Type": "application/pdf",
+    }, data=pdf_bytes, timeout=30)
+    if r.status_code in (200, 201):
+      return f"{SUPABASE_URL}/storage/v1/object/public/certificates/{filename}"
+    return None
 
-# ── Uploader ──────────────────────────────────────────────────────────────────
-st.markdown(f'<div class="section-label">Upload {cert_type} certificates</div>', unsafe_allow_html=True)
-uploaded = st.file_uploader(f"Drop {cert_type} PDFs here", type="pdf",
-    accept_multiple_files=True, key=f"up_{st.session_state.upkey}",
-    label_visibility="collapsed")
+  def insert_quote(payload):
+    import json
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/quotes",
+      headers={
+        "apikey": SUPABASE_ANON,
+        "Authorization": f"Bearer {SUPABASE_ANON}",
+        "Content-Type": "application/json",
+        "Prefer": "return=minimal",
+      }, data=json.dumps(payload), timeout=10)
+    return r.status_code in (200, 201, 204)
 
-if uploaded:
-    st.write(f"**{len(uploaded)} file(s) ready**")
-    if st.button("▶  Redact all", type="primary", use_container_width=True):
-        results={}; prog=st.progress(0); status=st.empty()
-        for i,f in enumerate(uploaded):
-            status.text(f"Processing {f.name} …")
-            try:
-                out=redact_pdf(f.read(), cert_type, logo_img)
-                last4=''.join(filter(str.isdigit, Path(f.name).stem))[-4:]
-                name=f"{last4}.pdf"
-                results[name]=out
-                add_history(f.name, name, cert_type)
-            except Exception as e:
-                st.error(f"Error on {f.name}: {e}")
-            prog.progress((i+1)/len(uploaded))
-        status.empty(); prog.empty()
-        st.session_state.results=results; st.session_state.upkey+=1; st.rerun()
+  def shorten(long_url):
+    try:
+      token = st.secrets.get("BITLY_TOKEN", "")
+      if not token: return long_url
+      r = requests.post("https://api-ssl.bitly.com/v4/shorten",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        json={"long_url": long_url, "domain": "purecarbondiamonds.tv"}, timeout=5)
+      return r.json().get("link", long_url)
+    except: return long_url
 
-# ── Downloads ─────────────────────────────────────────────────────────────────
-if st.session_state.results:
-    res=st.session_state.results
-    st.success(f"✅  {len(res)} certificate(s) redacted")
-    if len(res)==1:
-        name,data=next(iter(res.items()))
-        st.download_button(f"⬇  Download  {name}", data, name, "application/pdf", use_container_width=True)
-    else:
-        zb=io.BytesIO()
-        with zipfile.ZipFile(zb,"w",zipfile.ZIP_DEFLATED) as zf:
-            [zf.writestr(n,d) for n,d in res.items()]
-        st.download_button(f"⬇  Download all ({len(res)}) as ZIP",
-            zb.getvalue(),"redacted_certificates.zip","application/zip",use_container_width=True)
-    if st.button("Clear & redact more", use_container_width=True):
-        st.session_state.results=None; st.rerun()
+  st.markdown('<div class="section-label">Quote settings</div>', unsafe_allow_html=True)
 
-st.markdown('<hr class="divider">', unsafe_allow_html=True)
+  all_clients = sorted([f.stem for f in LOGOS_DIR.glob("*.png")] + [f.stem for f in LOGOS_DIR.glob("*.jpg")])
+  q_client   = st.selectbox("Client", all_clients, key="q_client")
+  col_a, col_b = st.columns(2)
+  with col_a: q_currency = st.radio("Currency", ["USD", "CAD"], horizontal=True, key="q_cur")
+  with col_b: q_expiry   = st.slider("Expires after (days)", 7, 60, 30, key="q_exp")
 
-# ── History ───────────────────────────────────────────────────────────────────
-history=load_history()
-hc1,hc2=st.columns([4,1])
-with hc1: st.markdown('<div class="section-label" style="margin-bottom:0">Recent files</div>', unsafe_allow_html=True)
-with hc2:
-    if history and st.button("Clear", use_container_width=True):
-        save_history([]); st.rerun()
+  st.markdown('<hr class="divider">', unsafe_allow_html=True)
+  st.markdown('<div class="section-label">Diamonds — up to 3</div>', unsafe_allow_html=True)
 
-badge_map={"GIA":"hb-gia","GIA Colour":"hb-giac","IGI":"hb-igi"}
-if history:
-    for entry in reversed(history[-25:]):
-        bcls=badge_map.get(entry["type"],"hb-gia")
-        st.markdown(f"""
-        <div class="history-row">
-          <div>
-            <div class="h-orig">{entry["original"]}</div>
-            <div class="h-clean">&#8594; {entry["cleaned"]}</div>
-          </div>
-          <div class="h-meta">
-            <span class="h-badge {bcls}">{entry["type"]}</span><br>{entry["time"]}
-          </div>
-        </div>""", unsafe_allow_html=True)
-else:
-    st.caption("No files processed yet — history will appear here.")
+  stones_ready = []
+  for i in range(3):
+    with st.expander(f"Diamond {i+1}", expanded=(i==0)):
+      q_pdf  = st.file_uploader("Redacted certificate PDF", type="pdf", key=f"qpdf_{i}")
+      q_vid  = st.text_input("Cleaned video URL", placeholder="https://...", key=f"qvid_{i}")
+      q_price= st.text_input("Your price", placeholder="e.g. 12500", key=f"qpri_{i}")
+      q_type = st.radio("Price type", ["Stone price", "Price per carat"], horizontal=True, key=f"qtyp_{i}")
+      if q_pdf and q_vid and q_price:
+        stones_ready.append({
+          "file": q_pdf, "video_url": q_vid, "price": q_price,
+          "price_type": "ppc" if "carat" in q_type else "stone",
+          "cert_last4": "".join(filter(str.isdigit, Path(q_pdf.name).stem))[-4:],
+        })
+
+  st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+  if "quote_link" not in st.session_state: st.session_state.quote_link = None
+
+  if st.button("🔗  Generate quote link", type="primary", use_container_width=True,
+               key="gen_quote", disabled=len(stones_ready)==0):
+    with st.spinner("Uploading & generating…"):
+      stones_payload = []; ok = True
+      for s in stones_ready:
+        fname   = f"{gen_id(6)}_{s['cert_last4']}.pdf"
+        pdf_url = upload_pdf(s["file"].read(), fname)
+        if not pdf_url:
+          st.error(f"Upload failed for diamond ···{s['cert_last4']}"); ok = False; break
+        stones_payload.append({
+          "cert_last4": s["cert_last4"], "video_url": s["video_url"],
+          "pdf_url": pdf_url, "price": s["price"],
+          "currency": q_currency, "price_type": s["price_type"],
+        })
+      if ok:
+        import json
+        qid  = gen_id()
+        exp  = (dt.datetime.utcnow() + dt.timedelta(days=q_expiry)).isoformat() + "Z"
+        body = {"id": qid, "client": q_client, "stones": stones_payload, "expires_at": exp}
+        if insert_quote(body):
+          long_url = f"{QUOTE_BASE_URL}/q/{qid}"
+          st.session_state.quote_link = shorten(long_url)
+          st.success("✅ Quote created!")
+        else:
+          st.error("Failed to save quote — check Supabase connection.")
+
+  if st.session_state.quote_link:
+    link = st.session_state.quote_link
+    st.markdown(f"""
+    <div style="background:#111;border:1px solid #1e1e1e;border-radius:10px;padding:14px 16px;margin-top:4px;">
+      <div style="font-size:11px;opacity:0.35;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:8px;">Quote link — copy and send to {q_client}</div>
+      <div style="font-family:monospace;font-size:14px;word-break:break-all;color:#c9a84c;">{link}</div>
+    </div>
+    """, unsafe_allow_html=True)
+    st.code(link, language=None)
+    if st.button("Clear", key="clear_quote"):
+      st.session_state.quote_link = None; st.rerun()
