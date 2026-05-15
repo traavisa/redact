@@ -48,6 +48,236 @@ QUOTE_BASE    = "https://quote.alldiamondeverything.com"
 SUPABASE_URL  = "https://srlbevzrkovruyerixdi.supabase.co"
 SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNybGJldnpya292cnV5ZXJpeGRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NTk0NjQsImV4cCI6MjA5NDQzNTQ2NH0.wB8eSR-MClr9CLwj8V998aJbCNAVlw2wK9PppB_DnIA"
 
+
+# ── Cert zone definitions ─────────────────────────────────────────────────────
+CERT_ZONES = {
+    "IGI": {
+        "short":"Lab Grown Diamond","logo_b64":IGI_B64,"ccls":"sel-igi","hbcls":"hb-igi",
+        "zones":{
+            "num_top_centre":   {"x0":360.8,"y0":34.1, "x1":420.9,"y1":43.6, "mask_ratio":0.55},
+            "num_left":         {"x0":181.8,"y0":150.1,"x1":232.5,"y1":158.1,"mask_ratio":0.55},
+            "num_left_insc":    {"x0":183.7,"y0":371.5,"x1":233.4,"y1":379.5,"mask_ratio":0.55},
+            "num_right_top":    {"x0":940.3,"y0":75.2, "x1":981.9,"y1":81.2, "mask_ratio":0.55},
+            "num_right_insc":   {"x0":933.0,"y0":355.9,"x1":981.9,"y1":361.9,"mask_ratio":0.55},
+            "num_vert_report":  {"x0":810.6,"y0":535.8,"x1":818.6,"y1":588.6,"mask_ratio":0.55,"vertical":True},
+            "num_vert_insc":    {"x0":919.5,"y0":509.4,"x1":927.4,"y1":540.1,"mask_ratio":0.55,"vertical":True},
+            "num_diamond_high": {"x0":630.0,"y0":150.0,"x1":710.0,"y1":168.0,"mask_ratio":0.55},
+            "num_diamond_low":  {"x0":622.0,"y0":308.0,"x1":700.0,"y1":326.0,"mask_ratio":0.55},
+            "qr":               {"x0":725.1,"y0":500.9,"x1":768.3,"y1":544.0},
+        }
+    },
+    "GIA": {
+        "short":"Natural Diamond","logo_b64":GIA_B64,"ccls":"sel-gia","hbcls":"hb-gia",
+        "zones":{
+            "gia1":        {"x0":367.7,"y0":47.0, "x1":431.5,"y1":59.0, "mask_ratio":0.60},
+            "gia2":        {"x0":192.8,"y0":117.9,"x1":241.6,"y1":126.9,"mask_ratio":0.60},
+            "inscription": {"x0":95.1, "y0":339.4,"x1":143.0,"y1":348.4,"mask_ratio":0.60},
+            "qr":          {"x0":698.0,"y0":504.2,"x1":752.0,"y1":558.2},
+        }
+    },
+    "GIA Colour": {
+        "short":"Coloured Diamond","logo_b64":GIA_B64,"ccls":"sel-giac","hbcls":"hb-giac",
+        "zones":{
+            "gia1":        {"x0":367.7,"y0":45.0, "x1":431.5,"y1":57.0, "mask_ratio":0.60},
+            "gia2":        {"x0":192.8,"y0":137.2,"x1":241.6,"y1":146.2,"mask_ratio":0.60},
+            "inscription": {"x0":95.1, "y0":446.9,"x1":143.0,"y1":455.9,"mask_ratio":0.60},
+            "qr":          {"x0":698.1,"y0":507.1,"x1":752.1,"y1":561.1},
+        }
+    },
+}
+
+PADDING       = 1.5
+SUPABASE_URL  = "https://srlbevzrkovruyerixdi.supabase.co"
+SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNybGJldnpya292cnV5ZXJpeGRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NTk0NjQsImV4cCI6MjA5NDQzNTQ2NH0.wB8eSR-MClr9CLwj8V998aJbCNAVlw2wK9PppB_DnIA"
+QUOTE_BASE    = "https://quote.alldiamondeverything.com"
+VIEWER_BASE   = "https://video.alldiamondeverything.com/?u="
+
+# ── Supabase helpers ──────────────────────────────────────────────────────────
+def sb_get(table, filters=""):
+    r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}?{filters}&select=*",
+        headers={"apikey":SUPABASE_ANON,"Authorization":f"Bearer {SUPABASE_ANON}"},
+        timeout=10)
+    return r.json() if r.status_code == 200 else []
+
+def sb_insert(table, payload):
+    r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}",
+        headers={"apikey":SUPABASE_ANON,"Authorization":f"Bearer {SUPABASE_ANON}",
+                 "Content-Type":"application/json","Prefer":"return=minimal"},
+        data=json.dumps(payload), timeout=10)
+    return r.status_code in (200,201,204)
+
+def sb_delete(table, filter_str):
+    r = requests.delete(f"{SUPABASE_URL}/rest/v1/{table}?{filter_str}",
+        headers={"apikey":SUPABASE_ANON,"Authorization":f"Bearer {SUPABASE_ANON}"},
+        timeout=10)
+    return r.status_code in (200,204)
+
+def load_history():
+    rows = sb_get("redact_history", "order=created_at.desc&limit=25")
+    if isinstance(rows, list): return rows
+    return []
+
+def add_history(orig, clean, ctype, client=""):
+    sb_insert("redact_history", {
+        "original": orig, "cleaned": clean, "cert_type": ctype,
+        "client": client,
+        "created_at": datetime.datetime.utcnow().isoformat()+"Z"
+    })
+
+def load_quote_history():
+    rows = sb_get("quotes", "order=created_at.desc&limit=25")
+    if isinstance(rows, list): return rows
+    return []
+
+def upload_pdf(pdf_bytes, filename):
+    url = f"{SUPABASE_URL}/storage/v1/object/certificates/{filename}"
+    r = requests.post(url, headers={
+        "apikey":SUPABASE_ANON,"Authorization":f"Bearer {SUPABASE_ANON}",
+        "Content-Type":"application/pdf"}, data=pdf_bytes, timeout=30)
+    if r.status_code in (200,201):
+        return f"{SUPABASE_URL}/storage/v1/object/public/certificates/{filename}"
+    return None
+
+def shorten(long_url):
+    try:
+        token = st.secrets.get("BITLY_TOKEN","")
+        if not token: return long_url
+        r = requests.post("https://api-ssl.bitly.com/v4/shorten",
+            headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
+            json={"long_url":long_url,"domain":"purecarbondiamonds.tv"},timeout=5)
+        return r.json().get("link", long_url)
+    except: return long_url
+
+def load_custom_clients():
+    rows = sb_get("custom_clients", "order=name.asc")
+    if isinstance(rows, list): return rows
+    return []
+
+def save_custom_client(name, b64):
+    return sb_insert("custom_clients", {"name": name, "logo_b64": b64})
+
+# ── Core helpers ──────────────────────────────────────────────────────────────
+def gen_id(n=8):
+    chars = "abcdefghijkmnpqrstuvwxyz23456789"
+    return "".join(random.choices(chars, k=n))
+
+def get_logo_img(name):
+    b64 = CLIENT_LOGOS.get(name)
+    if b64:
+        return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
+    return None
+
+def clean_video_url(raw_url):
+    try:
+        from urllib.parse import urlparse, parse_qs
+        u = urlparse(raw_url)
+        embed = raw_url
+        if u.hostname in ("www.youtube.com","youtube.com") and u.path=="/watch":
+            vid = parse_qs(u.query).get("v",[""])[0]
+            if vid: embed = f"https://www.youtube.com/embed/{vid}?autoplay=0"
+        elif u.hostname == "youtu.be":
+            embed = f"https://www.youtube.com/embed/{u.path[1:]}?autoplay=0"
+    except: embed = raw_url
+    encoded = base64.b64encode(embed.encode()).decode()
+    return VIEWER_BASE + encoded
+
+def redact_pdf(file_bytes, cert_type, logo_img):
+    zones = CERT_ZONES[cert_type]["zones"]
+    doc = fitz.open(stream=file_bytes, filetype="pdf")
+    for page in doc:
+        for key, z in zones.items():
+            x0=z["x0"]-PADDING; y0=z["y0"]-PADDING
+            x1=z["x1"]+PADDING; y1=z["y1"]+PADDING
+            if key=="qr":
+                rect=fitz.Rect(x0,y0,x1,y1)
+                page.add_redact_annot(rect,fill=(1,1,1)); page.apply_redactions()
+                if logo_img:
+                    buf=io.BytesIO(); logo_img.save(buf,format="PNG"); buf.seek(0)
+                    page.insert_image(rect,stream=buf.read())
+            elif z.get("vertical"):
+                r=z.get("mask_ratio",0.55)
+                page.add_redact_annot(fitz.Rect(x0,y0,x1,y0+(y1-y0)*r),fill=(1,1,1))
+                page.apply_redactions()
+            else:
+                r=z.get("mask_ratio",0.60)
+                page.add_redact_annot(fitz.Rect(x0,y0,x0+(x1-x0)*r,y1),fill=(1,1,1))
+                page.apply_redactions()
+    out=io.BytesIO()
+    doc.save(out,garbage=4,deflate=True,clean=True)
+    doc.close(); out.seek(0)
+    return out.read()
+
+def cert_selector(tab_prefix):
+    """Renders cert type cards with invisible overlay buttons. Returns selected key."""
+    cols = st.columns(3)
+    for i,(key,cfg) in enumerate(CERT_ZONES.items()):
+        with cols[i]:
+            active = st.session_state.cert_type==key
+            border_col = '#2563a8' if key=='IGI' else '#B8963E' if key=='GIA' else '#4a7a56'
+            border = f"2px solid {border_col}" if active else "1px solid rgba(128,128,128,0.2)"
+            bg = (f"rgba(37,99,168,0.08)" if key=='IGI' else f"rgba(184,150,62,0.08)" if key=='GIA' else f"rgba(74,122,86,0.08)") if active else "rgba(255,255,255,0.02)"
+            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:6px;">✓ SELECTED</div>' if active else '<div style="font-size:10px;color:rgba(255,255,255,0.2);margin-top:6px;">tap to select</div>'
+            st.markdown(f'''<div style="border-radius:12px;padding:16px 8px 12px;text-align:center;border:{border};background:{bg};">
+              <img style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin:0 auto 8px;display:block;" src="data:image/png;base64,{cfg["logo_b64"]}"/>
+              <div style="font-size:13px;font-weight:600;margin-bottom:1px;">{key}</div>
+              <div style="font-size:10px;opacity:0.35;">{cfg["short"]}</div>
+              {check}
+            </div>''', unsafe_allow_html=True)
+            if st.button("\u200b", key=f"{tab_prefix}_c_{key}", use_container_width=True):
+                st.session_state.cert_type=key
+                st.session_state.results=None
+                st.session_state.upkey+=1
+                st.rerun()
+
+def client_selector(key_prefix, session_key):
+    """Renders client logo cards with invisible overlay buttons."""
+    # Build full client list: built-in + custom from Supabase
+    all_clients = dict(CLIENT_LOGOS)
+    custom = load_custom_clients()
+    for c in custom:
+        all_clients[c["name"]] = c["logo_b64"]
+
+    order = list(CLIENT_ORDER)
+    for c in custom:
+        if c["name"] not in order:
+            order.append(c["name"])
+
+    current = st.session_state.get(session_key, CLIENT_ORDER[0])
+
+    cols = st.columns(min(len(order), 4))
+    for i, name in enumerate(order):
+        with cols[i % 4]:
+            sel = current == name
+            b64 = all_clients.get(name, "")
+            border_col = "#c9a84c"
+            border = f"2px solid {border_col}" if sel else "1px solid rgba(128,128,128,0.2)"
+            bg = "rgba(201,168,76,0.08)" if sel else "rgba(255,255,255,0.02)"
+            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:4px;">✓ SELECTED</div>' if sel else '<div style="font-size:10px;color:rgba(255,255,255,0.2);margin-top:4px;">tap to select</div>'
+            st.markdown(f'''<div style="border-radius:10px;padding:12px 8px 8px;text-align:center;border:{border};background:{bg};">
+              <img style="width:44px;height:44px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" src="data:image/png;base64,{b64}"/>
+              <div style="font-size:11px;font-weight:600;">{name}</div>
+              {check}
+            </div>''', unsafe_allow_html=True)
+            if st.button("\u200b", key=f"{key_prefix}_{name}", use_container_width=True):
+                st.session_state[session_key] = name
+                st.rerun()
+
+    with st.expander("➕  Add a new client"):
+        new_name = st.text_input("Client name", placeholder="e.g. Vendor ABC", key=f"{key_prefix}_new_name")
+        new_file = st.file_uploader("Logo image", type=["png","jpg","jpeg","webp"], key=f"{key_prefix}_new_logo")
+        if st.button("Save client", key=f"{key_prefix}_save") and new_name and new_file:
+            img = Image.open(new_file).convert("RGBA")
+            img.thumbnail((200,200))
+            buf = io.BytesIO(); img.save(buf, "PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode()
+            if save_custom_client(new_name.strip(), b64):
+                st.session_state[session_key] = new_name.strip()
+                st.success(f"Saved: {new_name}")
+                st.rerun()
+            else:
+                st.error("Failed to save — check Supabase connection.")
+
+    return st.session_state.get(session_key, CLIENT_ORDER[0])
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
@@ -103,240 +333,39 @@ div[data-testid="stButton"]:has(button[kind="secondary"]) button {
 </style>
 """, unsafe_allow_html=True)
 
-# ── Zone definitions ──────────────────────────────────────────────────────────
-CERT_ZONES = {
-    "IGI": {
-        "short":"Lab Grown Diamond","logo_b64":IGI_B64,"ccls":"sel-igi","hbcls":"hb-igi",
-        "zones":{
-            "num_top_centre":   {"x0":360.8,"y0":34.1, "x1":420.9,"y1":43.6, "mask_ratio":0.55},
-            "num_left":         {"x0":181.8,"y0":150.1,"x1":232.5,"y1":158.1,"mask_ratio":0.55},
-            "num_left_insc":    {"x0":183.7,"y0":371.5,"x1":233.4,"y1":379.5,"mask_ratio":0.55},
-            "num_right_top":    {"x0":940.3,"y0":75.2, "x1":981.9,"y1":81.2, "mask_ratio":0.55},
-            "num_right_insc":   {"x0":933.0,"y0":355.9,"x1":981.9,"y1":361.9,"mask_ratio":0.55},
-            "num_vert_report":  {"x0":810.6,"y0":535.8,"x1":818.6,"y1":588.6,"mask_ratio":0.55,"vertical":True},
-            "num_vert_insc":    {"x0":919.5,"y0":509.4,"x1":927.4,"y1":540.1,"mask_ratio":0.55,"vertical":True},
-            "num_diamond_high": {"x0":630.0,"y0":150.0,"x1":710.0,"y1":168.0,"mask_ratio":0.55},
-            "num_diamond_low":  {"x0":622.0,"y0":308.0,"x1":700.0,"y1":326.0,"mask_ratio":0.55},
-            "qr":               {"x0":725.1,"y0":500.9,"x1":768.3,"y1":544.0},
-        }
-    },
-    "GIA": {
-        "short":"Natural Diamond","logo_b64":GIA_B64,"ccls":"sel-gia","hbcls":"hb-gia",
-        "zones":{
-            "gia1":        {"x0":367.7,"y0":47.0, "x1":431.5,"y1":59.0, "mask_ratio":0.60},
-            "gia2":        {"x0":192.8,"y0":117.9,"x1":241.6,"y1":126.9,"mask_ratio":0.60},
-            "inscription": {"x0":95.1, "y0":339.4,"x1":143.0,"y1":348.4,"mask_ratio":0.60},
-            "qr":          {"x0":698.0,"y0":504.2,"x1":752.0,"y1":558.2},
-        }
-    },
-    "GIA Colour": {
-        "short":"Coloured Diamond","logo_b64":GIA_B64,"ccls":"sel-giac","hbcls":"hb-giac",
-        "zones":{
-            "gia1":        {"x0":367.7,"y0":45.0, "x1":431.5,"y1":57.0, "mask_ratio":0.60},
-            "gia2":        {"x0":192.8,"y0":137.2,"x1":241.6,"y1":146.2,"mask_ratio":0.60},
-            "inscription": {"x0":95.1, "y0":446.9,"x1":143.0,"y1":455.9,"mask_ratio":0.60},
-            "qr":          {"x0":698.1,"y0":507.1,"x1":752.1,"y1":561.1},
-        }
-    },
-}
-
-PADDING      = 1.5
-LOGOS_DIR    = Path(__file__).parent / "logos"
-LOGOS_DIR.mkdir(exist_ok=True)
-HISTORY_FILE = Path(__file__).parent / "history.json"
-
-# One-time cleanup: remove old logo name
-_old_logo = LOGOS_DIR / "Pure Carbon Group.png"
-if _old_logo.exists():
-    _old_logo.unlink()
-
-default_logo = Path(__file__).parent / "logo_pure_carbon.png"
-if default_logo.exists() and not (LOGOS_DIR / "Pure Carbon.png").exists():
-    import shutil; shutil.copy(default_logo, LOGOS_DIR / "Pure Carbon.png")
-
-# ── Helpers ───────────────────────────────────────────────────────────────────
-def load_history():
-    if HISTORY_FILE.exists():
-        try: return json.loads(HISTORY_FILE.read_text())
-        except: return []
-    return []
-
-def save_history(h): HISTORY_FILE.write_text(json.dumps(h[-25:], indent=2))
-
-def add_history(orig, clean, ctype):
-    h = load_history()
-    h.append({"original":orig,"cleaned":clean,"type":ctype,
-               "time":datetime.datetime.now().strftime("%b %d, %H:%M")})
-    save_history(h)
-
-def redact_pdf(file_bytes, cert_type, logo_img):
-    zones = CERT_ZONES[cert_type]["zones"]
-    doc   = fitz.open(stream=file_bytes, filetype="pdf")
-    for page in doc:
-        for key, z in zones.items():
-            x0=z["x0"]-PADDING; y0=z["y0"]-PADDING
-            x1=z["x1"]+PADDING; y1=z["y1"]+PADDING
-            if key=="qr":
-                rect=fitz.Rect(x0,y0,x1,y1)
-                page.add_redact_annot(rect,fill=(1,1,1)); page.apply_redactions()
-                if logo_img:
-                    buf=io.BytesIO(); logo_img.save(buf,format="PNG"); buf.seek(0)
-                    page.insert_image(rect,stream=buf.read())
-            elif z.get("vertical"):
-                r=z.get("mask_ratio",0.55)
-                page.add_redact_annot(fitz.Rect(x0,y0,x1,y0+(y1-y0)*r),fill=(1,1,1))
-                page.apply_redactions()
-            else:
-                r=z.get("mask_ratio",0.60)
-                page.add_redact_annot(fitz.Rect(x0,y0,x0+(x1-x0)*r,y1),fill=(1,1,1))
-                page.apply_redactions()
-    out=io.BytesIO()
-    doc.save(out,garbage=4,deflate=True,clean=True)
-    doc.close(); out.seek(0)
-    return out.read()
-
-def clean_video_url(raw_url):
-    """Encode video URL the same way video.alldiamondeverything.com does."""
-    try:
-        from urllib.parse import urlparse, parse_qs
-        u = urlparse(raw_url)
-        embed = raw_url
-        if u.hostname in ("www.youtube.com","youtube.com") and u.path=="/watch":
-            vid = parse_qs(u.query).get("v",[""])[0]
-            if vid: embed = f"https://www.youtube.com/embed/{vid}?autoplay=0"
-        elif u.hostname == "youtu.be":
-            embed = f"https://www.youtube.com/embed/{u.path[1:]}?autoplay=0"
-    except: embed = raw_url
-    encoded = base64.b64encode(embed.encode()).decode()
-    return VIEWER_BASE + encoded
-
-def gen_id(n=8):
-    chars = "abcdefghijkmnpqrstuvwxyz23456789"
-    return "".join(random.choices(chars, k=n))
-
-def upload_pdf(pdf_bytes, filename):
-    url = f"{SUPABASE_URL}/storage/v1/object/certificates/{filename}"
-    r = requests.post(url, headers={
-        "apikey": SUPABASE_ANON,
-        "Authorization": f"Bearer {SUPABASE_ANON}",
-        "Content-Type": "application/pdf",
-    }, data=pdf_bytes, timeout=30)
-    if r.status_code in (200,201):
-        return f"{SUPABASE_URL}/storage/v1/object/public/certificates/{filename}"
-    return None
-
-def insert_quote(payload):
-    r = requests.post(f"{SUPABASE_URL}/rest/v1/quotes",
-        headers={
-            "apikey": SUPABASE_ANON,
-            "Authorization": f"Bearer {SUPABASE_ANON}",
-            "Content-Type": "application/json",
-            "Prefer": "return=minimal",
-        }, data=json.dumps(payload), timeout=10)
-    return r.status_code in (200,201,204)
-
-def shorten(long_url):
-    try:
-        token = st.secrets.get("BITLY_TOKEN","")
-        if not token: return long_url
-        r = requests.post("https://api-ssl.bitly.com/v4/shorten",
-            headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
-            json={"long_url":long_url,"domain":"purecarbondiamonds.tv"},timeout=5)
-        return r.json().get("link", long_url)
-    except: return long_url
-
-def get_logo_img(name):
-    b64 = CLIENT_LOGOS.get(name)
-    if b64:
-        import base64 as _b64
-        return Image.open(io.BytesIO(_b64.b64decode(b64))).convert("RGBA")
-    # Fallback to file
-    for ext in [".png",".jpg"]:
-        p = LOGOS_DIR / f"{name}{ext}"
-        if p.exists(): return Image.open(p).convert("RGBA")
-    return None
-
 # ── Session state ─────────────────────────────────────────────────────────────
-for k,v in [("cert_type","IGI"),("sel_logo","Pure Carbon"),
-             ("upkey",0),("results",None),("quote_link",None)]:
+for k,v in [("cert_type","IGI"),("sel_logo","Pure Carbon"),("upkey",0),
+             ("results",None),("quote_link",None),("quote_upkey",0)]:
     if k not in st.session_state: st.session_state[k]=v
 
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="pcg-header">
-  <img class="pcg-logo" src="data:image/png;base64,{PCG_B64}"/>
+  <img class="pcg-logo" src="data:image/png;base64,{CLIENT_Pure_Carbon_B64}"/>
   <div>
     <div class="pcg-title">Diamond Tools</div>
     <div class="pcg-sub">Pure Carbon Group</div>
   </div>
 </div>""", unsafe_allow_html=True)
 
-# ── Tabs ──────────────────────────────────────────────────────────────────────
-tab1, tab2 = st.tabs(["  💎  Redact certificate  ", "  🔗  Create quote  "])
+tab1, tab2 = st.tabs(["  \U0001f48e  Redact certificate  ", "  \U0001f517  Create quote  "])
 
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
 # TAB 1 — REDACT ONLY
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
 with tab1:
     st.markdown('<div class="section-label">Certificate type</div>', unsafe_allow_html=True)
-
-    cols = st.columns(3)
-    for i,(key,cfg) in enumerate(CERT_ZONES.items()):
-        with cols[i]:
-            active = st.session_state.cert_type==key
-            border_col = '#2563a8' if key=='IGI' else '#B8963E' if key=='GIA' else '#4a7a56'
-            border = f"2px solid {border_col}" if active else "1px solid rgba(128,128,128,0.2)"
-            bg = f"{'rgba(37,99,168,0.08)' if key=='IGI' else 'rgba(184,150,62,0.08)' if key=='GIA' else 'rgba(74,122,86,0.08)'}" if active else "rgba(255,255,255,0.02)"
-            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:6px;">✓ SELECTED</div>' if active else '<div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.06em;margin-top:6px;">tap to select</div>'
-            st.markdown(f'''<div style="border-radius:12px;padding:16px 8px 12px;text-align:center;border:{border};background:{bg};">
-              <img style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin:0 auto 8px;display:block;" src="data:image/png;base64,{cfg["logo_b64"]}"/>
-              <div style="font-size:13px;font-weight:600;margin-bottom:1px;">{key}</div>
-              <div style="font-size:10px;opacity:0.35;">{cfg["short"]}</div>
-              {check}
-            </div>''', unsafe_allow_html=True)
-            # Invisible full-width button overlaid — clicking anywhere triggers it
-            if st.button("​", key=f"c_{key}", use_container_width=True):
-                st.session_state.cert_type=key; st.session_state.results=None
-                st.session_state.upkey+=1; st.rerun()
-
+    cert_selector("t1")
     cert_type = st.session_state.cert_type
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
     st.markdown('<div class="section-label">Logo for QR replacement</div>', unsafe_allow_html=True)
-    # logos loaded from embedded CLIENT_LOGOS
-
-    lcols = st.columns(min(len(CLIENT_ORDER),4))
-    for i,name in enumerate(CLIENT_ORDER):
-        with lcols[i%4]:
-            sel = st.session_state.sel_logo==name
-            safe = name.replace(" ","_").replace("&","and")
-            b64 = CLIENT_LOGOS.get(name,"")
-            border_col = "#c9a84c"
-            border = f"2px solid {border_col}" if sel else "1px solid rgba(128,128,128,0.2)"
-            bg = "rgba(201,168,76,0.08)" if sel else "rgba(255,255,255,0.02)"
-            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:4px;">✓ SELECTED</div>' if sel else '<div style="font-size:10px;color:rgba(255,255,255,0.2);margin-top:4px;">tap to select</div>'
-            st.markdown(f'''<div style="border-radius:10px;padding:12px 8px 8px;text-align:center;border:{border};background:{bg};">
-              <img style="width:44px;height:44px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" src="data:image/png;base64,{b64}"/>
-              <div style="font-size:11px;font-weight:600;">{name}</div>
-              {check}
-            </div>''', unsafe_allow_html=True)
-            if st.button("​", key=f"l_{name}", use_container_width=True):
-                st.session_state.sel_logo=name; st.rerun()
-
-    with st.expander("➕  Add a new client logo"):
-        new_name = st.text_input("Client name", placeholder="e.g. Vendor ABC", key="new_name_t1")
-        new_file = st.file_uploader("Logo image", type=["png","jpg","jpeg","webp"], key="nl_t1")
-        if st.button("Save", key="save_logo_t1") and new_name and new_file:
-            img=Image.open(new_file).convert("RGBA")
-            img.save(LOGOS_DIR/f"{new_name.strip()}.png")
-            st.session_state.sel_logo=new_name.strip()
-            st.success(f"Saved: {new_name}"); st.rerun()
-
-    logo_img = get_logo_img(st.session_state.sel_logo)
+    sel_logo = client_selector("t1_logo", "sel_logo")
+    logo_img = get_logo_img(sel_logo)
     if logo_img:
-        c1,c2=st.columns([1,6])
+        c1,c2 = st.columns([1,6])
         with c1: st.image(logo_img, width=44)
-        with c2: st.caption(f"Using **{st.session_state.sel_logo}**")
+        with c2: st.caption(f"Using **{sel_logo}**")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown(f'<div class="section-label">Upload {cert_type} certificates</div>', unsafe_allow_html=True)
@@ -347,148 +376,123 @@ with tab1:
 
     if uploaded:
         st.write(f"**{len(uploaded)} file(s) ready**")
-        if st.button("▶  Redact all", type="primary", use_container_width=True):
+        if st.button("▶  Redact all", type="primary", use_container_width=True, key="redact_btn"):
             results={}; prog=st.progress(0); status=st.empty()
             for i,f in enumerate(uploaded):
                 status.text(f"Processing {f.name} …")
                 try:
-                    out=redact_pdf(f.read(), cert_type, logo_img)
-                    last4="".join(filter(str.isdigit,Path(f.name).stem))[-4:]
-                    name=f"{last4}.pdf"
-                    results[name]=out
-                    add_history(f.name, name, cert_type)
+                    out = redact_pdf(f.read(), cert_type, logo_img)
+                    last4 = "".join(filter(str.isdigit, Path(f.name).stem))[-4:]
+                    name = f"{last4}.pdf"
+                    results[name] = out
+                    add_history(f.name, name, cert_type, sel_logo)
                 except Exception as e:
                     st.error(f"Error on {f.name}: {e}")
                 prog.progress((i+1)/len(uploaded))
             status.empty(); prog.empty()
-            st.session_state.results=results; st.session_state.upkey+=1; st.rerun()
+            st.session_state.results = results
+            st.session_state.upkey += 1
+            st.rerun()
 
     if st.session_state.results:
-        res=st.session_state.results
+        res = st.session_state.results
         st.success(f"✅  {len(res)} certificate(s) redacted")
         if len(res)==1:
-            name,data=next(iter(res.items()))
-            st.download_button(f"⬇  Download  {name}",data,name,"application/pdf",use_container_width=True)
+            name,data = next(iter(res.items()))
+            st.download_button(f"⬇  Download  {name}", data, name, "application/pdf", use_container_width=True)
         else:
-            zb=io.BytesIO()
+            zb = io.BytesIO()
             with zipfile.ZipFile(zb,"w",zipfile.ZIP_DEFLATED) as zf:
                 [zf.writestr(n,d) for n,d in res.items()]
             st.download_button(f"⬇  Download all ({len(res)}) as ZIP",
                 zb.getvalue(),"redacted_certificates.zip","application/zip",use_container_width=True)
-        if st.button("Clear & redact more", use_container_width=True):
+        if st.button("Clear & redact more", use_container_width=True, key="clear_results"):
             st.session_state.results=None; st.rerun()
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-    history=load_history()
-    hc1,hc2=st.columns([4,1])
-    with hc1: st.markdown('<div class="section-label" style="margin-bottom:0">Recent files</div>',unsafe_allow_html=True)
+    # ── History ───────────────────────────────────────────────────────────────
+    hc1,hc2 = st.columns([4,1])
+    with hc1: st.markdown('<div class="section-label" style="margin-bottom:0">Recent files</div>', unsafe_allow_html=True)
+
+    try:
+        history = load_history()
+    except:
+        history = []
+
     with hc2:
         if history and st.button("Clear", use_container_width=True, key="clr_hist"):
-            save_history([]); st.rerun()
+            try:
+                sb_delete("redact_history", "id=gt.0")
+            except:
+                pass
+            st.rerun()
 
-    badge_map={"GIA":"hb-gia","GIA Colour":"hb-giac","IGI":"hb-igi"}
+    badge_map = {"IGI":"hb-igi","GIA":"hb-gia","GIA Colour":"hb-giac"}
     if history:
-        for entry in reversed(history[-25:]):
-            bcls=badge_map.get(entry["type"],"hb-gia")
+        for entry in history:
+            bcls = badge_map.get(entry.get("cert_type",""), "hb-gia")
+            client_str = f" · {entry['client']}" if entry.get("client") else ""
+            time_str = ""
+            if entry.get("created_at"):
+                try:
+                    dt = datetime.datetime.fromisoformat(entry["created_at"].replace("Z",""))
+                    time_str = dt.strftime("%b %d, %H:%M")
+                except: pass
             st.markdown(f"""<div class="history-row">
-              <div><div class="h-orig">{entry["original"]}</div>
-              <div class="h-clean">&#8594; {entry["cleaned"]}</div></div>
-              <div class="h-meta"><span class="h-badge {bcls}">{entry["type"]}</span><br>{entry["time"]}</div>
+              <div>
+                <div class="h-orig">{entry.get("original","")}</div>
+                <div class="h-clean">&#8594; {entry.get("cleaned","")}</div>
+              </div>
+              <div class="h-meta">
+                <span class="h-badge {bcls}">{entry.get("cert_type","")}</span>{client_str}<br>{time_str}
+              </div>
             </div>""", unsafe_allow_html=True)
     else:
         st.caption("No files processed yet.")
 
-# ═══════════════════════════════════════════════════════
-# TAB 2 — CREATE QUOTE (redact + clean video + publish)
-# ═══════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════
+# TAB 2 — CREATE QUOTE
+# ═══════════════════════════════════════════════════
 with tab2:
     st.markdown('<div class="section-label">Certificate type</div>', unsafe_allow_html=True)
-
-    cols2 = st.columns(3)
-    for i,(key,cfg) in enumerate(CERT_ZONES.items()):
-        with cols2[i]:
-            active = st.session_state.cert_type==key
-            border_col = '#2563a8' if key=='IGI' else '#B8963E' if key=='GIA' else '#4a7a56'
-            border = f"2px solid {border_col}" if active else "1px solid rgba(128,128,128,0.2)"
-            bg = f"{'rgba(37,99,168,0.08)' if key=='IGI' else 'rgba(184,150,62,0.08)' if key=='GIA' else 'rgba(74,122,86,0.08)'}" if active else "rgba(255,255,255,0.02)"
-            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:6px;">✓ SELECTED</div>' if active else '<div style="font-size:10px;color:rgba(255,255,255,0.2);letter-spacing:0.06em;margin-top:6px;">tap to select</div>'
-            st.markdown(f'''<div style="border-radius:12px;padding:16px 8px 12px;text-align:center;border:{border};background:{bg};">
-              <img style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin:0 auto 8px;display:block;" src="data:image/png;base64,{cfg["logo_b64"]}"/>
-              <div style="font-size:13px;font-weight:600;margin-bottom:1px;">{key}</div>
-              <div style="font-size:10px;opacity:0.35;">{cfg["short"]}</div>
-              {check}
-            </div>''', unsafe_allow_html=True)
-            if st.button("​", key=f"qc_{key}", use_container_width=True):
-                st.session_state.cert_type=key; st.rerun()
-
+    cert_selector("t2")
+    cert_type_q = st.session_state.cert_type
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-    # Client selector
     st.markdown('<div class="section-label">Client</div>', unsafe_allow_html=True)
-    # clients loaded from embedded CLIENT_LOGOS
-
-    client_cols = st.columns(min(len(CLIENT_ORDER),4))
-    for i,name in enumerate(CLIENT_ORDER):
-        with client_cols[i%4]:
-            sel = st.session_state.get("q_client_sel", CLIENT_ORDER[0])==name
-            b64 = CLIENT_LOGOS.get(name,"")
-            border_col = "#c9a84c"
-            border = f"2px solid {border_col}" if sel else "1px solid rgba(128,128,128,0.2)"
-            bg = "rgba(201,168,76,0.08)" if sel else "rgba(255,255,255,0.02)"
-            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:4px;">✓ SELECTED</div>' if sel else '<div style="font-size:10px;color:rgba(255,255,255,0.2);margin-top:4px;">tap to select</div>'
-            st.markdown(f'''<div style="border-radius:10px;padding:12px 8px 8px;text-align:center;border:{border};background:{bg};">
-              <img style="width:44px;height:44px;border-radius:50%;object-fit:cover;margin:0 auto 6px;display:block;" src="data:image/png;base64,{b64}"/>
-              <div style="font-size:11px;font-weight:600;">{name}</div>
-              {check}
-            </div>''', unsafe_allow_html=True)
-            if st.button("​", key=f"qcl_{name}", use_container_width=True):
-                st.session_state.q_client_sel=name; st.rerun()
-
-    with st.expander("➕  Add a new client"):
-        new_client_name = st.text_input("Client name", placeholder="e.g. Vendor ABC", key="new_client_name")
-        new_client_logo = st.file_uploader("Client logo", type=["png","jpg","jpeg","webp"], key="new_client_logo")
-        if st.button("Save client", key="save_client") and new_client_name and new_client_logo:
-            img=Image.open(new_client_logo).convert("RGBA")
-            img.save(LOGOS_DIR/f"{new_client_name.strip()}.png")
-            st.session_state.q_client_sel=new_client_name.strip()
-            st.success(f"Saved: {new_client_name}"); st.rerun()
-
-    q_client = st.session_state.get("q_client_sel", CLIENT_ORDER[0])
+    q_client = client_selector("t2_client", "q_client_sel")
     client_logo = get_logo_img(q_client)
     if client_logo:
-        c1,c2=st.columns([1,6])
+        c1,c2 = st.columns([1,6])
         with c1: st.image(client_logo, width=44)
-        with c2: st.caption(f"Quoting for **{q_client}** — their logo will appear on the QR code and quote page")
+        with c2: st.caption(f"Quoting for **{q_client}** — their logo will appear on QR code and quote page")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
-    # Currency and expiry
-    col_a, col_b = st.columns(2)
-    with col_a: q_currency = st.radio("Currency", ["USD","CAD"], horizontal=True, key="q_cur")
+    col_a,col_b = st.columns(2)
+    with col_a: q_currency = st.radio("Currency", ["CAD","USD"], horizontal=True, key="q_cur")
     with col_b: q_expiry   = st.slider("Link expires (days)", 7, 60, 30, key="q_exp")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Diamonds — up to 3</div>', unsafe_allow_html=True)
 
     stones_ready = []
-    cert_type_q = st.session_state.cert_type
-
     for i in range(3):
         with st.expander(f"Diamond {i+1}", expanded=(i==0)):
-            q_pdf   = st.file_uploader("Raw certificate PDF (will be redacted automatically)", type="pdf", key=f"qpdf_{i}")
-            q_vid   = st.text_input("Raw video URL (will be cleaned automatically)", placeholder="https://...", key=f"qvid_{i}")
-            q_price = st.number_input("Your price (numbers only)", min_value=0, step=1, key=f"qpri_{i}", format="%d")
-            q_type  = st.radio("Price type", ["Stone price","Price per carat"], horizontal=True, key=f"qtyp_{i}")
-            if q_pdf and q_vid and q_price:
+            q_pdf   = st.file_uploader("Raw certificate PDF (auto-redacted)", type="pdf", key=f"qpdf_{i}_{st.session_state.quote_upkey}")
+            q_vid   = st.text_input("Raw video URL (auto-cleaned)", placeholder="https://...", key=f"qvid_{i}_{st.session_state.quote_upkey}")
+            q_price = st.number_input("Your price (numbers only)", min_value=0, step=1, key=f"qpri_{i}_{st.session_state.quote_upkey}", format="%d")
+            q_type  = st.radio("Price type", ["Stone price","Price per carat"], horizontal=True, key=f"qtyp_{i}_{st.session_state.quote_upkey}")
+            if q_pdf and q_vid and q_price > 0:
                 stones_ready.append({
                     "file":       q_pdf,
                     "video_url":  q_vid,
-                    "price":      q_price,
+                    "price":      str(int(q_price)),
                     "price_type": "ppc" if "carat" in q_type else "stone",
                     "cert_last4": "".join(filter(str.isdigit, Path(q_pdf.name).stem))[-4:],
                 })
-                st.success(f"✓ Diamond {i+1} ready")
+                st.success(f"✓ Diamond {i+1} ready — cert ···{stones_ready[-1]['cert_last4']}")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
@@ -497,24 +501,17 @@ with tab2:
                  disabled=len(stones_ready)==0):
         with st.spinner(f"Processing {len(stones_ready)} diamond(s)…"):
             stones_payload=[]; ok=True
-
             for s in stones_ready:
-                # 1. Redact PDF with client logo on QR
                 try:
                     raw_bytes = s["file"].read()
                     redacted  = redact_pdf(raw_bytes, cert_type_q, client_logo)
                 except Exception as e:
                     st.error(f"Redaction failed for ···{s['cert_last4']}: {e}"); ok=False; break
-
-                # 2. Upload redacted PDF to Supabase
                 fname   = f"{gen_id(6)}_{s['cert_last4']}.pdf"
                 pdf_url = upload_pdf(redacted, fname)
                 if not pdf_url:
                     st.error(f"Upload failed for ···{s['cert_last4']}"); ok=False; break
-
-                # 3. Clean video URL
                 cleaned_video = clean_video_url(s["video_url"])
-
                 stones_payload.append({
                     "cert_last4": s["cert_last4"],
                     "video_url":  cleaned_video,
@@ -523,17 +520,24 @@ with tab2:
                     "currency":   q_currency,
                     "price_type": s["price_type"],
                 })
-
             if ok:
                 qid  = gen_id()
                 exp  = (datetime.datetime.utcnow()+datetime.timedelta(days=q_expiry)).isoformat()+"Z"
                 body = {"id":qid,"client":q_client,"stones":stones_payload,"expires_at":exp}
-                if insert_quote(body):
+                if sb_insert("quotes", body):
                     long_url = f"{QUOTE_BASE}/q/{qid}"
                     link     = shorten(long_url)
                     st.session_state.quote_link = link
+                    # Add to history
+                    add_history(
+                        f"{len(stones_payload)} diamond(s)",
+                        link,
+                        cert_type_q,
+                        q_client
+                    )
                     st.success("✅ Quote created!")
-                    st.session_state.copy_link = link
+                    # Reset uploaders
+                    st.session_state.quote_upkey += 1
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
 
@@ -543,7 +547,49 @@ with tab2:
           <div class="link-label">Quote link — copy and send to {q_client}</div>
           <div class="link-url">{link}</div>
         </div>""", unsafe_allow_html=True)
-        st.caption("👆 Click the copy icon on the right to copy your link")
+        st.caption("👆 Click the copy icon on the right")
         st.code(link, language=None)
         if st.button("Clear", key="clr_quote", use_container_width=True):
             st.session_state.quote_link=None; st.rerun()
+
+    # ── Quote history ─────────────────────────────────────────────────────────
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+    qhc1,qhc2 = st.columns([4,1])
+    with qhc1: st.markdown('<div class="section-label" style="margin-bottom:0">Quote history</div>', unsafe_allow_html=True)
+
+    try:
+        qhistory = load_quote_history()
+    except:
+        qhistory = []
+
+    if qhistory:
+        for q in qhistory:
+            exp_str = ""
+            if q.get("expires_at"):
+                try:
+                    exp_dt = datetime.datetime.fromisoformat(q["expires_at"].replace("Z",""))
+                    expired = exp_dt < datetime.datetime.utcnow()
+                    exp_str = f"Expired" if expired else exp_dt.strftime("Exp %b %d")
+                except: pass
+            stones = q.get("stones",[])
+            n = len(stones) if isinstance(stones, list) else 0
+            last4s = ", ".join(f"···{s.get('cert_last4','')}" for s in (stones if isinstance(stones,list) else []))
+            created = ""
+            if q.get("created_at"):
+                try:
+                    dt = datetime.datetime.fromisoformat(q["created_at"].replace("Z",""))
+                    created = dt.strftime("%b %d, %H:%M")
+                except: pass
+            long_url = f"{QUOTE_BASE}/q/{q['id']}"
+            short = shorten(long_url) if False else long_url  # don't re-shorten, use stored
+
+            # Check if we have a stored short link — we don't currently, use long
+            st.markdown(f"""<div class="history-row">
+              <div>
+                <div class="h-orig">{q.get("client","")} · {n} diamond(s) · {last4s}</div>
+                <div class="h-clean" style="font-size:11px;">{long_url}</div>
+              </div>
+              <div class="h-meta">{created}<br>{exp_str}</div>
+            </div>""", unsafe_allow_html=True)
+    else:
+        st.caption("No quotes created yet.")
