@@ -18,7 +18,7 @@
     #error h2 { font-size: 18px; font-weight: 500; }
     #error p { font-size: 13px; color: #555; max-width: 300px; line-height: 1.6; }
 
-    .page { max-width: 640px; margin: 0 auto; padding: 40px 20px 80px; }
+    .page { max-width: 780px; margin: 0 auto; padding: 40px 20px 80px; }
 
     .header { display: flex; align-items: center; gap: 12px; margin-bottom: 32px; padding-bottom: 20px; border-bottom: 1px solid #161616; }
     .header-logo { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; }
@@ -27,18 +27,33 @@
     .quote-title { font-size: 22px; font-weight: 500; margin-bottom: 4px; }
     .quote-sub { font-size: 13px; color: #444; margin-bottom: 32px; }
 
-    .stones { display: flex; flex-direction: column; gap: 32px; }
+    .stones { display: flex; flex-direction: column; gap: 40px; }
     .stone-card { background: #0f0f0f; border: 1px solid #1a1a1a; border-radius: 14px; overflow: hidden; }
     .stone-header { padding: 16px 20px 12px; border-bottom: 1px solid #141414; display: flex; align-items: center; justify-content: space-between; }
     .stone-num { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #444; }
     .stone-id { font-size: 12px; font-family: monospace; color: #333; }
-    .video-wrap iframe { width: 100%; height: 360px; border: none; display: block; background: #080808; }
+
+    /* Large video */
+    .video-wrap { width: 100%; background: #080808; }
+    .video-wrap iframe { width: 100%; height: 520px; border: none; display: block; }
+
+    /* PDF preview */
+    .pdf-preview-wrap { padding: 16px 20px 0; }
+    .pdf-preview-label { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #444; margin-bottom: 10px; }
+    .pdf-preview-frame { width: 100%; height: 480px; border: 1px solid #1e1e1e; border-radius: 8px; background: #111; cursor: pointer; }
+
     .stone-info { padding: 16px 20px 20px; }
 
-    .price-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
-    .price-value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
-    .price-currency { font-size: 13px; color: #555; }
-    .price-type { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #444; padding: 3px 8px; background: #141414; border-radius: 4px; border: 1px solid #1e1e1e; }
+    .price-row { display: flex; align-items: baseline; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
+    .price-value { font-size: 28px; font-weight: 800; letter-spacing: -0.02em; }
+    .price-value.usd { color: #4a9eff; }
+    .price-value.cad { color: #ff4a4a; }
+    .price-currency { font-size: 13px; font-weight: 700; }
+    .price-currency.usd { color: #4a9eff; }
+    .price-currency.cad { color: #ff4a4a; }
+    .price-type { font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; padding: 3px 8px; background: #141414; border-radius: 4px; border: 1px solid #1e1e1e; }
+    .price-type.usd { color: #4a9eff; border-color: #1a2a3e; background: #0a1520; }
+    .price-type.cad { color: #ff4a4a; border-color: #3e1a1a; background: #200a0a; }
 
     .stone-actions { display: flex; gap: 8px; margin-top: 14px; }
     .btn { padding: 9px 16px; border-radius: 8px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.15s; border: none; font-family: inherit; }
@@ -127,7 +142,8 @@ function formatPrice(stone) {
   const sym = stone.currency === 'CAD' ? 'CA$' : '$';
   const num = Number(stone.price).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
   const label = stone.price_type === 'ppc' ? 'Price per carat' : 'Stone price';
-  return { formatted: sym + num, label, currency: stone.currency };
+  const cls = stone.currency === 'CAD' ? 'cad' : 'usd';
+  return { formatted: sym + num, label, currency: stone.currency, cls };
 }
 
 function copyText(text, btn, label) {
@@ -135,8 +151,10 @@ function copyText(text, btn, label) {
   ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
   document.body.appendChild(ta); ta.focus(); ta.select();
   document.execCommand('copy'); document.body.removeChild(ta);
-  btn.textContent = 'Copied!'; btn.classList.add('copied');
-  setTimeout(() => { btn.textContent = label; btn.classList.remove('copied'); }, 2000);
+  if (btn) {
+    btn.textContent = 'Copied!'; btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = label; btn.classList.remove('copied'); }, 2000);
+  }
 }
 
 function copyShare() {
@@ -169,6 +187,12 @@ async function generateShare() {
     shareLink = data.link;
     document.getElementById('share-url').textContent = shareLink;
     document.getElementById('share-result').style.display = 'block';
+    // Auto-copy to clipboard
+    copyText(shareLink, null, '');
+    const copyBtn = document.getElementById('btn-copy-share');
+    copyBtn.textContent = 'Copied to clipboard!';
+    copyBtn.classList.add('copied');
+    setTimeout(() => { copyBtn.textContent = 'Copy link'; copyBtn.classList.remove('copied'); }, 3000);
   } catch(e) {
     alert('Error generating link. Please try again.');
   }
@@ -210,7 +234,7 @@ function render(q) {
   const retailInputs = document.getElementById('retail-inputs');
 
   q.stones.forEach((stone, i) => {
-    const { formatted, label, currency } = formatPrice(stone);
+    const { formatted, label, currency, cls } = formatPrice(stone);
     const card = document.createElement('div');
     card.className = 'stone-card';
     card.innerHTML = `
@@ -221,14 +245,19 @@ function render(q) {
       <div class="video-wrap">
         <iframe src="${stone.video_url}" allowfullscreen allow="autoplay"></iframe>
       </div>
+      <div class="pdf-preview-wrap">
+        <div class="pdf-preview-label">Certificate</div>
+        <iframe class="pdf-preview-frame" src="${stone.pdf_url}#toolbar=0&navpanes=0&scrollbar=0"
+          onclick="window.open('${stone.pdf_url}','_blank')"></iframe>
+      </div>
       <div class="stone-info">
         <div class="price-row">
-          <span class="price-value">${formatted}</span>
-          <span class="price-currency">${currency}</span>
-          <span class="price-type">${label}</span>
+          <span class="price-value ${cls}">${formatted}</span>
+          <span class="price-currency ${cls}">${currency}</span>
+          <span class="price-type ${cls}">${label}</span>
         </div>
         <div class="stone-actions">
-          <button class="btn btn-primary" onclick="window.open('${stone.pdf_url}','_blank')">View certificate</button>
+          <button class="btn btn-primary" onclick="window.open('${stone.pdf_url}','_blank')">Open certificate</button>
           <button class="btn btn-secondary" id="cpv-${i}" onclick="copyVideoLink(${i},'${stone.video_url}')">Copy video link</button>
         </div>
       </div>`;
@@ -238,7 +267,7 @@ function render(q) {
     row.className = 'retail-row';
     row.innerHTML = `
       <span class="retail-label">Diamond ${i + 1}</span>
-      <input class="retail-input" id="retail-${i}" type="text" placeholder="Optional retail price" />`;
+      <input class="retail-input" id="retail-${i}" type="number" min="0" step="1" placeholder="Optional retail price (numbers only)" />`;
     retailInputs.appendChild(row);
   });
 
