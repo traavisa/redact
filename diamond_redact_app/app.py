@@ -547,8 +547,31 @@ with tab2:
           <div class="link-label">Quote link — ready to send</div>
           <div class="link-url">{_qlink}</div>
         </div>""", unsafe_allow_html=True)
-        st.caption("👆 Click the copy icon on the right to copy")
-        st.code(_qlink, language=None)
+        # Use JS component to copy — works on Streamlit Cloud
+        copy_html = f"""
+        <div style="margin-top:8px;">
+          <button onclick="
+            navigator.clipboard.writeText('{_qlink}').then(()=>{{
+              this.textContent='✓ Copied!';
+              this.style.background='#0d2a1a';
+              this.style.color='#4caf80';
+              this.style.borderColor='#1a4a2a';
+              setTimeout(()=>{{this.textContent='Copy link';this.style.background='';this.style.color='';this.style.borderColor='';}},2000);
+            }}).catch(()=>{{
+              const ta=document.createElement('textarea');
+              ta.value='{_qlink}';ta.style.position='fixed';ta.style.opacity='0';
+              document.body.appendChild(ta);ta.focus();ta.select();
+              document.execCommand('copy');document.body.removeChild(ta);
+              this.textContent='✓ Copied!';
+              setTimeout(()=>{{this.textContent='Copy link';}},2000);
+            }});
+          " style="width:100%;padding:10px;background:#1a1a1a;color:#fff;border:1px solid #333;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;font-family:sans-serif;">
+            Copy link
+          </button>
+        </div>
+        """
+        import streamlit.components.v1 as components
+        components.html(copy_html, height=60)
         if st.button("Clear", key="clr_quote", use_container_width=True):
             st.session_state.quote_link = None
             st.rerun()
