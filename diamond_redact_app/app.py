@@ -454,7 +454,7 @@ with tab2:
             st.session_state.q_client_sel=new_client_name.strip()
             st.success(f"Saved: {new_client_name}"); st.rerun()
 
-    q_client = st.session_state.get("q_client_sel", all_clients[0] if all_clients else "Pure Carbon")
+    q_client = st.session_state.get("q_client_sel", CLIENT_ORDER[0])
     client_logo = get_logo_img(q_client)
     if client_logo:
         c1,c2=st.columns([1,6])
