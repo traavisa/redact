@@ -434,7 +434,7 @@ with tab2:
         with st.expander(f"Diamond {i+1}", expanded=(i==0)):
             q_pdf   = st.file_uploader("Raw certificate PDF (will be redacted automatically)", type="pdf", key=f"qpdf_{i}")
             q_vid   = st.text_input("Raw video URL (will be cleaned automatically)", placeholder="https://...", key=f"qvid_{i}")
-            q_price = st.text_input("Your price", placeholder="e.g. 12500", key=f"qpri_{i}")
+            q_price = st.number_input("Your price (numbers only)", min_value=0, step=1, key=f"qpri_{i}", format="%d")
             q_type  = st.radio("Price type", ["Stone price","Price per carat"], horizontal=True, key=f"qtyp_{i}")
             if q_pdf and q_vid and q_price:
                 stones_ready.append({
