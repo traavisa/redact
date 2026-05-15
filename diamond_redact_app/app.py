@@ -540,16 +540,18 @@ with tab2:
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
 
-    if st.session_state.quote_link:
-        link = st.session_state.quote_link
+    # ── Quote link display ───────────────────────────────────────────────────
+    _qlink = st.session_state.get("quote_link")
+    if _qlink:
         st.markdown(f"""<div class="link-box">
-          <div class="link-label">Quote link — copy and send to {q_client}</div>
-          <div class="link-url">{link}</div>
+          <div class="link-label">Quote link — ready to send</div>
+          <div class="link-url">{_qlink}</div>
         </div>""", unsafe_allow_html=True)
-        st.caption("👆 Click the copy icon on the right")
-        st.code(link, language=None)
+        st.caption("👆 Click the copy icon on the right to copy")
+        st.code(_qlink, language=None)
         if st.button("Clear", key="clr_quote", use_container_width=True):
-            st.session_state.quote_link=None; st.rerun()
+            st.session_state.quote_link = None
+            st.rerun()
 
     # ── Quote history ─────────────────────────────────────────────────────────
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
