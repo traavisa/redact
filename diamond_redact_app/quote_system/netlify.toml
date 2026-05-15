@@ -1,0 +1,12 @@
+[build]
+  functions = "netlify/functions"
+
+[[redirects]]
+  from = "/q/*"
+  to = "/quote.html"
+  status = 200
+
+[[redirects]]
+  from = "/s/*"
+  to = "/share.html"
+  status = 200
