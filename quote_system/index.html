@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>All Diamond Everything — Tools</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { width: 100%; height: 100%; background: #0a0a0a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; }
+
+    /* ---- Viewer mode ---- */
+    #loading { position: fixed; inset: 0; background: #0a0a0a; display: flex; align-items: center; justify-content: center; transition: opacity 0.4s; }
+    #loading.hidden { opacity: 0; pointer-events: none; }
+    .spinner { width: 32px; height: 32px; border: 2px solid #333; border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* ---- Landing mode ---- */
+    #landing { display: none; position: fixed; inset: 0; background: #0a0a0a; overflow-y: auto; }
+    #landing.visible { display: block; }
+
+    .page { max-width: 520px; margin: 0 auto; padding: 48px 24px 60px; }
+
+    .brand { font-size: 11px; font-weight: 600; color: #444; letter-spacing: 0.1em; text-transform: uppercase; margin-bottom: 36px; }
+
+    .page-title { font-size: 24px; font-weight: 500; color: #fff; margin-bottom: 6px; }
+    .page-sub { font-size: 14px; color: #555; margin-bottom: 36px; line-height: 1.6; }
+
+    /* ---- Link generator ---- */
+    .section-label { font-size: 11px; font-weight: 600; color: #444; letter-spacing: 0.08em; text-transform: uppercase; margin-bottom: 12px; }
+
+    .input-row { display: flex; gap: 8px; margin-bottom: 10px; }
+    #url-input {
+      flex: 1; padding: 11px 14px; background: #141414; border: 1px solid #222;
+      border-radius: 8px; color: #fff; font-size: 13px; font-family: inherit;
+      outline: none; transition: border-color 0.15s;
+    }
+    #url-input::placeholder { color: #3a3a3a; }
+    #url-input:focus { border-color: #333; }
+
+    .btn-go { padding: 11px 20px; background: #fff; color: #0a0a0a; border: none; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; white-space: nowrap; transition: opacity 0.15s; }
+    .btn-go:hover { opacity: 0.85; }
+
+    .result-box { display: none; background: #111; border: 1px solid #1e1e1e; border-radius: 8px; padding: 12px 14px; margin-bottom: 6px; }
+    .result-label { font-size: 11px; color: #444; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px; }
+    .result-url { font-size: 12px; color: #666; word-break: break-all; line-height: 1.5; margin-bottom: 10px; }
+    .btn-copy { width: 100%; padding: 9px; background: #1a1a1a; border: 1px solid #252525; border-radius: 6px; color: #fff; font-size: 13px; font-weight: 500; cursor: pointer; transition: background 0.15s; }
+    .btn-copy:hover { background: #222; }
+    .btn-copy.copied { background: #0d2a1a; border-color: #1a4a2a; color: #4caf80; }
+    .btn-open { width: 100%; padding: 8px; background: transparent; border: 1px solid #181818; border-radius: 6px; color: #444; font-size: 12px; cursor: pointer; margin-top: 6px; transition: color 0.15s; }
+    .btn-open:hover { color: #666; }
+    .input-error { font-size: 12px; color: #c0392b; margin-top: 6px; display: none; }
+
+    /* ---- Divider ---- */
+    .divider { border: none; border-top: 1px solid #161616; margin: 32px 0; }
+
+    /* ---- Tool cards ---- */
+    .tools-grid { display: flex; flex-direction: column; gap: 10px; }
+
+    .tool-card {
+      display: flex; align-items: center; gap: 14px;
+      background: #111; border: 1px solid #1c1c1c; border-radius: 10px;
+      padding: 14px 16px; text-decoration: none;
+      transition: border-color 0.15s, background 0.15s;
+      cursor: pointer;
+    }
+    .tool-card:hover { background: #141414; border-color: #282828; }
+
+    .tool-badge {
+      flex-shrink: 0; width: 40px; height: 40px; border-radius: 8px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 800; letter-spacing: 0.02em;
+    }
+    .badge-gia { background: #1a1a2e; color: #6b8cff; border: 1px solid #252545; }
+    .badge-igi { background: #1a1a1a; color: #e8c97a; border: 1px solid #2a2a1a; }
+
+    .tool-info { flex: 1; min-width: 0; }
+    .tool-name { font-size: 14px; font-weight: 500; color: #ddd; margin-bottom: 2px; }
+    .tool-desc { font-size: 12px; color: #555; }
+
+    .rainbow {
+      background: linear-gradient(90deg, #ff6b6b, #ffa500, #ffd700, #51cf66, #339af0, #cc5de8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+      font-weight: 600;
+    }
+
+    .arrow { color: #333; font-size: 16px; flex-shrink: 0; }
+    .tool-card:hover .arrow { color: #555; }
+
+    #brand { position: fixed; bottom: 12px; right: 16px; font-size: 11px; color: rgba(255,255,255,0.08); letter-spacing: 0.08em; text-transform: uppercase; pointer-events: none; user-select: none; }
+
+    #error-screen { display: none; position: fixed; inset: 0; background: #0a0a0a; color: #fff; flex-direction: column; align-items: center; justify-content: center; gap: 16px; text-align: center; padding: 2rem; }
+    #error-screen.visible { display: flex; }
+    #error-screen h2 { font-size: 20px; font-weight: 500; }
+    #error-screen p { font-size: 14px; color: #555; max-width: 340px; line-height: 1.6; }
+
+    /* ---- Password screen ---- */
+    #password-screen {
+      display: none;
+      position: fixed; inset: 0;
+      background: #0a0a0a;
+      align-items: center;
+      justify-content: center;
+    }
+    #password-screen.visible { display: flex; }
+    .pw-inner {
+      display: flex;
+      align-items: center;
+      gap: 0;
+    }
+    .pw-logo {
+      width: 52px; height: 52px;
+      opacity: 0.5;
+      border-radius: 6px;
+    }
+    .pw-input {
+      width: 36px; height: 52px;
+      background: #141414;
+      border: 1px solid #1e1e1e;
+      border-radius: 4px;
+      outline: none;
+      color: transparent;
+      font-size: 1px;
+      caret-color: transparent;
+      cursor: text;
+    }
+    .pw-dummy {
+      width: 36px; height: 52px;
+      background: #141414;
+      border: 1px solid #1e1e1e;
+      border-radius: 4px;
+      cursor: default;
+    }
+    .pw-input:focus {
+      background: #181818;
+      border-color: #252525;
+    }
+  </style>
+</head>
+<body>
+
+<div id="loading"><div class="spinner"></div></div>
+<div id="password-screen">
+  <div class="pw-inner">
+    <div class="pw-dummy"></div>
+    <img src="data:image/png;base64,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" class="pw-logo" alt="">
+    <input type="password" class="pw-input" id="pw-input" maxlength="20" autocomplete="off" />
+  </div>
+</div>
+
+<div id="viewer-wrap" style="display:none; position:fixed; inset:0; background:#0a0a0a; align-items:center; justify-content:center; flex-direction:column; gap:20px;">
+  <div style="width:75vh; max-width:90vw; height:82vh; border-radius:12px; overflow:hidden; box-shadow:0 0 0 1px rgba(255,255,255,0.07); flex-shrink:0;">
+    <iframe id="viewer-frame" allowfullscreen allow="fullscreen; gyroscope; accelerometer" referrerpolicy="no-referrer" style="width:100%; height:100%; border:none; display:block;"></iframe>
+  </div>
+  <img src="data:image/png;base64,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" alt="Pure Carbon Group" style="width:44px; height:44px; opacity:0.22; border-radius:5px; flex-shrink:0;">
+</div>
+
+<div id="landing">
+  <div class="page">
+    <div class="brand">All Diamond Everything</div>
+
+    <div class="page-title">Video & 360° Link Generator</div>
+    <div class="page-sub">Paste any vendor URL to generate a branded share link.</div>
+
+    <div class="section-label">Generate link</div>
+    <div class="input-row">
+      <input type="url" id="url-input" placeholder="Paste vendor URL here..." autocomplete="off" />
+      <button class="btn-go" id="btn-go" onclick="generate()">Generate</button>
+    </div>
+    <div class="input-error" id="input-error">Please paste a valid URL starting with https://</div>
+
+    <div class="result-box" id="result-box">
+      <div class="result-label">Your share link</div>
+      <div class="result-url" id="result-url"></div>
+      <button class="btn-copy" id="btn-copy" onclick="copyResult()">Copy link</button>
+      <button class="btn-open" onclick="openResult()">Open preview</button>
+    </div>
+
+    <hr class="divider">
+
+    <div class="section-label" style="margin-bottom:14px;">Certificate redaction tools</div>
+    <div class="tools-grid">
+
+      <a class="tool-card" href="https://redacter.streamlit.app/" target="_blank">
+        <div class="tool-badge badge-igi" style="font-size:16px;">✦</div>
+        <div class="tool-info">
+          <div class="tool-name">Certificate Redaction Tool</div>
+          <div class="tool-desc">Redact IGI, GIA, and GIA <span class="rainbow">Colour</span> certificates in one place</div>
+        </div>
+        <div class="arrow">›</div>
+      </a>
+
+    </div>
+  </div>
+</div>
+
+<div id="error-screen">
+  <h2>Unable to load viewer</h2>
+  <p>This 360° view could not be displayed. Please contact us for assistance.</p>
+</div>
+
+<div id="brand">All Diamond Everything</div>
+
+<script>
+  const VIEWER_BASE = 'https://video.alldiamondeverything.com/?u=';
+  let generatedLink = '';
+
+  function toEmbedUrl(url) {
+    try {
+      const u = new URL(url);
+      if ((u.hostname === 'www.youtube.com' || u.hostname === 'youtube.com') && u.pathname === '/watch') {
+        const id = u.searchParams.get('v');
+        if (id) return 'https://www.youtube.com/embed/' + id + '?autoplay=0';
+      }
+      if (u.hostname === 'youtu.be') {
+        const id = u.pathname.slice(1);
+        if (id) return 'https://www.youtube.com/embed/' + id + '?autoplay=0';
+      }
+      if ((u.hostname === 'www.youtube.com' || u.hostname === 'youtube.com') && u.pathname.startsWith('/shorts/')) {
+        const id = u.pathname.replace('/shorts/', '');
+        if (id) return 'https://www.youtube.com/embed/' + id + '?autoplay=0';
+      }
+    } catch(e) {}
+    return url;
+  }
+
+  async function generate() {
+    const input = document.getElementById('url-input').value.trim();
+    const errorEl = document.getElementById('input-error');
+    const resultBox = document.getElementById('result-box');
+    const resultUrl = document.getElementById('result-url');
+    const copyBtn = document.getElementById('btn-copy');
+    const goBtn = document.getElementById('btn-go');
+
+    errorEl.style.display = 'none';
+    resultBox.style.display = 'none';
+
+    if (!input.startsWith('http://') && !input.startsWith('https://')) {
+      errorEl.style.display = 'block';
+      return;
+    }
+
+    const embedUrl = toEmbedUrl(input);
+    const longUrl = VIEWER_BASE + btoa(embedUrl);
+
+    // Show loading state
+    goBtn.textContent = 'Generating...';
+    goBtn.disabled = true;
+
+    try {
+      const res = await fetch('/.netlify/functions/shorten', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ long_url: longUrl })
+      });
+
+      const data = await res.json();
+
+      if (data.link) {
+        generatedLink = data.link;
+      } else {
+        // Fallback to long URL if Bitly fails
+        generatedLink = longUrl;
+      }
+    } catch(e) {
+      // Fallback to long URL on network error
+      generatedLink = longUrl;
+    }
+
+    goBtn.textContent = 'Generate';
+    goBtn.disabled = false;
+
+    resultUrl.textContent = generatedLink;
+    resultBox.style.display = 'block';
+    copyBtn.textContent = 'Copy link';
+    copyBtn.classList.remove('copied');
+  }
+
+  function copyResult() {
+    if (!generatedLink) return;
+    const ta = document.createElement('textarea');
+    ta.value = generatedLink;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+    const btn = document.getElementById('btn-copy');
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy link'; btn.classList.remove('copied'); }, 2000);
+  }
+
+  function openResult() {
+    if (generatedLink) window.open(generatedLink, '_blank');
+  }
+
+  document.getElementById('url-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') generate();
+  });
+
+  // Password protection
+  const PW_KEY = 'ade_auth';
+  const CORRECT = 'PCD';
+
+  function checkPassword() {
+    const val = document.getElementById('pw-input').value.trim().toUpperCase();
+    const input = document.getElementById('pw-input');
+    if (val === CORRECT) {
+      sessionStorage.setItem(PW_KEY, '1');
+      document.getElementById('password-screen').classList.remove('visible');
+      document.getElementById('landing').classList.add('visible');
+    } else {
+      setTimeout(() => { input.value = ''; }, 300);
+    }
+  }
+
+  document.getElementById('pw-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') checkPassword();
+  });
+  // Focus the hidden input when clicking anywhere on the password screen
+  document.getElementById('pw-inner') && document.getElementById('password-screen').addEventListener('click', function() {
+    document.getElementById('pw-input').focus();
+  });
+
+  // Page init
+  (function() {
+    const params = new URLSearchParams(window.location.search);
+    const encoded = params.get('u');
+    if (!encoded) {
+      document.getElementById('loading').classList.add('hidden');
+      if (sessionStorage.getItem(PW_KEY) === '1') {
+        document.getElementById('landing').classList.add('visible');
+      } else {
+        document.getElementById('password-screen').classList.add('visible');
+      }
+      return;
+    }
+    let url;
+    try { url = atob(encoded); } catch(e) { url = decodeURIComponent(encoded); }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      document.getElementById('loading').classList.add('hidden');
+      document.getElementById('error-screen').classList.add('visible');
+      return;
+    }
+    document.getElementById('viewer-wrap').style.display = 'flex';
+    const frame = document.getElementById('viewer-frame');
+    frame.src = url;
+    frame.addEventListener('load', () => document.getElementById('loading').classList.add('hidden'));
+    setTimeout(() => document.getElementById('loading').classList.add('hidden'), 8000);
+  })();
+</script>
+</body>
+</html>
