@@ -537,8 +537,6 @@ with tab2:
                             q_client
                         )
                     st.success("✅ Quote created!")
-                    # Reset uploaders
-                    st.session_state.quote_upkey += 1
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
 
