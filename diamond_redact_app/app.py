@@ -264,6 +264,10 @@ with tab1:
     st.markdown('<div class="section-label">Logo for QR replacement</div>', unsafe_allow_html=True)
     logo_files = sorted(list(LOGOS_DIR.glob("*.png"))+list(LOGOS_DIR.glob("*.jpg")))
     logo_names = [f.stem for f in logo_files]
+    # Always put Pure Carbon first
+    if "Pure Carbon" in logo_names:
+        logo_names.remove("Pure Carbon")
+        logo_names.insert(0, "Pure Carbon")
 
     if logo_names:
         lcols = st.columns(min(len(logo_names),4))
@@ -379,6 +383,9 @@ with tab2:
     # Client selector
     st.markdown('<div class="section-label">Client</div>', unsafe_allow_html=True)
     all_clients = sorted([f.stem for f in LOGOS_DIR.glob("*.png")]+[f.stem for f in LOGOS_DIR.glob("*.jpg")])
+    if "Pure Carbon" in all_clients:
+        all_clients.remove("Pure Carbon")
+        all_clients.insert(0, "Pure Carbon")
 
     if all_clients:
         client_cols = st.columns(min(len(all_clients),4))
