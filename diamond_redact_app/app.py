@@ -74,6 +74,21 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; }
 
 # ── Zone definitions ──────────────────────────────────────────────────────────
 CERT_ZONES = {
+    "IGI": {
+        "short":"Lab Grown Diamond","logo_b64":IGI_B64,"ccls":"sel-igi","hbcls":"hb-igi",
+        "zones":{
+            "num_top_centre":   {"x0":360.8,"y0":34.1, "x1":420.9,"y1":43.6, "mask_ratio":0.55},
+            "num_left":         {"x0":181.8,"y0":150.1,"x1":232.5,"y1":158.1,"mask_ratio":0.55},
+            "num_left_insc":    {"x0":183.7,"y0":371.5,"x1":233.4,"y1":379.5,"mask_ratio":0.55},
+            "num_right_top":    {"x0":940.3,"y0":75.2, "x1":981.9,"y1":81.2, "mask_ratio":0.55},
+            "num_right_insc":   {"x0":933.0,"y0":355.9,"x1":981.9,"y1":361.9,"mask_ratio":0.55},
+            "num_vert_report":  {"x0":810.6,"y0":535.8,"x1":818.6,"y1":588.6,"mask_ratio":0.55,"vertical":True},
+            "num_vert_insc":    {"x0":919.5,"y0":509.4,"x1":927.4,"y1":540.1,"mask_ratio":0.55,"vertical":True},
+            "num_diamond_high": {"x0":630.0,"y0":150.0,"x1":710.0,"y1":168.0,"mask_ratio":0.55},
+            "num_diamond_low":  {"x0":622.0,"y0":308.0,"x1":700.0,"y1":326.0,"mask_ratio":0.55},
+            "qr":               {"x0":725.1,"y0":500.9,"x1":768.3,"y1":544.0},
+        }
+    },
     "GIA": {
         "short":"Natural Diamond","logo_b64":GIA_B64,"ccls":"sel-gia","hbcls":"hb-gia",
         "zones":{
@@ -90,21 +105,6 @@ CERT_ZONES = {
             "gia2":        {"x0":192.8,"y0":137.2,"x1":241.6,"y1":146.2,"mask_ratio":0.60},
             "inscription": {"x0":95.1, "y0":446.9,"x1":143.0,"y1":455.9,"mask_ratio":0.60},
             "qr":          {"x0":698.1,"y0":507.1,"x1":752.1,"y1":561.1},
-        }
-    },
-    "IGI": {
-        "short":"Lab Grown Diamond","logo_b64":IGI_B64,"ccls":"sel-igi","hbcls":"hb-igi",
-        "zones":{
-            "num_top_centre":   {"x0":360.8,"y0":34.1, "x1":420.9,"y1":43.6, "mask_ratio":0.55},
-            "num_left":         {"x0":181.8,"y0":150.1,"x1":232.5,"y1":158.1,"mask_ratio":0.55},
-            "num_left_insc":    {"x0":183.7,"y0":371.5,"x1":233.4,"y1":379.5,"mask_ratio":0.55},
-            "num_right_top":    {"x0":940.3,"y0":75.2, "x1":981.9,"y1":81.2, "mask_ratio":0.55},
-            "num_right_insc":   {"x0":933.0,"y0":355.9,"x1":981.9,"y1":361.9,"mask_ratio":0.55},
-            "num_vert_report":  {"x0":810.6,"y0":535.8,"x1":818.6,"y1":588.6,"mask_ratio":0.55,"vertical":True},
-            "num_vert_insc":    {"x0":919.5,"y0":509.4,"x1":927.4,"y1":540.1,"mask_ratio":0.55,"vertical":True},
-            "num_diamond_high": {"x0":630.0,"y0":150.0,"x1":710.0,"y1":168.0,"mask_ratio":0.55},
-            "num_diamond_low":  {"x0":622.0,"y0":308.0,"x1":700.0,"y1":326.0,"mask_ratio":0.55},
-            "qr":               {"x0":725.1,"y0":500.9,"x1":768.3,"y1":544.0},
         }
     },
 }
@@ -216,7 +216,7 @@ def get_logo_img(name):
     return None
 
 # ── Session state ─────────────────────────────────────────────────────────────
-for k,v in [("cert_type","GIA"),("sel_logo","Pure Carbon Group"),
+for k,v in [("cert_type","IGI"),("sel_logo","Pure Carbon"),
              ("upkey",0),("results",None),("quote_link",None)]:
     if k not in st.session_state: st.session_state[k]=v
 
@@ -398,7 +398,7 @@ with tab2:
             st.session_state.q_client_sel=new_client_name.strip()
             st.success(f"Saved: {new_client_name}"); st.rerun()
 
-    q_client = st.session_state.get("q_client_sel", all_clients[0] if all_clients else "Pure Carbon Group")
+    q_client = st.session_state.get("q_client_sel", all_clients[0] if all_clients else "Pure Carbon")
     client_logo = get_logo_img(q_client)
     if client_logo:
         c1,c2=st.columns([1,6])
