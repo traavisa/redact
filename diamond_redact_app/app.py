@@ -488,7 +488,17 @@ with tab2:
                     long_url = f"{QUOTE_BASE}/q/{qid}"
                     link     = shorten(long_url)
                     st.session_state.quote_link = link
-                    st.success("✅ Quote created!")
+                    st.success("✅ Quote created — link copied to clipboard!")
+                    # Auto copy to clipboard via JS
+                    st.components.v1.html(f"""
+                    <script>
+                    navigator.clipboard.writeText("{link}").catch(()=>{{
+                        const ta=document.createElement('textarea');
+                        ta.value="{link}";ta.style.position='fixed';ta.style.opacity='0';
+                        document.body.appendChild(ta);ta.focus();ta.select();
+                        document.execCommand('copy');document.body.removeChild(ta);
+                    }});
+                    </script>""", height=0)
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
 
