@@ -8,40 +8,58 @@
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { background: #0a0a0a; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #fff; min-height: 100%; }
 
+    /* ── Password screen ── */
+    #pw-screen {
+      display: none; position: fixed; inset: 0;
+      background: #0a0a0a;
+      align-items: center; justify-content: center;
+    }
+    #pw-screen.visible { display: flex; }
+    .pw-inner { display: flex; align-items: center; gap: 0; }
+    .pw-logo { width: 52px; height: 52px; opacity: 0.5; border-radius: 6px; }
+    .pw-input {
+      width: 36px; height: 52px;
+      background: #141414; border: 1px solid #1e1e1e; border-radius: 4px;
+      outline: none; color: transparent; font-size: 1px; caret-color: transparent; cursor: text;
+    }
+    .pw-input:focus { background: #181818; border-color: #252525; }
+    .pw-dummy { width: 36px; height: 52px; background: #141414; border: 1px solid #1e1e1e; border-radius: 4px; }
+    .pw-error { position: fixed; bottom: 40px; left: 50%; transform: translateX(-50%); font-size: 12px; color: #555; opacity: 0; transition: opacity 0.3s; }
+    .pw-error.show { opacity: 1; }
+
+    /* ── Loading ── */
     #loading { position: fixed; inset: 0; background: #0a0a0a; display: flex; align-items: center; justify-content: center; z-index: 100; }
     #loading.hidden { display: none; }
     .spinner { width: 28px; height: 28px; border: 2px solid #222; border-top-color: #fff; border-radius: 50%; animation: spin 0.7s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* ── Error ── */
     #error { display: none; position: fixed; inset: 0; background: #0a0a0a; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 2rem; }
     #error.visible { display: flex; }
     #error h2 { font-size: 18px; font-weight: 500; }
     #error p { font-size: 13px; color: #555; max-width: 300px; line-height: 1.6; }
 
+    /* ── Page ── */
     .page { max-width: 640px; margin: 0 auto; padding: 40px 20px 80px; }
 
     .header { display: flex; align-items: center; gap: 12px; margin-bottom: 32px; padding-bottom: 20px; border-bottom: 1px solid #161616; }
     .header-logo { width: 36px; height: 36px; border-radius: 50%; object-fit: cover; }
     .header-name { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #555; }
 
-    .quote-title { font-size: 22px; font-weight: 500; color: #fff; margin-bottom: 4px; }
+    .quote-title { font-size: 22px; font-weight: 500; margin-bottom: 4px; }
     .quote-sub { font-size: 13px; color: #444; margin-bottom: 32px; }
 
     .stones { display: flex; flex-direction: column; gap: 32px; }
 
     .stone-card { background: #0f0f0f; border: 1px solid #1a1a1a; border-radius: 14px; overflow: hidden; }
-
     .stone-header { padding: 16px 20px 12px; border-bottom: 1px solid #141414; display: flex; align-items: center; justify-content: space-between; }
     .stone-num { font-size: 11px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: #444; }
     .stone-id { font-size: 12px; font-family: monospace; color: #333; }
-
-    .video-wrap { position: relative; width: 100%; background: #080808; }
-    .video-wrap iframe { width: 100%; height: 360px; border: none; display: block; }
-
+    .video-wrap iframe { width: 100%; height: 360px; border: none; display: block; background: #080808; }
     .stone-info { padding: 16px 20px 20px; }
 
     .price-row { display: flex; align-items: baseline; gap: 8px; margin-bottom: 12px; }
-    .price-value { font-size: 26px; font-weight: 600; color: #fff; letter-spacing: -0.02em; }
+    .price-value { font-size: 26px; font-weight: 600; letter-spacing: -0.02em; }
     .price-currency { font-size: 13px; color: #555; }
     .price-type { font-size: 11px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #444; padding: 3px 8px; background: #141414; border-radius: 4px; border: 1px solid #1e1e1e; }
 
@@ -78,12 +96,24 @@
 
     .footer { text-align: center; margin-top: 48px; }
     .footer-logo { width: 28px; height: 28px; border-radius: 50%; object-fit: cover; opacity: 0.3; margin: 0 auto; display: block; }
-    .expiry-note { font-size: 11px; color: #2a2a2a; margin-top: 8px; letter-spacing: 0.04em; }
+    .expiry-note { font-size: 11px; color: #2a2a2a; margin-top: 8px; }
   </style>
 </head>
 <body>
 
 <div id="loading"><div class="spinner"></div></div>
+
+<!-- Password screen - same style as existing video tool -->
+<div id="pw-screen">
+  <div class="pw-inner">
+    <div class="pw-dummy"></div>
+    <img class="pw-logo" src="data:image/png;base64,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" />
+    <input type="password" id="pw-input" class="pw-input" autocomplete="off" />
+    <div class="pw-dummy"></div>
+  </div>
+  <div class="pw-error" id="pw-error">Incorrect password</div>
+</div>
+
 <div id="error">
   <h2>Quote not available</h2>
   <p>This quote may have expired or the link is invalid. Please contact your representative.</p>
@@ -97,19 +127,15 @@
 
   <div class="quote-title">Diamond Quote</div>
   <div class="quote-sub" id="quote-sub"></div>
-
   <div class="stones" id="stones"></div>
 
   <div class="divider"></div>
 
   <div class="share-section">
     <div class="share-title">Share with your customer</div>
-    <div class="share-sub">Generate a clean link for your customer — no pricing from us, just the diamonds. You can optionally add your own retail price.</div>
-
+    <div class="share-sub">Generate a clean link for your customer — no pricing, just the diamonds. Optionally add your retail price.</div>
     <div class="retail-inputs" id="retail-inputs"></div>
-
     <button class="btn-generate" id="btn-generate" onclick="generateShare()">Generate customer link</button>
-
     <div class="share-result" id="share-result">
       <div class="share-result-url" id="share-url"></div>
       <button class="btn-copy-share" id="btn-copy-share" onclick="copyShare()">Copy link</button>
@@ -133,28 +159,48 @@ const CLIENT_LOGOS = {
 
 const SUPABASE_URL  = "https://srlbevzrkovruyerixdi.supabase.co";
 const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNybGJldnpya292cnV5ZXJpeGRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NTk0NjQsImV4cCI6MjA5NDQzNTQ2NH0.wB8eSR-MClr9CLwj8V998aJbCNAVlw2wK9PppB_DnIA";
+const PW_KEY = 'pcg_quote_auth';
 
 let quoteData = null;
 let shareLink = null;
 
+// ── Password ──────────────────────────────────────────────────────────────────
+async function checkPassword() {
+  const val = document.getElementById('pw-input').value.trim();
+  if (!val) return;
+
+  const res = await fetch('/.netlify/functions/verify-password', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ password: val })
+  });
+  const data = await res.json();
+
+  if (data.ok) {
+    sessionStorage.setItem(PW_KEY, '1');
+    document.getElementById('pw-screen').classList.remove('visible');
+    loadQuote();
+  } else {
+    const errEl = document.getElementById('pw-error');
+    document.getElementById('pw-input').value = '';
+    errEl.classList.add('show');
+    setTimeout(() => errEl.classList.remove('show'), 2000);
+  }
+}
+
+document.getElementById('pw-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') checkPassword();
+});
+document.getElementById('pw-screen').addEventListener('click', () => {
+  document.getElementById('pw-input').focus();
+});
+
+// ── Quote loading ─────────────────────────────────────────────────────────────
 function formatPrice(stone) {
   const sym = stone.currency === 'CAD' ? 'CA$' : '$';
   const num = Number(stone.price).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
   const label = stone.price_type === 'ppc' ? 'Price per carat' : 'Stone price';
   return { formatted: sym + num, label, currency: stone.currency };
-}
-
-function toEmbedUrl(url) {
-  try {
-    const u = new URL(url);
-    if ((u.hostname === 'www.youtube.com' || u.hostname === 'youtube.com') && u.pathname === '/watch') {
-      return 'https://www.youtube.com/embed/' + u.searchParams.get('v') + '?autoplay=0';
-    }
-    if (u.hostname === 'youtu.be') {
-      return 'https://www.youtube.com/embed/' + u.pathname.slice(1) + '?autoplay=0';
-    }
-  } catch(e) {}
-  return url;
 }
 
 function copyText(text, btn, label) {
@@ -205,64 +251,53 @@ async function generateShare() {
   btn.disabled = false; btn.textContent = 'Generate customer link';
 }
 
-async function init() {
+async function loadQuote() {
   const id = window.location.pathname.split('/').pop();
-  if (!id) { showError(); return; }
+  if (!id || id === 'quote.html') { showError(); return; }
 
   try {
     const res = await fetch(`${SUPABASE_URL}/rest/v1/quotes?id=eq.${id}&select=*`, {
-      headers: {
-        'apikey': SUPABASE_ANON,
-        'Authorization': `Bearer ${SUPABASE_ANON}`
-      }
+      headers: { 'apikey': SUPABASE_ANON, 'Authorization': `Bearer ${SUPABASE_ANON}` }
     });
     const rows = await res.json();
     if (!rows || rows.length === 0) { showError(); return; }
-
     const q = rows[0];
     if (new Date(q.expires_at) < new Date()) { showError('expired'); return; }
-
     quoteData = q;
     render(q);
-  } catch(e) {
-    showError();
-  }
+  } catch(e) { showError(); }
 }
 
-function showError(type) {
+function showError() {
   document.getElementById('loading').classList.add('hidden');
   document.getElementById('error').classList.add('visible');
 }
 
 function render(q) {
-  // Header
   const logo = CLIENT_LOGOS[q.client] || CLIENT_LOGOS['Pure Carbon Group'];
   document.getElementById('header-logo').src = logo;
   document.getElementById('header-name').textContent = q.client;
-  document.getElementById('quote-sub').textContent = `${q.stones.length} diamond${q.stones.length > 1 ? 's' : ''} · Prepared by Pure Carbon Group`;
+  document.getElementById('quote-sub').textContent =
+    `${q.stones.length} diamond${q.stones.length > 1 ? 's' : ''} · Prepared by Pure Carbon Group`;
 
-  // Expiry
   const exp = new Date(q.expires_at);
-  document.getElementById('expiry-note').textContent = `This quote expires ${exp.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
+  document.getElementById('expiry-note').textContent =
+    `This quote expires ${exp.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}`;
 
-  // Stones
   const stonesEl = document.getElementById('stones');
   const retailInputs = document.getElementById('retail-inputs');
 
   q.stones.forEach((stone, i) => {
     const { formatted, label, currency } = formatPrice(stone);
-    const embedUrl = toEmbedUrl(stone.video_url);
-    const num = i + 1;
-
     const card = document.createElement('div');
     card.className = 'stone-card';
     card.innerHTML = `
       <div class="stone-header">
-        <span class="stone-num">Diamond ${num}</span>
+        <span class="stone-num">Diamond ${i + 1}</span>
         <span class="stone-id">···${stone.cert_last4}</span>
       </div>
       <div class="video-wrap">
-        <iframe src="${embedUrl}" allowfullscreen allow="autoplay"></iframe>
+        <iframe src="${stone.video_url}" allowfullscreen allow="autoplay"></iframe>
       </div>
       <div class="stone-info">
         <div class="price-row">
@@ -272,19 +307,16 @@ function render(q) {
         </div>
         <div class="stone-actions">
           <button class="btn btn-primary" onclick="window.open('${stone.pdf_url}','_blank')">View certificate</button>
-          <button class="btn btn-secondary" id="copy-video-${i}" onclick="copyVideoLink(${i}, '${stone.video_url}')">Copy video link</button>
+          <button class="btn btn-secondary" id="cpv-${i}" onclick="copyVideoLink(${i},'${stone.video_url}')">Copy video link</button>
         </div>
-      </div>
-    `;
+      </div>`;
     stonesEl.appendChild(card);
 
-    // Retail price input for share section
     const row = document.createElement('div');
     row.className = 'retail-row';
     row.innerHTML = `
-      <span class="retail-label">Diamond ${num}</span>
-      <input class="retail-input" id="retail-${i}" type="text" placeholder="Optional retail price (e.g. 15000)" />
-    `;
+      <span class="retail-label">Diamond ${i + 1}</span>
+      <input class="retail-input" id="retail-${i}" type="text" placeholder="Optional retail price" />`;
     retailInputs.appendChild(row);
   });
 
@@ -293,11 +325,27 @@ function render(q) {
 }
 
 function copyVideoLink(i, url) {
-  const btn = document.getElementById(`copy-video-${i}`);
-  copyText(url, btn, 'Copy video link');
+  copyText(url, document.getElementById(`cpv-${i}`), 'Copy video link');
 }
 
-init();
+// ── Init ──────────────────────────────────────────────────────────────────────
+(function() {
+  const id = window.location.pathname.split('/').pop();
+  if (!id || id === 'quote.html') {
+    document.getElementById('loading').classList.add('hidden');
+    showError();
+    return;
+  }
+
+  document.getElementById('loading').classList.add('hidden');
+
+  if (sessionStorage.getItem(PW_KEY) === '1') {
+    loadQuote();
+  } else {
+    document.getElementById('pw-screen').classList.add('visible');
+    setTimeout(() => document.getElementById('pw-input').focus(), 100);
+  }
+})();
 </script>
 </body>
 </html>
