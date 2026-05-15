@@ -302,18 +302,29 @@
     if (e.key === 'Enter') generate();
   });
 
-  // Password protection
+  // Password protection — verified server-side
   const PW_KEY = 'ade_auth';
-  const CORRECT = 'PCD';
 
-  function checkPassword() {
-    const val = document.getElementById('pw-input').value.trim().toUpperCase();
+  async function checkPassword() {
     const input = document.getElementById('pw-input');
-    if (val === CORRECT) {
-      sessionStorage.setItem(PW_KEY, '1');
-      document.getElementById('password-screen').classList.remove('visible');
-      document.getElementById('landing').classList.add('visible');
-    } else {
+    const val = input.value.trim();
+    if (!val) return;
+
+    try {
+      const res = await fetch('/.netlify/functions/verify-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: val })
+      });
+      const data = await res.json();
+      if (data.ok) {
+        sessionStorage.setItem(PW_KEY, '1');
+        document.getElementById('password-screen').classList.remove('visible');
+        document.getElementById('landing').classList.add('visible');
+      } else {
+        setTimeout(() => { input.value = ''; }, 300);
+      }
+    } catch(e) {
       setTimeout(() => { input.value = ''; }, 300);
     }
   }
