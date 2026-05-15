@@ -348,7 +348,7 @@ st.markdown(f"""
   </div>
 </div>""", unsafe_allow_html=True)
 
-tab1, tab2 = st.tabs(["  \U0001f48e  Redact certificate  ", "  \U0001f517  Create quote  "])
+tab2, tab1 = st.tabs(["  \U0001f517  Create quote  ", "  \U0001f48e  Redact certificate  "])
 
 # ═══════════════════════════════════════════════════
 # TAB 1 — REDACT ONLY
@@ -472,7 +472,7 @@ with tab2:
 
     col_a,col_b = st.columns(2)
     with col_a: q_currency = st.radio("Currency", ["CAD","USD"], horizontal=True, key="q_cur")
-    with col_b: q_expiry   = st.slider("Link expires (days)", 7, 60, 30, key="q_exp")
+    with col_b: q_expiry   = st.slider("Link expires (days)", 1, 30, 7, key="q_exp")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Diamonds — up to 3</div>', unsafe_allow_html=True)
@@ -528,13 +528,14 @@ with tab2:
                     long_url = f"{QUOTE_BASE}/q/{qid}"
                     link     = shorten(long_url)
                     st.session_state.quote_link = link
-                    # Add to history
-                    add_history(
-                        f"{len(stones_payload)} diamond(s)",
-                        link,
-                        cert_type_q,
-                        q_client
-                    )
+                    # Add to history — one entry per stone with original filename
+                    for s_orig, s_pay in zip(stones_ready, stones_payload):
+                        add_history(
+                            s_orig["file"].name,
+                            f"···{s_pay['cert_last4']} → {link}",
+                            cert_type_q,
+                            q_client
+                        )
                     st.success("✅ Quote created!")
                     # Reset uploaders
                     st.session_state.quote_upkey += 1
