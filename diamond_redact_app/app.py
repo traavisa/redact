@@ -162,7 +162,18 @@ def gen_id(n=8):
     return "".join(random.choices(chars, k=n))
 
 def get_logo_img(name):
+    # Check built-in logos first
     b64 = CLIENT_LOGOS.get(name)
+    if not b64:
+        # Fall back to custom clients from Supabase
+        try:
+            rows = load_custom_clients()
+            for r in rows:
+                if r.get("name") == name:
+                    b64 = r.get("logo_b64")
+                    break
+        except:
+            pass
     if b64:
         return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
     return None
@@ -543,9 +554,11 @@ with tab2:
     # ── Quote link display ───────────────────────────────────────────────────
     _qlink = st.session_state.get("quote_link")
     if _qlink:
-        st.markdown('<div class="section-label" style="margin-top:1rem;">Quote link — ready to send</div>', unsafe_allow_html=True)
-        st.code(_qlink, language=None)
-        st.caption("Use the copy button (top right of the box above) to copy the link.")
+        st.success("✅  Quote link ready — click the link below and copy it")
+        st.markdown('<div class="section-label" style="margin-top:0.8rem;">Quote link</div>', unsafe_allow_html=True)
+        st.text_input("quote_link_display", value=_qlink, key="qlink_display",
+                      label_visibility="collapsed")
+        st.caption("👆 Click the field above, then press **Ctrl+A → Ctrl+C** (or ⌘A → ⌘C on Mac) to copy.")
         if st.button("Clear", key="clr_quote", use_container_width=True):
             st.session_state.quote_link = None
             st.rerun()
