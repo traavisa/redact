@@ -554,68 +554,40 @@ with tab2:
     # ── Quote link display ───────────────────────────────────────────────────
     _qlink = st.session_state.get("quote_link")
     if _qlink:
-        import streamlit.components.v1 as components
         st.success("✅  Quote link ready")
-        # JS clipboard copy — renders a self-contained copy button
         _safe = _qlink.replace("'", "\\'")
-        components.html(f"""
-<style>
-  .copy-wrap {{
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    background: #111;
-    border: 1px solid #2a2a2a;
-    border-radius: 10px;
-    padding: 12px 14px;
-    font-family: monospace;
-    margin: 6px 0 4px;
-  }}
-  .copy-url {{
-    flex: 1;
-    font-size: 13px;
-    color: #c9a84c;
-    word-break: break-all;
-    user-select: all;
-  }}
-  .copy-btn {{
-    flex-shrink: 0;
-    background: #1a1a1a;
-    border: 1px solid #333;
-    border-radius: 7px;
-    color: #fff;
-    font-size: 12px;
-    font-family: 'DM Sans', sans-serif;
-    padding: 6px 14px;
-    cursor: pointer;
-    transition: background 0.15s;
-    white-space: nowrap;
-  }}
-  .copy-btn:hover {{ background: #2a2a2a; }}
-  .copy-btn.copied {{ background: #1a3a1a; border-color: #2a5a2a; color: #6fcf97; }}
-</style>
-<div class="copy-wrap">
-  <span class="copy-url" id="lnk">{_qlink}</span>
-  <button class="copy-btn" id="cpbtn" onclick="
-    navigator.clipboard.writeText('{_safe}').then(function(){{
-      var b = document.getElementById('cpbtn');
-      b.textContent = '✓ Copied';
-      b.classList.add('copied');
-      setTimeout(function(){{ b.textContent = 'Copy'; b.classList.remove('copied'); }}, 2000);
-    }}).catch(function(){{
-      var el = document.getElementById('lnk');
-      var r = document.createRange(); r.selectNode(el);
-      window.getSelection().removeAllRanges();
-      window.getSelection().addRange(r);
-      document.execCommand('copy');
-      var b = document.getElementById('cpbtn');
-      b.textContent = '✓ Copied';
-      b.classList.add('copied');
-      setTimeout(function(){{ b.textContent = 'Copy'; b.classList.remove('copied'); }}, 2000);
-    }});
-  ">Copy</button>
+        st.markdown(f"""
+<div style="display:flex;align-items:center;gap:10px;background:#111;border:1px solid #2a2a2a;
+            border-radius:10px;padding:12px 14px;font-family:monospace;margin:6px 0 4px;">
+  <span id="pcg-link" style="flex:1;font-size:13px;color:#c9a84c;word-break:break-all;">{_qlink}</span>
+  <button id="pcg-cpbtn"
+    style="flex-shrink:0;background:#1a1a1a;border:1px solid #333;border-radius:7px;
+           color:#fff;font-size:12px;padding:6px 14px;cursor:pointer;white-space:nowrap;"
+    onclick="(function(){{
+      var txt = '{_safe}';
+      var btn = document.getElementById('pcg-cpbtn');
+      function done(){{
+        btn.textContent='✓ Copied';
+        btn.style.background='#1a3a1a';
+        btn.style.color='#6fcf97';
+        setTimeout(function(){{btn.textContent='Copy';btn.style.background='#1a1a1a';btn.style.color='#fff';}},2000);
+      }}
+      if(navigator.clipboard && window.isSecureContext){{
+        navigator.clipboard.writeText(txt).then(done).catch(function(){{
+          var ta=document.createElement('textarea');
+          ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
+          document.body.appendChild(ta);ta.focus();ta.select();
+          document.execCommand('copy');document.body.removeChild(ta);done();
+        }});
+      }} else {{
+        var ta=document.createElement('textarea');
+        ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
+        document.body.appendChild(ta);ta.focus();ta.select();
+        document.execCommand('copy');document.body.removeChild(ta);done();
+      }}
+    }})()">Copy</button>
 </div>
-""", height=70)
+""", unsafe_allow_html=True)
         if st.button("Clear", key="clr_quote", use_container_width=True):
             st.session_state.quote_link = None
             st.rerun()
