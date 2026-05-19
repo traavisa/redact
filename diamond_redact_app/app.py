@@ -322,6 +322,28 @@ def extract_cert_data(file_bytes, cert_type):
                 st.session_state.upkey+=1
                 st.rerun()
 
+def cert_selector(tab_prefix):
+    """Renders cert type cards with invisible overlay buttons. Returns selected key."""
+    cols = st.columns(3)
+    for i,(key,cfg) in enumerate(CERT_ZONES.items()):
+        with cols[i]:
+            active = st.session_state.cert_type==key
+            border_col = '#2563a8' if key=='IGI' else '#B8963E' if key=='GIA' else '#4a7a56'
+            border = f"2px solid {border_col}" if active else "1px solid rgba(128,128,128,0.2)"
+            bg = (f"rgba(37,99,168,0.08)" if key=='IGI' else f"rgba(184,150,62,0.08)" if key=='GIA' else f"rgba(74,122,86,0.08)") if active else "rgba(255,255,255,0.02)"
+            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:6px;">✓ SELECTED</div>' if active else '<div style="font-size:10px;color:rgba(255,255,255,0.2);margin-top:6px;">tap to select</div>'
+            st.markdown(f'''<div style="border-radius:12px;padding:16px 8px 12px;text-align:center;border:{border};background:{bg};">
+              <img style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin:0 auto 8px;display:block;" src="data:image/png;base64,{cfg["logo_b64"]}"/>
+              <div style="font-size:13px;font-weight:600;margin-bottom:1px;">{key}</div>
+              <div style="font-size:10px;opacity:0.35;">{cfg["short"]}</div>
+              {check}
+            </div>''', unsafe_allow_html=True)
+            if st.button("\u200b", key=f"{tab_prefix}_c_{key}", use_container_width=True):
+                st.session_state.cert_type=key
+                st.session_state.results=None
+                st.session_state.upkey+=1
+                st.rerun()
+
 def client_selector(key_prefix, session_key):
     """Renders client logo cards with invisible overlay buttons."""
     # Build full client list: built-in + custom from Supabase
