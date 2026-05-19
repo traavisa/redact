@@ -493,13 +493,14 @@ with tab2:
         with st.expander(f"Diamond {i+1}", expanded=(i==0)):
             q_pdf   = st.file_uploader("Raw certificate PDF (auto-redacted)", type="pdf", key=f"qpdf_{i}_{st.session_state.quote_upkey}")
             q_vid   = st.text_input("Raw video URL (auto-cleaned)", placeholder="https://...", key=f"qvid_{i}_{st.session_state.quote_upkey}")
-            q_price = st.number_input("Your price (numbers only)", min_value=0, step=1, key=f"qpri_{i}_{st.session_state.quote_upkey}", format="%d")
+            q_price_raw = st.text_input("Your price (optional)", placeholder="e.g. 4500", key=f"qpri_{i}_{st.session_state.quote_upkey}")
+            q_price = int(q_price_raw.strip()) if q_price_raw.strip().isdigit() else None
             q_type  = st.radio("Price type", ["Stone price","Price per carat"], horizontal=True, key=f"qtyp_{i}_{st.session_state.quote_upkey}")
-            if q_pdf and q_vid and q_price > 0:
+            if q_pdf and q_vid:
                 stones_ready.append({
                     "file":       q_pdf,
                     "video_url":  q_vid,
-                    "price":      str(int(q_price)),
+                    "price":      str(q_price) if q_price else "",
                     "price_type": "ppc" if "carat" in q_type else "stone",
                     "cert_last4": "".join(filter(str.isdigit, Path(q_pdf.name).stem))[-4:],
                 })
@@ -524,12 +525,13 @@ with tab2:
                     st.error(f"Upload failed for ···{s['cert_last4']}"); ok=False; break
                 cleaned_video = clean_video_url(s["video_url"])
                 stones_payload.append({
-                    "cert_last4": s["cert_last4"],
-                    "video_url":  cleaned_video,
-                    "pdf_url":    pdf_url,
-                    "price":      s["price"],
-                    "currency":   q_currency,
-                    "price_type": s["price_type"],
+                    "cert_last4":    s["cert_last4"],
+                    "orig_filename": s["file"].name,
+                    "video_url":     cleaned_video,
+                    "pdf_url":       pdf_url,
+                    "price":         s["price"],
+                    "currency":      q_currency,
+                    "price_type":    s["price_type"],
                 })
             if ok:
                 qid  = gen_id()
@@ -539,15 +541,7 @@ with tab2:
                     long_url = f"{QUOTE_BASE}/q/{qid}"
                     link     = shorten(long_url)
                     st.session_state.quote_link = link
-                    # Add to history — one entry per stone with original filename
-                    for s_orig, s_pay in zip(stones_ready, stones_payload):
-                        add_history(
-                            s_orig["file"].name,
-                            f"···{s_pay['cert_last4']} → {link}",
-                            cert_type_q,
-                            q_client
-                        )
-                    st.rerun()
+                    # Don't rerun — let the link display render immediately below
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
 
@@ -613,7 +607,15 @@ with tab2:
                 except: pass
             stones = q.get("stones",[])
             n = len(stones) if isinstance(stones, list) else 0
-            last4s = ", ".join(f"···{s.get('cert_last4','')}" for s in (stones if isinstance(stones,list) else []))
+            stone_lines = []
+            for s in (stones if isinstance(stones, list) else []):
+                orig = s.get("orig_filename","")
+                last4 = s.get("cert_last4","")
+                if orig:
+                    stone_lines.append(f"{orig} → ···{last4}")
+                else:
+                    stone_lines.append(f"···{last4}")
+            stones_display = "<br>".join(stone_lines) if stone_lines else "—"
             created = ""
             if q.get("created_at"):
                 try:
@@ -621,13 +623,13 @@ with tab2:
                     created = dt.strftime("%b %d, %H:%M")
                 except: pass
             long_url = f"{QUOTE_BASE}/q/{q['id']}"
-            short = shorten(long_url) if False else long_url  # don't re-shorten, use stored
-
-            # Check if we have a stored short link — we don't currently, use long
             st.markdown(f"""<div class="history-row">
               <div>
-                <div class="h-orig">{q.get("client","")} · {n} diamond(s) · {last4s}</div>
-                <div class="h-clean" style="font-size:11px;">{long_url}</div>
+                <div class="h-orig">{q.get("client","")} · {n} diamond(s)</div>
+                <div class="h-clean" style="font-size:11px;line-height:1.6;">{stones_display}</div>
+                <div class="h-clean" style="font-size:11px;margin-top:4px;">
+                  <a href="{long_url}" target="_blank" style="color:#c9a84c;">{long_url}</a>
+                </div>
               </div>
               <div class="h-meta">{created}<br>{exp_str}</div>
             </div>""", unsafe_allow_html=True)
