@@ -218,7 +218,89 @@ def redact_pdf(file_bytes, cert_type, logo_img):
     doc.close(); out.seek(0)
     return out.read()
 
-def cert_selector(tab_prefix):
+def extract_cert_data(file_bytes, cert_type):
+    """Extract diamond grading data from certificate PDF using regex on raw text."""
+    import re
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        text = "\n".join(page.get_text() for page in doc)
+        doc.close()
+    except:
+        return {}
+
+    def find(patterns, txt=text):
+        for p in patterns:
+            m = re.search(p, txt, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    data = {}
+    # Shape
+    data["shape"] = find([
+        r"Shape\s*[:\-]?\s*([A-Za-z]+(?:\s+[A-Za-z]+)?)",
+        r"Cut Shape\s*[:\-]?\s*([A-Za-z]+(?:\s+[A-Za-z]+)?)",
+        r"Shape & Cut\s*[:\-]?\s*([A-Za-z]+(?:\s+[A-Za-z]+)?)",
+    ])
+    # Carat
+    data["carat"] = find([
+        r"Carat\s*Weight\s*[:\-]?\s*([\d\.]+)",
+        r"(?<!\w)(\d+\.\d{2})\s*(?:ct|carat)",
+        r"Weight\s*[:\-]?\s*([\d\.]+)\s*ct",
+    ])
+    # Color
+    data["color"] = find([
+        r"Colour\s*Grade\s*[:\-]?\s*([A-Z](?:\s*to\s*[A-Z])?)",
+        r"Color\s*Grade\s*[:\-]?\s*([A-Z](?:\s*to\s*[A-Z])?)",
+        r"\bColou?r\b\s*[:\-]?\s*([D-Z])\b",
+    ])
+    # Clarity
+    data["clarity"] = find([
+        r"Clarity\s*Grade\s*[:\-]?\s*(IF|FL|VVS1|VVS2|VS1|VS2|SI1|SI2|I1|I2|I3)",
+        r"Clarity\s*[:\-]?\s*(IF|FL|VVS1|VVS2|VS1|VS2|SI1|SI2|I1|I2|I3)",
+    ])
+    # Cut (round brilliants only)
+    data["cut"] = find([
+        r"Cut\s*Grade\s*[:\-]?\s*(Excellent|Very Good|Good|Fair|Poor|EX|VG)",
+        r"\bCut\b\s*[:\-]?\s*(Excellent|Very Good|Good|Fair|Poor)",
+    ])
+    # Polish
+    data["polish"] = find([
+        r"Polish\s*[:\-]?\s*(Excellent|Very Good|Good|Fair|Poor|EX|VG)",
+    ])
+    # Symmetry
+    data["symmetry"] = find([
+        r"Symmetry\s*[:\-]?\s*(Excellent|Very Good|Good|Fair|Poor|EX|VG)",
+    ])
+    # Fluorescence
+    data["fluorescence"] = find([
+        r"Fluorescence\s*(?:Intensity)?\s*[:\-]?\s*(None|Faint|Medium|Strong|Very Strong)",
+        r"Fluorescence\s*[:\-]?\s*(None|Faint|Medium|Strong|Very Strong|Nil)",
+    ])
+    # Measurements
+    meas = find([
+        r"Measurements?\s*[:\-]?\s*([\d\.]+\s*[xX\-]\s*[\d\.]+\s*[xX\-]\s*[\d\.]+)",
+        r"([\d\.]+\s*[xX]\s*[\d\.]+\s*[xX]\s*[\d\.]+)\s*mm",
+    ])
+    data["measurements"] = meas
+
+    # Ratio = length / width from measurements
+    if meas:
+        nums = re.findall(r"[\d\.]+", meas)
+        if len(nums) >= 2:
+            try:
+                l, w = float(nums[0]), float(nums[1])
+                if w > 0:
+                    data["ratio"] = f"{l/w:.2f}"
+            except:
+                pass
+
+    # Normalise abbreviations
+    abbr = {"EX": "Excellent", "VG": "Very Good"}
+    for k in ("cut", "polish", "symmetry"):
+        data[k] = abbr.get(data.get(k, ""), data.get(k, ""))
+
+    return {k: v for k, v in data.items() if v}
     """Renders cert type cards with invisible overlay buttons. Returns selected key."""
     cols = st.columns(3)
     for i,(key,cfg) in enumerate(CERT_ZONES.items()):
@@ -532,6 +614,7 @@ with tab2:
                     "price":         s["price"],
                     "currency":      q_currency,
                     "price_type":    s["price_type"],
+                    "cert_data":     extract_cert_data(raw_bytes, cert_type_q),
                 })
             if ok:
                 qid  = gen_id()
@@ -548,40 +631,8 @@ with tab2:
     # ── Quote link display ───────────────────────────────────────────────────
     _qlink = st.session_state.get("quote_link")
     if _qlink:
-        st.success("✅  Quote link ready")
-        _safe = _qlink.replace("'", "\\'")
-        st.markdown(f"""
-<div style="display:flex;align-items:center;gap:10px;background:#111;border:1px solid #2a2a2a;
-            border-radius:10px;padding:12px 14px;font-family:monospace;margin:6px 0 4px;">
-  <span id="pcg-link" style="flex:1;font-size:13px;color:#c9a84c;word-break:break-all;">{_qlink}</span>
-  <button id="pcg-cpbtn"
-    style="flex-shrink:0;background:#1a1a1a;border:1px solid #333;border-radius:7px;
-           color:#fff;font-size:12px;padding:6px 14px;cursor:pointer;white-space:nowrap;"
-    onclick="(function(){{
-      var txt = '{_safe}';
-      var btn = document.getElementById('pcg-cpbtn');
-      function done(){{
-        btn.textContent='✓ Copied';
-        btn.style.background='#1a3a1a';
-        btn.style.color='#6fcf97';
-        setTimeout(function(){{btn.textContent='Copy';btn.style.background='#1a1a1a';btn.style.color='#fff';}},2000);
-      }}
-      if(navigator.clipboard && window.isSecureContext){{
-        navigator.clipboard.writeText(txt).then(done).catch(function(){{
-          var ta=document.createElement('textarea');
-          ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
-          document.body.appendChild(ta);ta.focus();ta.select();
-          document.execCommand('copy');document.body.removeChild(ta);done();
-        }});
-      }} else {{
-        var ta=document.createElement('textarea');
-        ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
-        document.body.appendChild(ta);ta.focus();ta.select();
-        document.execCommand('copy');document.body.removeChild(ta);done();
-      }}
-    }})()">Copy</button>
-</div>
-""", unsafe_allow_html=True)
+        st.success("✅  Quote link ready — use the copy icon inside the box below")
+        st.code(_qlink, language=None)
         if st.button("Clear", key="clr_quote", use_container_width=True):
             st.session_state.quote_link = None
             st.rerun()
