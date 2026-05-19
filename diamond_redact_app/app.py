@@ -112,6 +112,7 @@ def sb_delete(table, filter_str):
         timeout=10)
     return r.status_code in (200,204)
 
+@st.cache_data(ttl=30)
 def load_history():
     rows = sb_get("redact_history", "order=created_at.desc&limit=25")
     if isinstance(rows, list): return rows
@@ -123,7 +124,9 @@ def add_history(orig, clean, ctype, client=""):
         "client": client,
         "created_at": datetime.datetime.utcnow().isoformat()+"Z"
     })
+    load_history.clear()
 
+@st.cache_data(ttl=30)
 def load_quote_history():
     rows = sb_get("quotes", "order=created_at.desc&limit=25")
     if isinstance(rows, list): return rows
@@ -148,6 +151,7 @@ def shorten(long_url):
         return r.json().get("link", long_url)
     except: return long_url
 
+@st.cache_data(ttl=300)
 def load_custom_clients():
     rows = sb_get("custom_clients", "order=name.asc")
     if isinstance(rows, list): return rows
@@ -610,6 +614,17 @@ with tab2:
                 })
                 st.success(f"✓ Diamond {i+1} ready — cert ···{stones_ready[-1]['cert_last4']}")
 
+    # ── Quote link display — rendered BEFORE the button so rerun doesn't lose it ─
+    _qlink = st.session_state.get("quote_link")
+    if _qlink:
+        st.markdown('<hr class="divider">', unsafe_allow_html=True)
+        st.success("✅  Quote link ready")
+        st.code(_qlink, language=None)
+        st.caption("Click inside the box above, select all (Ctrl+A / ⌘A), then copy.")
+        if st.button("✕  Clear & start new quote", key="clr_quote", use_container_width=True):
+            st.session_state.quote_link = None
+            st.rerun()
+
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
     if st.button("🔗  Redact, clean & generate quote link", type="primary",
@@ -641,25 +656,15 @@ with tab2:
             if ok:
                 qid  = gen_id()
                 exp  = (datetime.datetime.utcnow()+datetime.timedelta(days=q_expiry)).isoformat()+"Z"
-                body = {"id":qid,"client":q_client,"stones":stones_payload,"expires_at":exp}
+                long_url = f"{QUOTE_BASE}/q/{qid}"
+                link     = shorten(long_url)
+                body = {"id":qid,"client":q_client,"stones":stones_payload,"expires_at":exp,"short_link":link}
                 if sb_insert("quotes", body):
-                    long_url = f"{QUOTE_BASE}/q/{qid}"
-                    link     = shorten(long_url)
                     st.session_state.quote_link = link
-                    st.session_state.quote_upkey += 1  # reset file uploaders
+                    load_quote_history.clear()
                     st.rerun()
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
-
-    # ── Quote link display ───────────────────────────────────────────────────
-    _qlink = st.session_state.get("quote_link")
-    if _qlink:
-        st.success("✅  Quote link ready — use the copy icon inside the box below")
-        st.code(_qlink, language=None)
-        st.caption("Click the box, select all, copy — or use the copy icon (top-right of box).")
-        if st.button("✕  Clear & start new quote", key="clr_quote", use_container_width=True):
-            st.session_state.quote_link = None
-            st.rerun()
 
     # ── Quote history ─────────────────────────────────────────────────────────
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
@@ -698,12 +703,13 @@ with tab2:
                     created = dt.strftime("%b %d, %H:%M")
                 except: pass
             long_url = f"{QUOTE_BASE}/q/{q['id']}"
+            display_link = q.get("short_link") or long_url
             st.markdown(f"""<div class="history-row">
               <div>
                 <div class="h-orig">{q.get("client","")} · {n} diamond(s)</div>
                 <div class="h-clean" style="font-size:11px;line-height:1.6;">{stones_display}</div>
                 <div class="h-clean" style="font-size:11px;margin-top:4px;">
-                  <a href="{long_url}" target="_blank" style="color:#c9a84c;">{long_url}</a>
+                  <a href="{long_url}" target="_blank" style="color:#c9a84c;">{display_link}</a>
                 </div>
               </div>
               <div class="h-meta">{created}<br>{exp_str}</div>
