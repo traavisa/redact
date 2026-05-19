@@ -119,9 +119,9 @@ function copyText(text,btn,label){
 
 async function init(){
   const id=window.location.pathname.split('/').pop();
-  if(!id||id==='share.html'){showError();return;}
+  if(!id||id==='quote.html'){showError();return;}
   try{
-    const res=await fetch(`${SUPABASE_URL}/rest/v1/shares?id=eq.${id}&select=*`,
+    const res=await fetch(`${SUPABASE_URL}/rest/v1/quotes?id=eq.${id}&select=*`,
       {headers:{'apikey':SUPABASE_ANON,'Authorization':'Bearer '+SUPABASE_ANON}});
     const rows=await res.json();
     if(!rows||rows.length===0){showError();return;}
@@ -142,13 +142,13 @@ function render(s){
   document.getElementById('page-sub').textContent=`${s.stones.length} diamond${s.stones.length>1?'s':''} selected for you`;
   const stonesEl=document.getElementById('stones');
   s.stones.forEach((stone,i)=>{
-    const retail=s.retail_prices&&s.retail_prices[i];
     let priceHtml='';
-    if(retail&&retail.price){
-      const num=Number(retail.price).toLocaleString('en-CA');
+    if(stone.price){
+      const num=Number(stone.price).toLocaleString('en-CA');
+      const label=stone.price_type==='ppc'?'per carat':'';
       priceHtml=`<div class="price-row" style="justify-content:center;text-align:center;">
-        <span style="font-size:28px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">CA$${num}</span>
-        <span style="font-size:12px;color:#888;margin-left:6px;align-self:flex-end;padding-bottom:4px;">CAD</span>
+        <span style="font-size:28px;font-weight:700;color:#ffffff;letter-spacing:-0.02em;">${stone.currency||'CA$'}${num}</span>
+        ${label?`<span style="font-size:12px;color:#888;margin-left:6px;align-self:flex-end;padding-bottom:4px;">${label}</span>`:''}
       </div>`;
     }
       const card=document.createElement('div');
