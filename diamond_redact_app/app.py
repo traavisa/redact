@@ -658,7 +658,7 @@ with tab2:
                 exp  = (datetime.datetime.utcnow()+datetime.timedelta(days=q_expiry)).isoformat()+"Z"
                 long_url = f"{QUOTE_BASE}/q/{qid}"
                 link     = shorten(long_url)
-                body = {"id":qid,"client":q_client,"stones":stones_payload,"expires_at":exp,"short_link":link}
+                body = {"id":qid,"client":q_client,"stones":stones_payload,"expires_at":exp}
                 if sb_insert("quotes", body):
                     st.session_state.quote_link = link
                     load_quote_history.clear()
@@ -703,13 +703,12 @@ with tab2:
                     created = dt.strftime("%b %d, %H:%M")
                 except: pass
             long_url = f"{QUOTE_BASE}/q/{q['id']}"
-            display_link = q.get("short_link") or long_url
             st.markdown(f"""<div class="history-row">
               <div>
                 <div class="h-orig">{q.get("client","")} · {n} diamond(s)</div>
                 <div class="h-clean" style="font-size:11px;line-height:1.6;">{stones_display}</div>
                 <div class="h-clean" style="font-size:11px;margin-top:4px;">
-                  <a href="{long_url}" target="_blank" style="color:#c9a84c;">{display_link}</a>
+                  <a href="{long_url}" target="_blank" style="color:#c9a84c;">{long_url}</a>
                 </div>
               </div>
               <div class="h-meta">{created}<br>{exp_str}</div>
