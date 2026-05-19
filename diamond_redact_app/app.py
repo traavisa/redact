@@ -142,14 +142,8 @@ def upload_pdf(pdf_bytes, filename):
     return None
 
 def shorten(long_url):
-    try:
-        token = st.secrets.get("BITLY_TOKEN","")
-        if not token: return long_url
-        r = requests.post("https://api-ssl.bitly.com/v4/shorten",
-            headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
-            json={"long_url":long_url,"domain":"purecarbondiamonds.tv"},timeout=5)
-        return r.json().get("link", long_url)
-    except: return long_url
+    # Bitly blocks quote.alldiamondeverything.com — return long URL directly
+    return long_url
 
 @st.cache_data(ttl=300)
 def load_custom_clients():
@@ -614,17 +608,6 @@ with tab2:
                 })
                 st.success(f"✓ Diamond {i+1} ready — cert ···{stones_ready[-1]['cert_last4']}")
 
-    # ── Quote link display — rendered BEFORE the button so rerun doesn't lose it ─
-    _qlink = st.session_state.get("quote_link")
-    if _qlink:
-        st.markdown('<hr class="divider">', unsafe_allow_html=True)
-        st.success("✅  Quote link ready")
-        st.code(_qlink, language=None)
-        st.caption("Click inside the box above, select all (Ctrl+A / ⌘A), then copy.")
-        if st.button("✕  Clear & start new quote", key="clr_quote", use_container_width=True):
-            st.session_state.quote_link = None
-            st.rerun()
-
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
     if st.button("🔗  Redact, clean & generate quote link", type="primary",
@@ -656,15 +639,32 @@ with tab2:
             if ok:
                 qid  = gen_id()
                 exp  = (datetime.datetime.utcnow()+datetime.timedelta(days=q_expiry)).isoformat()+"Z"
-                long_url = f"{QUOTE_BASE}/q/{qid}"
-                link     = shorten(long_url)
                 body = {"id":qid,"client":q_client,"stones":stones_payload,"expires_at":exp}
                 if sb_insert("quotes", body):
+                    long_url = f"{QUOTE_BASE}/q/{qid}"
+                    link     = shorten(long_url)
                     st.session_state.quote_link = link
+                    for s_orig, s_pay in zip(stones_ready, stones_payload):
+                        add_history(
+                            s_orig["file"].name,
+                            f"···{s_pay['cert_last4']} → {link}",
+                            cert_type_q,
+                            q_client
+                        )
                     load_quote_history.clear()
                     st.rerun()
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
+
+    # ── Quote link display ────────────────────────────────────────────────────
+    _qlink = st.session_state.get("quote_link")
+    if _qlink:
+        st.markdown('<div class="section-label" style="margin-top:1rem;">Quote link — ready to send</div>', unsafe_allow_html=True)
+        st.code(_qlink, language=None)
+        st.caption("Use the copy button (top right of the box above) to copy the link.")
+        if st.button("Clear", key="clr_quote", use_container_width=True):
+            st.session_state.quote_link = None
+            st.rerun()
 
     # ── Quote history ─────────────────────────────────────────────────────────
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
