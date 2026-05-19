@@ -646,7 +646,8 @@ with tab2:
                     long_url = f"{QUOTE_BASE}/q/{qid}"
                     link     = shorten(long_url)
                     st.session_state.quote_link = link
-                    # Don't rerun — let the link display render immediately below
+                    st.session_state.quote_upkey += 1  # reset file uploaders
+                    st.rerun()
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
 
@@ -655,7 +656,8 @@ with tab2:
     if _qlink:
         st.success("✅  Quote link ready — use the copy icon inside the box below")
         st.code(_qlink, language=None)
-        if st.button("Clear", key="clr_quote", use_container_width=True):
+        st.caption("Click the box, select all, copy — or use the copy icon (top-right of box).")
+        if st.button("✕  Clear & start new quote", key="clr_quote", use_container_width=True):
             st.session_state.quote_link = None
             st.rerun()
 
