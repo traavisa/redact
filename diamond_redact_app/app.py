@@ -112,6 +112,7 @@ def sb_delete(table, filter_str):
         timeout=10)
     return r.status_code in (200,204)
 
+@st.cache_data(ttl=30)
 def load_history():
     rows = sb_get("redact_history", "order=created_at.desc&limit=25")
     if isinstance(rows, list): return rows
@@ -123,7 +124,9 @@ def add_history(orig, clean, ctype, client=""):
         "client": client,
         "created_at": datetime.datetime.utcnow().isoformat()+"Z"
     })
+    load_history.clear()
 
+@st.cache_data(ttl=30)
 def load_quote_history():
     rows = sb_get("quotes", "order=created_at.desc&limit=25")
     if isinstance(rows, list): return rows
@@ -139,15 +142,10 @@ def upload_pdf(pdf_bytes, filename):
     return None
 
 def shorten(long_url):
-    try:
-        token = st.secrets.get("BITLY_TOKEN","")
-        if not token: return long_url
-        r = requests.post("https://api-ssl.bitly.com/v4/shorten",
-            headers={"Authorization":f"Bearer {token}","Content-Type":"application/json"},
-            json={"long_url":long_url,"domain":"purecarbondiamonds.tv"},timeout=5)
-        return r.json().get("link", long_url)
-    except: return long_url
+    # Bitly blocks quote.alldiamondeverything.com — return long URL directly
+    return long_url
 
+@st.cache_data(ttl=300)
 def load_custom_clients():
     rows = sb_get("custom_clients", "order=name.asc")
     if isinstance(rows, list): return rows
@@ -217,6 +215,110 @@ def redact_pdf(file_bytes, cert_type, logo_img):
     doc.save(out,garbage=4,deflate=True,clean=True)
     doc.close(); out.seek(0)
     return out.read()
+
+def extract_cert_data(file_bytes, cert_type):
+    """Extract diamond grading data from certificate PDF using regex on raw text."""
+    import re
+    try:
+        doc = fitz.open(stream=file_bytes, filetype="pdf")
+        text = "\n".join(page.get_text() for page in doc)
+        doc.close()
+    except:
+        return {}
+
+    def find(patterns, txt=text):
+        for p in patterns:
+            m = re.search(p, txt, re.IGNORECASE)
+            if m:
+                return m.group(1).strip()
+        return ""
+
+    data = {}
+    # Shape
+    data["shape"] = find([
+        r"Shape\s*[:\-]?\s*([A-Za-z]+(?:\s+[A-Za-z]+)?)",
+        r"Cut Shape\s*[:\-]?\s*([A-Za-z]+(?:\s+[A-Za-z]+)?)",
+        r"Shape & Cut\s*[:\-]?\s*([A-Za-z]+(?:\s+[A-Za-z]+)?)",
+    ])
+    # Carat
+    data["carat"] = find([
+        r"Carat\s*Weight\s*[:\-]?\s*([\d\.]+)",
+        r"(?<!\w)(\d+\.\d{2})\s*(?:ct|carat)",
+        r"Weight\s*[:\-]?\s*([\d\.]+)\s*ct",
+    ])
+    # Color
+    data["color"] = find([
+        r"Colour\s*Grade\s*[:\-]?\s*([A-Z](?:\s*to\s*[A-Z])?)",
+        r"Color\s*Grade\s*[:\-]?\s*([A-Z](?:\s*to\s*[A-Z])?)",
+        r"\bColou?r\b\s*[:\-]?\s*([D-Z])\b",
+    ])
+    # Clarity
+    data["clarity"] = find([
+        r"Clarity\s*Grade\s*[:\-]?\s*(IF|FL|VVS1|VVS2|VS1|VS2|SI1|SI2|I1|I2|I3)",
+        r"Clarity\s*[:\-]?\s*(IF|FL|VVS1|VVS2|VS1|VS2|SI1|SI2|I1|I2|I3)",
+    ])
+    # Cut (round brilliants only)
+    data["cut"] = find([
+        r"Cut\s*Grade\s*[:\-]?\s*(Excellent|Very Good|Good|Fair|Poor|EX|VG)",
+        r"\bCut\b\s*[:\-]?\s*(Excellent|Very Good|Good|Fair|Poor)",
+    ])
+    # Polish
+    data["polish"] = find([
+        r"Polish\s*[:\-]?\s*(Excellent|Very Good|Good|Fair|Poor|EX|VG)",
+    ])
+    # Symmetry
+    data["symmetry"] = find([
+        r"Symmetry\s*[:\-]?\s*(Excellent|Very Good|Good|Fair|Poor|EX|VG)",
+    ])
+    # Fluorescence
+    data["fluorescence"] = find([
+        r"Fluorescence\s*(?:Intensity)?\s*[:\-]?\s*(None|Faint|Medium|Strong|Very Strong)",
+        r"Fluorescence\s*[:\-]?\s*(None|Faint|Medium|Strong|Very Strong|Nil)",
+    ])
+    # Measurements
+    meas = find([
+        r"Measurements?\s*[:\-]?\s*([\d\.]+\s*[xX\-]\s*[\d\.]+\s*[xX\-]\s*[\d\.]+)",
+        r"([\d\.]+\s*[xX]\s*[\d\.]+\s*[xX]\s*[\d\.]+)\s*mm",
+    ])
+    data["measurements"] = meas
+
+    # Ratio = length / width from measurements
+    if meas:
+        nums = re.findall(r"[\d\.]+", meas)
+        if len(nums) >= 2:
+            try:
+                l, w = float(nums[0]), float(nums[1])
+                if w > 0:
+                    data["ratio"] = f"{l/w:.2f}"
+            except:
+                pass
+
+    # Normalise abbreviations
+    abbr = {"EX": "Excellent", "VG": "Very Good"}
+    for k in ("cut", "polish", "symmetry"):
+        data[k] = abbr.get(data.get(k, ""), data.get(k, ""))
+
+    return {k: v for k, v in data.items() if v}
+    """Renders cert type cards with invisible overlay buttons. Returns selected key."""
+    cols = st.columns(3)
+    for i,(key,cfg) in enumerate(CERT_ZONES.items()):
+        with cols[i]:
+            active = st.session_state.cert_type==key
+            border_col = '#2563a8' if key=='IGI' else '#B8963E' if key=='GIA' else '#4a7a56'
+            border = f"2px solid {border_col}" if active else "1px solid rgba(128,128,128,0.2)"
+            bg = (f"rgba(37,99,168,0.08)" if key=='IGI' else f"rgba(184,150,62,0.08)" if key=='GIA' else f"rgba(74,122,86,0.08)") if active else "rgba(255,255,255,0.02)"
+            check = f'<div style="font-size:10px;font-weight:700;color:{border_col};letter-spacing:0.08em;margin-top:6px;">✓ SELECTED</div>' if active else '<div style="font-size:10px;color:rgba(255,255,255,0.2);margin-top:6px;">tap to select</div>'
+            st.markdown(f'''<div style="border-radius:12px;padding:16px 8px 12px;text-align:center;border:{border};background:{bg};">
+              <img style="width:56px;height:56px;border-radius:50%;object-fit:cover;margin:0 auto 8px;display:block;" src="data:image/png;base64,{cfg["logo_b64"]}"/>
+              <div style="font-size:13px;font-weight:600;margin-bottom:1px;">{key}</div>
+              <div style="font-size:10px;opacity:0.35;">{cfg["short"]}</div>
+              {check}
+            </div>''', unsafe_allow_html=True)
+            if st.button("\u200b", key=f"{tab_prefix}_c_{key}", use_container_width=True):
+                st.session_state.cert_type=key
+                st.session_state.results=None
+                st.session_state.upkey+=1
+                st.rerun()
 
 def cert_selector(tab_prefix):
     """Renders cert type cards with invisible overlay buttons. Returns selected key."""
@@ -493,13 +595,14 @@ with tab2:
         with st.expander(f"Diamond {i+1}", expanded=(i==0)):
             q_pdf   = st.file_uploader("Raw certificate PDF (auto-redacted)", type="pdf", key=f"qpdf_{i}_{st.session_state.quote_upkey}")
             q_vid   = st.text_input("Raw video URL (auto-cleaned)", placeholder="https://...", key=f"qvid_{i}_{st.session_state.quote_upkey}")
-            q_price = st.number_input("Your price (numbers only)", min_value=0, step=1, key=f"qpri_{i}_{st.session_state.quote_upkey}", format="%d")
+            q_price_raw = st.text_input("Your price (optional)", placeholder="e.g. 4500", key=f"qpri_{i}_{st.session_state.quote_upkey}")
+            q_price = int(q_price_raw.strip()) if q_price_raw.strip().isdigit() else None
             q_type  = st.radio("Price type", ["Stone price","Price per carat"], horizontal=True, key=f"qtyp_{i}_{st.session_state.quote_upkey}")
-            if q_pdf and q_vid and q_price > 0:
+            if q_pdf and q_vid:
                 stones_ready.append({
                     "file":       q_pdf,
                     "video_url":  q_vid,
-                    "price":      str(int(q_price)),
+                    "price":      str(q_price) if q_price else "",
                     "price_type": "ppc" if "carat" in q_type else "stone",
                     "cert_last4": "".join(filter(str.isdigit, Path(q_pdf.name).stem))[-4:],
                 })
@@ -531,6 +634,7 @@ with tab2:
                     "price":         s["price"],
                     "currency":      q_currency,
                     "price_type":    s["price_type"],
+                    "cert_data":     extract_cert_data(raw_bytes, cert_type_q),
                 })
             if ok:
                 qid  = gen_id()
@@ -540,47 +644,24 @@ with tab2:
                     long_url = f"{QUOTE_BASE}/q/{qid}"
                     link     = shorten(long_url)
                     st.session_state.quote_link = link
-                    # Don't rerun — let the link display render immediately below
+                    for s_orig, s_pay in zip(stones_ready, stones_payload):
+                        add_history(
+                            s_orig["file"].name,
+                            f"···{s_pay['cert_last4']} → {link}",
+                            cert_type_q,
+                            q_client
+                        )
+                    load_quote_history.clear()
+                    st.rerun()
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
 
-    # ── Quote link display ───────────────────────────────────────────────────
+    # ── Quote link display ────────────────────────────────────────────────────
     _qlink = st.session_state.get("quote_link")
     if _qlink:
-        st.success("✅  Quote link ready")
-        _safe = _qlink.replace("'", "\\'")
-        st.markdown(f"""
-<div style="display:flex;align-items:center;gap:10px;background:#111;border:1px solid #2a2a2a;
-            border-radius:10px;padding:12px 14px;font-family:monospace;margin:6px 0 4px;">
-  <span id="pcg-link" style="flex:1;font-size:13px;color:#c9a84c;word-break:break-all;">{_qlink}</span>
-  <button id="pcg-cpbtn"
-    style="flex-shrink:0;background:#1a1a1a;border:1px solid #333;border-radius:7px;
-           color:#fff;font-size:12px;padding:6px 14px;cursor:pointer;white-space:nowrap;"
-    onclick="(function(){{
-      var txt = '{_safe}';
-      var btn = document.getElementById('pcg-cpbtn');
-      function done(){{
-        btn.textContent='✓ Copied';
-        btn.style.background='#1a3a1a';
-        btn.style.color='#6fcf97';
-        setTimeout(function(){{btn.textContent='Copy';btn.style.background='#1a1a1a';btn.style.color='#fff';}},2000);
-      }}
-      if(navigator.clipboard && window.isSecureContext){{
-        navigator.clipboard.writeText(txt).then(done).catch(function(){{
-          var ta=document.createElement('textarea');
-          ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
-          document.body.appendChild(ta);ta.focus();ta.select();
-          document.execCommand('copy');document.body.removeChild(ta);done();
-        }});
-      }} else {{
-        var ta=document.createElement('textarea');
-        ta.value=txt;ta.style.position='fixed';ta.style.opacity='0';
-        document.body.appendChild(ta);ta.focus();ta.select();
-        document.execCommand('copy');document.body.removeChild(ta);done();
-      }}
-    }})()">Copy</button>
-</div>
-""", unsafe_allow_html=True)
+        st.markdown('<div class="section-label" style="margin-top:1rem;">Quote link — ready to send</div>', unsafe_allow_html=True)
+        st.code(_qlink, language=None)
+        st.caption("Use the copy button (top right of the box above) to copy the link.")
         if st.button("Clear", key="clr_quote", use_container_width=True):
             st.session_state.quote_link = None
             st.rerun()
