@@ -188,7 +188,7 @@ function render(s){
       <div class="stone-info">
         ${specsHtml}
         ${priceHtml}
-        <div style="display:flex;gap:8px;margin-top:${retail&&retail.price?'14px':'0'}">
+        <div style="display:flex;gap:8px;margin-top:${stone.price?'14px':'0'}">
           <a class="btn btn-primary" style="text-align:center;text-decoration:none;display:flex;align-items:center;justify-content:center;flex:1;" href="${stone.pdf_url}" download="certificate-${stone.cert_last4}.pdf">Download certificate</a>
         </div>
       </div>`;
