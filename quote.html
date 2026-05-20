@@ -6,6 +6,7 @@
   <title>Diamond Selection</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body {
@@ -202,7 +203,7 @@
   </div>
 
   <div class="page-intro">
-    <div class="page-title">Diamond Options</div>
+    <div class="page-title" id="page-title">Diamond Options</div>
     <div class="page-sub" id="page-sub"></div>
   </div>
 
@@ -239,6 +240,25 @@ function copyText(text, btn, label) {
   }
 }
 
+// PDF.js worker
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+async function getPdfText(url) {
+  try {
+    const pdf = await pdfjsLib.getDocument({ url, withCredentials: false }).promise;
+    let text = '';
+    for (let p = 1; p <= Math.min(pdf.numPages, 2); p++) {
+      const page = await pdf.getPage(p);
+      const content = await page.getTextContent();
+      text += content.items.map(i => i.str).join(' ');
+    }
+    return text.toUpperCase();
+  } catch (e) {
+    return '';
+  }
+}
+
 async function init() {
   const id = window.location.pathname.split('/').pop();
   if (!id || id === 'quote.html') { showError(); return; }
@@ -251,7 +271,27 @@ async function init() {
     if (!rows || rows.length === 0) { showError(); return; }
     const s = rows[0];
     if (new Date(s.expires_at) < new Date()) { showError(); return; }
-    render(s);
+
+    // Scan each stone's PDF for cert type — run in parallel
+    const certTypes = await Promise.all(s.stones.map(async (stone) => {
+      // First: fast check on existing string fields
+      const quick = [
+        stone.orig_filename || '',
+        stone.pdf_url || '',
+        stone.cert_type || '',
+      ].join(' ').toUpperCase();
+      if (quick.includes('GIA')) return 'GIA';
+      if (quick.includes('IGI')) return 'IGI';
+      // Fallback: read the actual PDF text (first 2 pages only)
+      if (stone.pdf_url) {
+        const text = await getPdfText(stone.pdf_url);
+        if (text.includes('GIA')) return 'GIA';
+        if (text.includes('IGI')) return 'IGI';
+      }
+      return null;
+    }));
+
+    render(s, certTypes);
   } catch(e) { showError(); }
 }
 
@@ -260,7 +300,7 @@ function showError() {
   document.getElementById('error').classList.add('visible');
 }
 
-function render(s) {
+function render(s, certTypes) {
   const logo = CLIENT_LOGOS[s.client] || CLIENT_LOGOS['Pure Carbon Group'];
   document.getElementById('header-logo').src = logo;
   document.getElementById('header-name').textContent = s.client;
@@ -270,6 +310,11 @@ function render(s) {
   const n = s.stones.length;
   document.getElementById('page-sub').textContent =
     n === 1 ? '1 diamond selected for you' : `${n} diamonds selected for you`;
+
+  // Set page title: if ALL stones are GIA → "Natural Diamond Options", else default
+  const allGIA = certTypes.length > 0 && certTypes.every(t => t === 'GIA');
+  document.getElementById('page-title').textContent =
+    allGIA ? 'Natural Diamond Options' : 'Diamond Options';
 
   // Expiry
   const exp = new Date(s.expires_at);
@@ -313,15 +358,8 @@ function render(s) {
       ['Ratio',        cd.ratio],
     ].filter(r => r[1]);
 
-    // Detect GIA (natural diamond) — check all available fields
-    const haystack = [
-      stone.orig_filename || '',
-      stone.pdf_url || '',
-      stone.video_url || '',
-      (stone.cert_type || ''),
-      JSON.stringify(stone.cert_data || {}),
-    ].join(' ').toUpperCase();
-    const isGIA = haystack.includes('GIA');
+    // Use scanned cert type for this stone
+    const isGIA = certTypes[i] === 'GIA';
     const originBadge = isGIA ? `
       <div class="origin-badge">
         <div class="origin-badge-dot"></div>
