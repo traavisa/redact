@@ -24,7 +24,7 @@
     #error { display: none; position: fixed; inset: 0; background: #0c0c0c; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 2rem; }
     #error.visible { display: flex; }
     #error h2 { font-size: 18px; font-weight: 400; color: #888; }
-    #error p { font-size: 13px; color: #444; max-width: 300px; line-height: 1.7; }
+    #error p { font-size: 13px; color: #666; max-width: 300px; line-height: 1.7; }
 
     .page { max-width: 860px; margin: 0 auto; padding: 48px 24px 100px; }
 
@@ -143,8 +143,8 @@
     }
     .btn-primary { background: #c9a84c; color: #0a0a0a; }
     .btn-primary:hover { background: #d4b55e; }
-    .btn-ghost { background: transparent; color: #444; border: 1px solid #202020; }
-    .btn-ghost:hover { background: #141414; color: #666; }
+    .btn-ghost { background: transparent; color: #aaa; border: 1px solid #202020; }
+    .btn-ghost:hover { background: #141414; color: #ccc; }
     .btn-ghost.copied { border-color: #1a3020; color: #4caf80; }
 
     /* Right panel — video */
@@ -225,15 +225,15 @@
       font-family: 'Cormorant Garamond', serif;
       font-size: 22px; font-weight: 400; color: #e8e8e0; letter-spacing: 0.02em;
     }
-    .share-panel-sub { font-size: 10px; color: #555; letter-spacing: 0.1em; text-transform: uppercase; margin-top: 3px; }
+    .share-panel-sub { font-size: 10px; color: #888; letter-spacing: 0.1em; text-transform: uppercase; margin-top: 3px; }
     .share-close-btn {
       width: 32px; height: 32px;
       background: transparent; border: 1px solid #222; border-radius: 2px;
-      color: #555; font-size: 14px; cursor: pointer;
+      color: #888; font-size: 14px; cursor: pointer;
       display: flex; align-items: center; justify-content: center;
       transition: all 0.15s;
     }
-    .share-close-btn:hover { border-color: #444; color: #999; }
+    .share-close-btn:hover { border-color: #444; color: #bbb; }
     .share-section-label {
       font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
       color: #777; margin-bottom: 12px;
@@ -256,10 +256,10 @@
       outline: none; transition: border-color 0.15s;
     }
     .share-price-input:focus { border-color: #c9a84c; }
-    .share-price-input::placeholder { color: #555; font-size: 11px; }
+    .share-price-input::placeholder { color: #666; font-size: 11px; }
     .share-cur-select {
       background: #111; border: 1px solid #202020; border-radius: 2px;
-      color: #777; font-family: 'Inter', sans-serif;
+      color: #aaa; font-family: 'Inter', sans-serif;
       font-size: 11px; padding: 9px 10px; cursor: pointer; outline: none;
     }
     .share-options-row {
@@ -268,7 +268,7 @@
     }
     .share-expiry-select {
       background: #111; border: 1px solid #202020; border-radius: 2px;
-      color: #777; font-family: 'Inter', sans-serif;
+      color: #aaa; font-family: 'Inter', sans-serif;
       font-size: 11px; padding: 9px 12px; cursor: pointer; outline: none;
     }
     .share-generate-btn {
@@ -279,7 +279,7 @@
       transition: background 0.15s;
     }
     .share-generate-btn:hover:not(:disabled) { background: #d4b55e; }
-    .share-generate-btn:disabled { background: #1e1e14; color: #444; cursor: not-allowed; }
+    .share-generate-btn:disabled { background: #1e1e14; color: #666; cursor: not-allowed; }
     .share-result { display: none; margin-top: 20px; }
     .share-result.visible { display: block; }
     .share-result-label {
