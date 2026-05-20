@@ -236,7 +236,7 @@
     .share-close-btn:hover { border-color: #444; color: #999; }
     .share-section-label {
       font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
-      color: #555; margin-bottom: 12px;
+      color: #777; margin-bottom: 12px;
     }
     .share-stones { display: flex; flex-direction: column; gap: 10px; margin-bottom: 24px; }
     .share-stone-row {
@@ -247,7 +247,7 @@
     }
     .share-stone-info { flex: 1; min-width: 100px; }
     .share-stone-num { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: #888; }
-    .share-stone-cert { font-size: 11px; font-family: monospace; color: #555; margin-top: 2px; }
+    .share-stone-cert { font-size: 11px; font-family: monospace; color: #777; margin-top: 2px; }
     .share-price-wrap { display: flex; gap: 8px; align-items: center; }
     .share-price-input {
       width: 136px; background: #111; border: 1px solid #202020;
@@ -256,7 +256,7 @@
       outline: none; transition: border-color 0.15s;
     }
     .share-price-input:focus { border-color: #c9a84c; }
-    .share-price-input::placeholder { color: #2e2e2e; font-size: 11px; }
+    .share-price-input::placeholder { color: #555; font-size: 11px; }
     .share-cur-select {
       background: #111; border: 1px solid #202020; border-radius: 2px;
       color: #777; font-family: 'Inter', sans-serif;
@@ -284,7 +284,7 @@
     .share-result.visible { display: block; }
     .share-result-label {
       font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
-      color: #555; margin-bottom: 10px;
+      color: #777; margin-bottom: 10px;
     }
     .share-link-box {
       background: #0c0c0c; border: 1px solid #1e1e1e; border-radius: 2px;
@@ -300,13 +300,13 @@
       display: flex; align-items: center; justify-content: center; gap: 5px;
       transition: all 0.15s; text-decoration: none;
     }
-    .share-action-copy { background: #141414; color: #888; border: 1px solid #202020; }
-    .share-action-copy:hover { background: #1a1a1a; color: #aaa; }
-    .share-action-copy.copied { border-color: #1a3020; color: #4caf80; background: #0a1a10; }
-    .share-action-wa { background: #071a0e; color: #25d366; border: 1px solid #0d2e18; }
-    .share-action-wa:hover { background: #0a2014; }
-    .share-action-email { background: #071428; color: #4a9eff; border: 1px solid #102240; }
-    .share-action-email:hover { background: #0a1830; }
+    .share-action-copy { background: #c9a84c; color: #0a0a0a; border: 1px solid #c9a84c; }
+    .share-action-copy:hover { background: #d4b55e; border-color: #d4b55e; }
+    .share-action-copy.copied { background: #1a2a1a; color: #4caf80; border-color: #2a4a2a; }
+    .share-action-wa { background: #111; color: #aaa; border: 1px solid #252525; }
+    .share-action-wa:hover { border-color: #3a3a3a; color: #e8e8e0; }
+    .share-action-email { background: #111; color: #aaa; border: 1px solid #252525; }
+    .share-action-email:hover { border-color: #3a3a3a; color: #e8e8e0; }
     .share-error-msg { font-size: 11px; color: #cc5555; margin-top: 10px; display: none; }
     .share-error-msg.visible { display: block; }
   </style>
@@ -661,10 +661,20 @@ async function generateShare() {
   }
 }
 
-function copyShareLink() {
-  const link = document.getElementById('share-link-text').textContent;
+async function copyShareLink() {
+  const link = document.getElementById('share-link-text').textContent.trim();
   const btn = document.getElementById('share-copy-btn');
-  copyText(link, btn, '⎘  Copy link');
+  try {
+    await navigator.clipboard.writeText(link);
+  } catch (e) {
+    const ta = document.createElement('textarea');
+    ta.value = link; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+  }
+  btn.textContent = '✓  Copied!';
+  btn.classList.add('copied');
+  setTimeout(() => { btn.textContent = '⎘  Copy link'; btn.classList.remove('copied'); }, 2000);
 }
 
 </script>
