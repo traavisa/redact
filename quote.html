@@ -40,7 +40,7 @@
       font-size: 22px; font-weight: 500; letter-spacing: 0.04em;
       color: #e8e8e0; line-height: 1.2;
     }
-    .header-sub { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: #3a3a3a; margin-top: 3px; }
+    .header-sub { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: #777; margin-top: 3px; }
 
     /* ── Page intro ── */
     .page-intro { margin-bottom: 48px; }
@@ -49,7 +49,7 @@
       font-size: 38px; font-weight: 300; letter-spacing: -0.01em;
       color: #fff; line-height: 1.15; margin-bottom: 8px;
     }
-    .page-sub { font-size: 12px; color: #3a3a3a; letter-spacing: 0.06em; text-transform: uppercase; }
+    .page-sub { font-size: 12px; color: #888; letter-spacing: 0.06em; text-transform: uppercase; }
 
     /* ── Stones ── */
     .stones { display: flex; flex-direction: column; gap: 56px; }
@@ -67,8 +67,8 @@
       display: flex; align-items: center; justify-content: space-between;
       border-bottom: 1px solid #141414;
     }
-    .stone-num { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: #3a3a3a; }
-    .stone-cert { font-size: 11px; font-family: monospace; color: #2a2a2a; }
+    .stone-num { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: #888; }
+    .stone-cert { font-size: 11px; font-family: monospace; color: #666; }
 
     /* ── Main body: specs+price left, video right ── */
     .stone-body {
@@ -99,27 +99,39 @@
     }
     .price-currency-badge.usd { background: #0a1828; color: #4a9eff; border: 1px solid #1a3050; }
     .price-currency-badge.cad { background: #1a0a0a; color: #c9a84c; border: 1px solid #3a1a0a; }
-    .price-type-note { font-size: 11px; color: #444; margin-top: 4px; letter-spacing: 0.04em; }
+    .price-type-note { font-size: 11px; color: #888; margin-top: 4px; letter-spacing: 0.04em; }
 
     /* Specs */
     .specs-block {}
     .specs-label {
       font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
-      color: #2a2a2a; margin-bottom: 12px;
+      color: #777; margin-bottom: 12px;
     }
     .spec-row {
       display: flex; justify-content: space-between; align-items: baseline;
       padding: 7px 0;
-      border-bottom: 1px solid #161616;
+      border-bottom: 1px solid #1e1e1e;
     }
     .spec-row:last-child { border-bottom: none; }
     .spec-key {
       font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
-      color: #383838; font-weight: 500;
+      color: #888; font-weight: 500;
     }
-    .spec-val { font-size: 13px; color: #c8c8c0; font-weight: 400; }
+    .spec-val { font-size: 13px; color: #d8d8d0; font-weight: 400; }
 
-    /* Actions */
+    /* Natural Diamond badge */
+    .origin-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      margin-bottom: 16px;
+    }
+    .origin-badge-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #c9a84c; flex-shrink: 0;
+    }
+    .origin-badge-text {
+      font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+      color: #c9a84c; font-weight: 500;
+    }
     .stone-actions { margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
     .btn {
       display: flex; align-items: center; justify-content: center;
@@ -135,9 +147,9 @@
     .btn-ghost.copied { border-color: #1a3020; color: #4caf80; }
 
     /* Right panel — video */
-    .stone-right { background: #080808; }
-    .video-wrap { width: 100%; height: 100%; min-height: 420px; }
-    .video-wrap iframe { width: 100%; height: 100%; min-height: 420px; border: none; display: block; }
+    .stone-right { background: #080808; display: flex; align-items: flex-start; justify-content: center; }
+    .video-wrap { width: 500px; height: 500px; flex-shrink: 0; }
+    .video-wrap iframe { width: 500px; height: 500px; border: none; display: block; }
 
     /* PDF section */
     .pdf-section {
@@ -148,8 +160,8 @@
       display: flex; align-items: center; justify-content: space-between;
       cursor: pointer; user-select: none;
     }
-    .pdf-toggle-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: #333; }
-    .pdf-toggle-icon { font-size: 11px; color: #2a2a2a; transition: transform 0.2s; }
+    .pdf-toggle-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: #777; }
+    .pdf-toggle-icon { font-size: 11px; color: #666; transition: transform 0.2s; }
     .pdf-toggle-icon.open { transform: rotate(180deg); }
     .pdf-frame-wrap { display: none; }
     .pdf-frame-wrap.open { display: block; }
@@ -164,14 +176,16 @@
       display: flex; flex-direction: column; align-items: center; gap: 8px;
     }
     .footer-logo { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; opacity: 0.2; }
-    .footer-name { font-size: 9px; color: #1e1e1e; letter-spacing: 0.14em; text-transform: uppercase; }
-    .expiry-note { font-size: 10px; color: #1e1e1e; letter-spacing: 0.06em; }
+    .footer-name { font-size: 9px; color: #555; letter-spacing: 0.14em; text-transform: uppercase; }
+    .expiry-note { font-size: 10px; color: #555; letter-spacing: 0.06em; }
 
     /* ── Responsive: stack on mobile ── */
     @media (max-width: 680px) {
       .stone-body { grid-template-columns: 1fr; }
       .stone-left { border-right: none; border-bottom: 1px solid #141414; }
-      .video-wrap, .video-wrap iframe { min-height: 320px; }
+      .stone-right { justify-content: stretch; }
+      .video-wrap { width: 100% !important; height: 0 !important; padding-bottom: 100%; position: relative; }
+      .video-wrap iframe { position: absolute; inset: 0; width: 100% !important; height: 100% !important; }
       .page-title { font-size: 28px; }
       .price-amount { font-size: 28px; }
     }
@@ -191,7 +205,7 @@
   </div>
 
   <div class="page-intro">
-    <div class="page-title">Your Selection</div>
+    <div class="page-title">Diamond Options</div>
     <div class="page-sub" id="page-sub"></div>
   </div>
 
@@ -302,15 +316,25 @@ function render(s) {
       ['Ratio',        cd.ratio],
     ].filter(r => r[1]);
 
+    // Detect GIA (natural diamond)
+    const filename = (stone.orig_filename || '').toUpperCase();
+    const isGIA = filename.includes('GIA');
+    const originBadge = isGIA ? `
+      <div class="origin-badge">
+        <div class="origin-badge-dot"></div>
+        <span class="origin-badge-text">Natural Diamond</span>
+      </div>` : '';
+
     const specsHtml = specRows.length ? `
       <div class="specs-block">
+        ${originBadge}
         <div class="specs-label">Certificate details</div>
         ${specRows.map(r => `
           <div class="spec-row">
             <span class="spec-key">${r[0]}</span>
             <span class="spec-val">${r[1]}</span>
           </div>`).join('')}
-      </div>` : '';
+      </div>` : originBadge ? `<div class="specs-block">${originBadge}</div>` : '';
 
     card.innerHTML = `
       <div class="stone-label">
@@ -322,11 +346,6 @@ function render(s) {
         <div class="stone-left">
           ${priceHtml}
           ${specsHtml}
-          <div class="stone-actions">
-            <a class="btn btn-primary" href="${stone.pdf_url}" download="certificate-${stone.cert_last4}.pdf">
-              Download certificate
-            </a>
-          </div>
         </div>
         <div class="stone-right">
           <div class="video-wrap">
@@ -342,6 +361,11 @@ function render(s) {
         </div>
         <div class="pdf-frame-wrap">
           <iframe class="pdf-frame" src="${stone.pdf_url}#toolbar=0&navpanes=0"></iframe>
+          <div style="padding: 16px 24px 20px;">
+            <a class="btn btn-primary" href="${stone.pdf_url}" download="certificate-${stone.cert_last4}.pdf" style="max-width:260px;">
+              ↓ &nbsp;Download certificate
+            </a>
+          </div>
         </div>
       </div>`;
 
