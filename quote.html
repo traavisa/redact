@@ -100,7 +100,11 @@
     }
     .price-currency-badge.usd { background: #0a1828; color: #4a9eff; border: 1px solid #1a3050; }
     .price-currency-badge.cad { background: #1a0a0a; color: #c9a84c; border: 1px solid #3a1a0a; }
-    .price-type-note { font-size: 11px; color: #888; margin-top: 4px; letter-spacing: 0.04em; }
+    .price-ppc-label {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 22px; font-weight: 600; letter-spacing: 0.02em;
+      color: #c9a84c; margin-left: 8px; white-space: nowrap;
+    }
 
     /* Specs */
     .specs-block {}
@@ -458,12 +462,11 @@ function render(s, certTypes) {
       const cur = stone.currency || 'CAD';
       const symbol = cur === 'USD' ? 'US$' : 'CA$';
       const curClass = cur === 'USD' ? 'usd' : 'cad';
-      const ppcNote = stone.price_type === 'ppc' ? 'per carat' : '';
+      const isPpc = stone.price_type === 'ppc';
       priceHtml = `
         <div class="price-block">
-          <div class="price-amount">${symbol}${num}</div>
+          <div class="price-amount">${symbol}${num}${isPpc ? '<span class="price-ppc-label">per carat</span>' : ''}</div>
           <span class="price-currency-badge ${curClass}">${cur}</span>
-          ${ppcNote ? `<div class="price-type-note">${ppcNote}</div>` : ''}
         </div>`;
     }
 
