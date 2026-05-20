@@ -187,6 +187,128 @@
       .page-title { font-size: 28px; }
       .price-amount { font-size: 28px; }
     }
+
+    /* ── Share button ── */
+    .header { justify-content: space-between; }
+    .btn-share {
+      display: flex; align-items: center; gap: 7px;
+      padding: 9px 16px; border-radius: 2px;
+      font-size: 10px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase;
+      cursor: pointer; transition: all 0.15s;
+      background: transparent; color: #555; border: 1px solid #1e1e1e;
+      font-family: 'Inter', sans-serif; flex-shrink: 0;
+    }
+    .btn-share:hover { border-color: #c9a84c; color: #c9a84c; }
+
+    /* ── Share drawer ── */
+    .share-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.75);
+      z-index: 200; opacity: 0; pointer-events: none;
+      transition: opacity 0.25s;
+    }
+    .share-backdrop.open { opacity: 1; pointer-events: all; }
+    .share-panel {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      background: #0f0f0f; border-top: 1px solid #222;
+      z-index: 201;
+      transform: translateY(100%);
+      transition: transform 0.32s cubic-bezier(0.4, 0, 0.2, 1);
+      max-height: 88vh; overflow-y: auto;
+    }
+    .share-panel.open { transform: translateY(0); }
+    .share-panel-inner { max-width: 860px; margin: 0 auto; padding: 28px 24px 52px; }
+    .share-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 24px; padding-bottom: 20px; border-bottom: 1px solid #181818;
+    }
+    .share-panel-title {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: 22px; font-weight: 400; color: #e8e8e0; letter-spacing: 0.02em;
+    }
+    .share-panel-sub { font-size: 10px; color: #555; letter-spacing: 0.1em; text-transform: uppercase; margin-top: 3px; }
+    .share-close-btn {
+      width: 32px; height: 32px;
+      background: transparent; border: 1px solid #222; border-radius: 2px;
+      color: #555; font-size: 14px; cursor: pointer;
+      display: flex; align-items: center; justify-content: center;
+      transition: all 0.15s;
+    }
+    .share-close-btn:hover { border-color: #444; color: #999; }
+    .share-section-label {
+      font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
+      color: #555; margin-bottom: 12px;
+    }
+    .share-stones { display: flex; flex-direction: column; gap: 10px; margin-bottom: 24px; }
+    .share-stone-row {
+      background: #0c0c0c; border: 1px solid #181818; border-radius: 2px;
+      padding: 14px 18px;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+      flex-wrap: wrap;
+    }
+    .share-stone-info { flex: 1; min-width: 100px; }
+    .share-stone-num { font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: #888; }
+    .share-stone-cert { font-size: 11px; font-family: monospace; color: #555; margin-top: 2px; }
+    .share-price-wrap { display: flex; gap: 8px; align-items: center; }
+    .share-price-input {
+      width: 136px; background: #111; border: 1px solid #202020;
+      color: #e8e8e0; font-family: 'Inter', sans-serif;
+      font-size: 13px; padding: 9px 12px; border-radius: 2px;
+      outline: none; transition: border-color 0.15s;
+    }
+    .share-price-input:focus { border-color: #c9a84c; }
+    .share-price-input::placeholder { color: #2e2e2e; font-size: 11px; }
+    .share-cur-select {
+      background: #111; border: 1px solid #202020; border-radius: 2px;
+      color: #777; font-family: 'Inter', sans-serif;
+      font-size: 11px; padding: 9px 10px; cursor: pointer; outline: none;
+    }
+    .share-options-row {
+      display: flex; align-items: center; gap: 12px;
+      margin-bottom: 24px; flex-wrap: wrap;
+    }
+    .share-expiry-select {
+      background: #111; border: 1px solid #202020; border-radius: 2px;
+      color: #777; font-family: 'Inter', sans-serif;
+      font-size: 11px; padding: 9px 12px; cursor: pointer; outline: none;
+    }
+    .share-generate-btn {
+      width: 100%; padding: 14px; border-radius: 2px;
+      background: #c9a84c; color: #0a0a0a;
+      font-size: 11px; font-weight: 500; letter-spacing: 0.1em; text-transform: uppercase;
+      cursor: pointer; border: none; font-family: 'Inter', sans-serif;
+      transition: background 0.15s;
+    }
+    .share-generate-btn:hover:not(:disabled) { background: #d4b55e; }
+    .share-generate-btn:disabled { background: #1e1e14; color: #444; cursor: not-allowed; }
+    .share-result { display: none; margin-top: 20px; }
+    .share-result.visible { display: block; }
+    .share-result-label {
+      font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
+      color: #555; margin-bottom: 10px;
+    }
+    .share-link-box {
+      background: #0c0c0c; border: 1px solid #1e1e1e; border-radius: 2px;
+      padding: 12px 16px; font-size: 12px; font-family: monospace;
+      color: #c9a84c; word-break: break-all; margin-bottom: 12px;
+      letter-spacing: 0.02em; line-height: 1.6;
+    }
+    .share-actions-row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .share-action-btn {
+      flex: 1; min-width: 100px; padding: 11px 12px; border-radius: 2px;
+      font-size: 10px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+      cursor: pointer; border: none; font-family: 'Inter', sans-serif;
+      display: flex; align-items: center; justify-content: center; gap: 5px;
+      transition: all 0.15s; text-decoration: none;
+    }
+    .share-action-copy { background: #141414; color: #888; border: 1px solid #202020; }
+    .share-action-copy:hover { background: #1a1a1a; color: #aaa; }
+    .share-action-copy.copied { border-color: #1a3020; color: #4caf80; background: #0a1a10; }
+    .share-action-wa { background: #071a0e; color: #25d366; border: 1px solid #0d2e18; }
+    .share-action-wa:hover { background: #0a2014; }
+    .share-action-email { background: #071428; color: #4a9eff; border: 1px solid #102240; }
+    .share-action-email:hover { background: #0a1830; }
+    .share-error-msg { font-size: 11px; color: #cc5555; margin-top: 10px; display: none; }
+    .share-error-msg.visible { display: block; }
   </style>
 </head>
 <body>
@@ -200,6 +322,7 @@
       <div class="header-name" id="header-name"></div>
       <div class="header-sub">Diamond Selection</div>
     </div>
+    <button class="btn-share" onclick="openShare()">↗ &nbsp;Share</button>
   </div>
 
   <div class="page-intro">
@@ -301,6 +424,7 @@ function showError() {
 }
 
 function render(s, certTypes) {
+  currentQuote = s;
   const logo = CLIENT_LOGOS[s.client] || CLIENT_LOGOS['Pure Carbon Group'];
   document.getElementById('header-logo').src = logo;
   document.getElementById('header-name').textContent = s.client;
@@ -426,6 +550,170 @@ function togglePdf(toggleEl) {
 }
 
 init();
+
+// ── Share panel ──────────────────────────────────────────────────────────────
+let currentQuote = null;
+
+function openShare() {
+  if (!currentQuote) return;
+  const container = document.getElementById('share-stones');
+  container.innerHTML = '';
+  currentQuote.stones.forEach((stone, i) => {
+    const row = document.createElement('div');
+    row.className = 'share-stone-row';
+    row.innerHTML = `
+      <div class="share-stone-info">
+        <div class="share-stone-num">Diamond ${i + 1}</div>
+        <div class="share-stone-cert">···${stone.cert_last4}</div>
+      </div>
+      <div class="share-price-wrap">
+        <input
+          class="share-price-input" id="retail-price-${i}"
+          type="text" inputmode="numeric"
+          placeholder="No price shown"
+          value="${stone.retail_override || ''}"
+        />
+        <select class="share-cur-select" id="retail-cur-${i}">
+          <option value="CAD" ${(stone.currency || 'CAD') === 'CAD' ? 'selected' : ''}>CAD</option>
+          <option value="USD" ${stone.currency === 'USD' ? 'selected' : ''}>USD</option>
+        </select>
+      </div>`;
+    container.appendChild(row);
+  });
+  // Reset result state
+  document.getElementById('share-result').classList.remove('visible');
+  document.getElementById('share-error-msg').classList.remove('visible');
+  document.getElementById('share-generate-btn').disabled = false;
+  document.getElementById('share-generate-btn').textContent = 'Generate share link';
+  // Open
+  document.getElementById('share-backdrop').classList.add('open');
+  document.getElementById('share-panel').classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeShare() {
+  document.getElementById('share-backdrop').classList.remove('open');
+  document.getElementById('share-panel').classList.remove('open');
+  document.body.style.overflow = '';
+}
+
+async function generateShare() {
+  const btn = document.getElementById('share-generate-btn');
+  btn.disabled = true;
+  btn.textContent = 'Creating link…';
+  document.getElementById('share-error-msg').classList.remove('visible');
+
+  try {
+    const retailPrices = currentQuote.stones.map((_, i) => {
+      const raw = (document.getElementById(`retail-price-${i}`)?.value || '').replace(/[^0-9.]/g, '');
+      const cur = document.getElementById(`retail-cur-${i}`)?.value || 'CAD';
+      return raw ? { price: parseFloat(raw), currency: cur } : null;
+    });
+
+    const expiryVal = document.getElementById('share-expiry').value;
+    let expiresAt;
+    if (expiryVal === 'same') {
+      expiresAt = currentQuote.expires_at;
+    } else {
+      const d = new Date();
+      d.setDate(d.getDate() + parseInt(expiryVal));
+      expiresAt = d.toISOString();
+    }
+
+    const payload = {
+      client: currentQuote.client,
+      expires_at: expiresAt,
+      stones: currentQuote.stones,
+      retail_prices: retailPrices
+    };
+
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/shares`, {
+      method: 'POST',
+      headers: {
+        apikey: SUPABASE_ANON,
+        Authorization: 'Bearer ' + SUPABASE_ANON,
+        'Content-Type': 'application/json',
+        Prefer: 'return=representation'
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const rows = await res.json();
+    const shareId = rows[0]?.id;
+    if (!shareId) throw new Error('No ID returned');
+
+    const shareUrl = `https://alldiamondeverything.com/s/${shareId}`;
+    document.getElementById('share-link-text').textContent = shareUrl;
+
+    const msg = encodeURIComponent(`Here are your diamond options: ${shareUrl}`);
+    document.getElementById('share-wa-btn').href = `https://wa.me/?text=${msg}`;
+    const subject = encodeURIComponent('Your Diamond Selection — Pure Carbon Group');
+    const body = encodeURIComponent(`Please find your curated diamond options at the link below:\n\n${shareUrl}\n\nThis link will expire. Please contact us with any questions.`);
+    document.getElementById('share-email-btn').href = `mailto:?subject=${subject}&body=${body}`;
+
+    document.getElementById('share-result').classList.add('visible');
+    btn.textContent = 'Link generated ✓';
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = 'Generate share link';
+    document.getElementById('share-error-msg').classList.add('visible');
+  }
+}
+
+function copyShareLink() {
+  const link = document.getElementById('share-link-text').textContent;
+  const btn = document.getElementById('share-copy-btn');
+  copyText(link, btn, '⎘  Copy link');
+}
+
 </script>
+
+<div class="share-backdrop" id="share-backdrop" onclick="closeShare()"></div>
+<div class="share-panel" id="share-panel">
+  <div class="share-panel-inner">
+    <div class="share-panel-header">
+      <div>
+        <div class="share-panel-title">Share with client</div>
+        <div class="share-panel-sub">Optionally set a retail price per stone</div>
+      </div>
+      <button class="share-close-btn" onclick="closeShare()">✕</button>
+    </div>
+
+    <div class="share-section-label">Retail pricing — leave blank to hide price</div>
+    <div class="share-stones" id="share-stones"></div>
+
+    <div class="share-section-label">Link expiry</div>
+    <div class="share-options-row">
+      <select class="share-expiry-select" id="share-expiry">
+        <option value="same">Same as this quote</option>
+        <option value="7">7 days from now</option>
+        <option value="14">14 days from now</option>
+        <option value="30">30 days from now</option>
+      </select>
+    </div>
+
+    <button class="share-generate-btn" id="share-generate-btn" onclick="generateShare()">
+      Generate share link
+    </button>
+
+    <div class="share-result" id="share-result">
+      <div class="share-result-label">Share link</div>
+      <div class="share-link-box" id="share-link-text"></div>
+      <div class="share-actions-row">
+        <button class="share-action-btn share-action-copy" id="share-copy-btn" onclick="copyShareLink()">
+          ⎘ &nbsp;Copy link
+        </button>
+        <a class="share-action-btn share-action-wa" id="share-wa-btn" href="#" target="_blank">
+          ✦ &nbsp;WhatsApp
+        </a>
+        <a class="share-action-btn share-action-email" id="share-email-btn" href="#" target="_blank">
+          ✉ &nbsp;Email
+        </a>
+      </div>
+    </div>
+    <div class="share-error-msg" id="share-error-msg">Something went wrong. Please try again.</div>
+  </div>
+</div>
 </body>
 </html>
