@@ -462,7 +462,7 @@ for k,v in [("cert_type","IGI"),("sel_logo","Pure Carbon Group"),("upkey",0),
 # ── Header ────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="pcg-header">
-  <img class="pcg-logo" src="data:image/png;base64,{CLIENT_Pure_Carbon_B64}"/>
+  <img class="pcg-logo" src="data:image/png;base64,{CLIENT_Pure_Carbon_Group_B64}"/>
   <div>
     <div class="pcg-title">Diamond Tools</div>
     <div class="pcg-sub">Pure Carbon Group</div>
