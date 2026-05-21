@@ -348,7 +348,6 @@ def cert_selector(tab_prefix):
                 st.session_state.cert_type=key
                 st.session_state.results=None
                 st.session_state.upkey+=1
-                st.rerun()
 
 def client_selector(key_prefix, session_key):
     """Renders client logo cards with invisible overlay buttons."""
@@ -381,7 +380,6 @@ def client_selector(key_prefix, session_key):
             </div>''', unsafe_allow_html=True)
             if st.button("\u200b", key=f"{key_prefix}_{name}", use_container_width=True):
                 st.session_state[session_key] = name
-                st.rerun()
 
     with st.expander("➕  Add a new client"):
         new_name = st.text_input("Client name", placeholder="e.g. Vendor ABC", key=f"{key_prefix}_new_name")
@@ -393,6 +391,7 @@ def client_selector(key_prefix, session_key):
             b64 = base64.b64encode(buf.getvalue()).decode()
             if save_custom_client(new_name.strip(), b64):
                 st.session_state[session_key] = new_name.strip()
+                load_custom_clients.clear()
                 st.success(f"Saved: {new_name}")
                 st.rerun()
             else:
@@ -403,7 +402,7 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; }
-.block-container { max-width: 760px; padding-top: 2rem; padding-bottom: 3rem; }
+.block-container { max-width: 760px; padding-top: 1rem; padding-bottom: 3rem; }
 .stButton > button[kind="primary"] {
     background-color: #1a1a1a !important; border-color: #1a1a1a !important;
     color: #ffffff !important; font-family: 'DM Sans', sans-serif !important;
@@ -413,8 +412,8 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; }
 .stProgress > div > div { background-color: #1a1a1a !important; }
 .stTabs [data-baseweb="tab-list"] { gap: 8px; }
 .stTabs [data-baseweb="tab"] { padding: 8px 20px; border-radius: 8px !important; }
-.pcg-header { display: flex; align-items: center; gap: 14px; padding-bottom: 1.2rem; border-bottom: 1px solid rgba(128,128,128,0.15); margin-bottom: 1.8rem; }
-.pcg-logo { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+.pcg-header { display: flex; align-items: center; gap: 12px; padding-bottom: 0.7rem; border-bottom: 1px solid rgba(128,128,128,0.15); margin-bottom: 1rem; }
+.pcg-logo { width: 38px; height: 38px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
 .pcg-title { font-size: 1.1rem; font-weight: 600; }
 .pcg-sub { font-size: 0.68rem; opacity: 0.35; letter-spacing: 0.09em; text-transform: uppercase; margin-top: 2px; }
 .section-label { font-size: 0.67rem; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; opacity: 0.35; margin-bottom: 10px; }
@@ -602,11 +601,11 @@ with tab2:
     for i in range(3):
         with st.expander(f"Diamond {i+1}", expanded=(i==0)):
             q_pdf   = st.file_uploader("Raw certificate PDF (auto-redacted)", type="pdf", key=f"qpdf_{i}_{st.session_state.quote_upkey}")
-            q_vid   = st.text_input("Raw video URL (auto-cleaned)", placeholder="https://...", key=f"qvid_{i}_{st.session_state.quote_upkey}")
+            q_vid   = st.text_input("Video URL (optional, auto-cleaned)", placeholder="https://... (leave blank if none)", key=f"qvid_{i}_{st.session_state.quote_upkey}")
             q_price_raw = st.text_input("Your price (optional)", placeholder="e.g. 4500", key=f"qpri_{i}_{st.session_state.quote_upkey}")
             q_price = int(q_price_raw.strip()) if q_price_raw.strip().isdigit() else None
             q_type  = st.radio("Price type", ["Stone price","Price per carat"], horizontal=True, key=f"qtyp_{i}_{st.session_state.quote_upkey}")
-            if q_pdf and q_vid:
+            if q_pdf:
                 stones_ready.append({
                     "file":       q_pdf,
                     "video_url":  q_vid,
@@ -633,7 +632,7 @@ with tab2:
                 pdf_url = upload_pdf(redacted, fname)
                 if not pdf_url:
                     st.error(f"Upload failed for ···{s['cert_last4']}"); ok=False; break
-                cleaned_video = clean_video_url(s["video_url"])
+                cleaned_video = clean_video_url(s["video_url"]) if s["video_url"].strip() else ""
                 stones_payload.append({
                     "cert_last4":    s["cert_last4"],
                     "orig_filename": s["file"].name,
@@ -652,6 +651,7 @@ with tab2:
                     long_url = f"{QUOTE_BASE}/q/{qid}"
                     link     = shorten(long_url)
                     st.session_state.quote_link = link
+                    st.session_state.quote_upkey += 1
                     for s_orig, s_pay in zip(stones_ready, stones_payload):
                         add_history(
                             s_orig["file"].name,
