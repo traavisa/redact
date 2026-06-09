@@ -10,3 +10,8 @@
   from = "/s/*"
   to = "/share.html"
   status = 200
+  
+[[redirects]]
+  from = "/r/*"
+  to = "/.netlify/functions/redirect"
+  status = 200
