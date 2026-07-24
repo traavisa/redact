@@ -598,7 +598,7 @@ with tab2:
 
     col_a,col_b = st.columns(2)
     with col_a: q_currency = st.radio("Currency", ["CAD","USD"], horizontal=True, key="q_cur")
-    with col_b: q_expiry   = st.slider("Link expires (days)", 1, 30, 7, key="q_exp")
+    with col_b: q_expiry   = st.slider("Link expires (days)", 1, 30, 15, key="q_exp")
 
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Diamonds — up to 3</div>', unsafe_allow_html=True)
