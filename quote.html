@@ -26,6 +26,11 @@
     #error.visible { display: flex; }
     #error h2 { font-size: 18px; font-weight: 400; color: #888; }
     #error p { font-size: 13px; color: #444; max-width: 300px; line-height: 1.7; }
+    #expired-overlay { display: none; position: fixed; inset: 0; background: rgba(12,12,12,0.93); flex-direction: column; align-items: center; justify-content: center; gap: 10px; text-align: center; padding: 2rem; z-index: 50; }
+    #expired-overlay.visible { display: flex; }
+    #expired-overlay h2 { font-size: 22px; font-weight: 600; color: #fff; letter-spacing: 0.1em; text-transform: uppercase; }
+    #expired-overlay p { font-size: 13px; color: #aaa; max-width: 320px; line-height: 1.7; }
+    .watermark-logo { width: 16px; height: 16px; border-radius: 50%; object-fit: cover; opacity: 0.08; margin-top: 6px; }
 
     .page { max-width: 860px; margin: 0 auto; padding: 48px 24px 100px; }
 
@@ -178,7 +183,6 @@
       display: flex; flex-direction: column; align-items: center; gap: 8px;
     }
     .footer-logo { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; opacity: 0.2; }
-    .watermark-logo { width: 16px; height: 16px; border-radius: 50%; object-fit: cover; opacity: 0.08; margin-top: 6px; }
     .footer-name { font-size: 9px; color: #555; letter-spacing: 0.14em; text-transform: uppercase; }
     .expiry-note { font-size: 10px; color: #555; letter-spacing: 0.06em; }
 
@@ -194,6 +198,8 @@
 <body>
 <div id="loading"><div class="spinner"></div></div>
 <div id="error"><h2>Not available</h2><p>This link may have expired or is invalid. Please contact your representative.</p></div>
+
+<div id="expired-overlay"><h2>Quote Expired</h2><p>This quote has expired. Please contact your representative for updated pricing.</p></div>
 
 <div class="page" id="page" style="display:none;">
   <div class="header">
@@ -283,7 +289,7 @@ async function init() {
     const rows = await res.json();
     if (!rows || rows.length === 0) { showError(); return; }
     const s = rows[0];
-    if (new Date(s.expires_at) < new Date()) { showError(); return; }
+    const isExpired = new Date(s.expires_at) < new Date();
 
     // Scan each stone's PDF for cert type — run in parallel
     const certTypes = await Promise.all(s.stones.map(async (stone) => {
@@ -304,7 +310,7 @@ async function init() {
       return null;
     }));
 
-    render(s, certTypes);
+    render(s, certTypes, isExpired);
   } catch(e) { showError(); }
 }
 
@@ -313,7 +319,7 @@ function showError() {
   document.getElementById('error').classList.add('visible');
 }
 
-function render(s, certTypes) {
+function render(s, certTypes, isExpired) {
   const logo = CLIENT_LOGOS[s.client] || CLIENT_LOGOS['Pure Carbon Group'];
   document.getElementById('header-logo').src = logo;
   document.getElementById('header-name').textContent = s.client;
@@ -334,8 +340,13 @@ function render(s, certTypes) {
   // Expiry
   const exp = new Date(s.expires_at);
   const daysLeft = Math.ceil((exp - new Date()) / (1000*60*60*24));
-  document.getElementById('expiry-note').textContent =
-    daysLeft > 1 ? `Link valid for ${daysLeft} more days` : 'Link expires soon';
+  if (isExpired) {
+    document.getElementById('expiry-note').textContent = 'Expired';
+    document.getElementById('expired-overlay').classList.add('visible');
+  } else {
+    document.getElementById('expiry-note').textContent =
+      daysLeft > 1 ? `Link valid for ${daysLeft} more days` : 'Link expires soon';
+  }
 
   const stonesEl = document.getElementById('stones');
   s.stones.forEach((stone, i) => {
