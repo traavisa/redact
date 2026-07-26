@@ -148,7 +148,8 @@
       color: #8a8a8a; margin-bottom: 12px;
     }
     .spec-row {
-      display: flex; justify-content: space-between; align-items: baseline;
+      display: flex; justify-content: space-between; align-items: flex-start;
+      gap: 12px;
       padding: 7px 0;
       border-bottom: 1px solid #1e1e1e;
     }
@@ -156,8 +157,12 @@
     .spec-key {
       font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
       color: #9a9a9a; font-weight: 500;
+      flex-shrink: 0; line-height: 1.5;
     }
-    .spec-val { font-size: 13px; color: #d8d8d0; font-weight: 400; }
+    .spec-val {
+      font-size: 13px; color: #d8d8d0; font-weight: 400;
+      flex: 1 1 auto; min-width: 0; text-align: right; line-height: 1.5;
+    }
 
     /* Natural Diamond badge */
     .origin-badge {
