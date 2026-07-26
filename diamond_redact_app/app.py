@@ -146,7 +146,7 @@ def add_history(orig, clean, ctype, client=""):
 
 @st.cache_data(ttl=30)
 def load_quote_history():
-    rows = sb_get("quotes", "order=created_at.desc&limit=25")
+    rows = sb_get("quotes", "order=created_at.desc&limit=200")
     if isinstance(rows, list): return rows
     return []
 
@@ -692,42 +692,71 @@ with tab2:
     except:
         qhistory = []
 
+    def render_quote_row(q):
+        exp_str = ""
+        if q.get("expires_at"):
+            try:
+                exp_dt = datetime.datetime.fromisoformat(q["expires_at"].replace("Z",""))
+                expired = exp_dt < datetime.datetime.utcnow()
+                exp_str = f"Expired" if expired else exp_dt.strftime("Exp %b %d")
+            except: pass
+        stones = q.get("stones",[])
+        n = len(stones) if isinstance(stones, list) else 0
+        stone_lines = []
+        for s in (stones if isinstance(stones, list) else []):
+            orig = s.get("orig_filename","")
+            last4 = s.get("cert_last4","")
+            if orig:
+                stone_lines.append(f"{orig} → ···{last4}")
+            else:
+                stone_lines.append(f"···{last4}")
+        stones_display = "<br>".join(stone_lines) if stone_lines else "—"
+        created = ""
+        if q.get("created_at"):
+            try:
+                dt = datetime.datetime.fromisoformat(q["created_at"].replace("Z",""))
+                created = dt.strftime("%b %d, %H:%M")
+            except: pass
+        long_url = f"{QUOTE_BASE}/q/{q['id']}"
+        st.markdown(f"""<div class="history-row">
+          <div>
+            <div class="h-orig">{q.get("client","")} · {n} diamond(s)</div>
+            <div class="h-clean" style="font-size:11px;line-height:1.6;">{stones_display}</div>
+            <div class="h-clean" style="font-size:11px;margin-top:4px;">
+              <a href="{long_url}" target="_blank" style="color:#c9a84c;">{long_url}</a>
+            </div>
+          </div>
+          <div class="h-meta">{created}<br>{exp_str}</div>
+        </div>""", unsafe_allow_html=True)
+
     if qhistory:
-        for q in qhistory:
-            exp_str = ""
-            if q.get("expires_at"):
-                try:
-                    exp_dt = datetime.datetime.fromisoformat(q["expires_at"].replace("Z",""))
-                    expired = exp_dt < datetime.datetime.utcnow()
-                    exp_str = f"Expired" if expired else exp_dt.strftime("Exp %b %d")
-                except: pass
-            stones = q.get("stones",[])
-            n = len(stones) if isinstance(stones, list) else 0
-            stone_lines = []
-            for s in (stones if isinstance(stones, list) else []):
-                orig = s.get("orig_filename","")
-                last4 = s.get("cert_last4","")
-                if orig:
-                    stone_lines.append(f"{orig} → ···{last4}")
-                else:
-                    stone_lines.append(f"···{last4}")
-            stones_display = "<br>".join(stone_lines) if stone_lines else "—"
-            created = ""
-            if q.get("created_at"):
-                try:
-                    dt = datetime.datetime.fromisoformat(q["created_at"].replace("Z",""))
-                    created = dt.strftime("%b %d, %H:%M")
-                except: pass
-            long_url = f"{QUOTE_BASE}/q/{q['id']}"
-            st.markdown(f"""<div class="history-row">
-              <div>
-                <div class="h-orig">{q.get("client","")} · {n} diamond(s)</div>
-                <div class="h-clean" style="font-size:11px;line-height:1.6;">{stones_display}</div>
-                <div class="h-clean" style="font-size:11px;margin-top:4px;">
-                  <a href="{long_url}" target="_blank" style="color:#c9a84c;">{long_url}</a>
-                </div>
-              </div>
-              <div class="h-meta">{created}<br>{exp_str}</div>
-            </div>""", unsafe_allow_html=True)
+        qh_search = st.text_input(
+            "Search quote history", placeholder="Search by client, filename, or cert #…",
+            key="qh_search", label_visibility="collapsed"
+        )
+        if qh_search:
+            term = qh_search.strip().lower()
+            def matches(q):
+                if term in (q.get("client") or "").lower(): return True
+                if term in (q.get("id") or "").lower(): return True
+                for s in (q.get("stones") or []):
+                    if term in (s.get("orig_filename") or "").lower(): return True
+                    if term in (s.get("cert_last4") or "").lower(): return True
+                return False
+            filtered = [q for q in qhistory if matches(q)]
+        else:
+            filtered = qhistory
+
+        if not filtered:
+            st.caption("No quotes match your search.")
+        else:
+            grouped = {}
+            for q in filtered:
+                grouped.setdefault(q.get("client") or "(No client)", []).append(q)
+            for client_name in sorted(grouped.keys(), key=str.lower):
+                group = grouped[client_name]
+                with st.expander(f"{client_name}  ·  {len(group)}", expanded=bool(qh_search)):
+                    for q in group:
+                        render_quote_row(q)
     else:
         st.caption("No quotes created yet.")
