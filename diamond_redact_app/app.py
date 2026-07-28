@@ -672,6 +672,11 @@ with tab2:
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
 
+    try:
+        qhistory = load_quote_history()
+    except:
+        qhistory = []
+
     # ── Quote link display ────────────────────────────────────────────────────
     _qlink = st.session_state.get("quote_link")
     if _qlink:
@@ -682,15 +687,21 @@ with tab2:
             st.session_state.quote_link = None
             st.rerun()
 
+    # ── Last used link — stays visible even if the box above is cleared or the
+    #    copy click didn't register; auto-updates the moment a new quote is made ──
+    if qhistory:
+        _last_q = qhistory[0]
+        _last_link = f"{QUOTE_BASE}/q/{_last_q['id']}"
+        _last_client = _last_q.get("client") or "No client"
+        _last_n = len(_last_q.get("stones") or [])
+        st.markdown('<div class="section-label" style="margin-top:1rem;">Last used link</div>', unsafe_allow_html=True)
+        st.caption(f"{_last_client} · {_last_n} diamond(s) — filed automatically, updates whenever a new quote is generated")
+        st.code(_last_link, language=None)
+
     # ── Quote history ─────────────────────────────────────────────────────────
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     qhc1,qhc2 = st.columns([4,1])
     with qhc1: st.markdown('<div class="section-label" style="margin-bottom:0">Quote history</div>', unsafe_allow_html=True)
-
-    try:
-        qhistory = load_quote_history()
-    except:
-        qhistory = []
 
     def render_quote_row(q):
         exp_str = ""
