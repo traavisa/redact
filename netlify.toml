@@ -1,16 +1,22 @@
 [build]
   functions = "netlify/functions"
 
+[functions."quote-page"]
+  included_files = ["quote.html"]
+
+[functions."share-page"]
+  included_files = ["share.html"]
+
 [[redirects]]
   from = "/q/*"
-  to = "/quote.html"
+  to = "/.netlify/functions/quote-page/:splat"
   status = 200
 
 [[redirects]]
   from = "/s/*"
-  to = "/share.html"
+  to = "/.netlify/functions/share-page/:splat"
   status = 200
-  
+
 [[redirects]]
   from = "/r/*"
   to = "/.netlify/functions/redirect"
