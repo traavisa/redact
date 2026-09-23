@@ -338,7 +338,7 @@ def extract_cert_data(file_bytes, cert_type):
 
 # ── Bulk quote (spreadsheet upload) helpers ──────────────────────────────────
 # Whitelist of columns we read. Anything not listed here (Supplier, StockId,
-# Discount, Nivoda's own "Price" = vendor cost, etc.) is ignored on purpose.
+# Discount, the N-Template's own "Price" = vendor cost, etc.) is ignored on purpose.
 BULK_COLS = {
     "reportno": ["reportno", "reportnumber", "certno", "certnumber", "certificateno", "certificatenumber"],
     "lab":      ["lab", "grader", "certlab"],
@@ -406,7 +406,7 @@ def bulk_read_table(uploaded):
     hdr_i = next((i for i, r in enumerate(rows[:10])
                   if any(_BULK_ALIAS.get(_bnorm(c)) == "reportno" for c in r)), None)
     if hdr_i is None:
-        raise ValueError("Couldn't find a ReportNo column — is this one of the Pure Carbon templates or a Nivoda export?")
+        raise ValueError("Couldn't find a ReportNo column — is this one of the Pure Carbon templates or an N-Template?")
     keys = [_BULK_ALIAS.get(_bnorm(c)) for c in rows[hdr_i]]
     return keys, rows[hdr_i + 1:], hdr_i + 2
 
@@ -495,6 +495,32 @@ def bulk_parse(uploaded, kind_choice="Auto-detect"):
     return {"kind": kind, "stones": stones, "errors": errors, "skipped_blank": blank,
             "filename": uploaded.name}
 
+
+def save_quote(client, stones_payload, expiry_days):
+    """Writes one quote row to Supabase and returns its link, or None on failure.
+    Shared by the manual flow and the spreadsheet (bulk) flow."""
+    qid  = gen_id()
+    exp  = (datetime.datetime.utcnow()+datetime.timedelta(days=expiry_days)).isoformat()+"Z"
+    body = {"id":qid,"client":client,"stones":stones_payload,"expires_at":exp}
+    if not sb_insert("quotes", body):
+        return None
+    load_quote_history.clear()
+    return shorten(f"{QUOTE_BASE}/q/{qid}")
+
+def bulk_stone_payload(s, currency, price_type):
+    """Spreadsheet stone → the same stone dict the manual flow stores.
+    No certificate PDF yet (cert lookup not built), so pdf_url is blank."""
+    return {
+        "cert_last4":    s["cert_last4"],
+        "orig_filename": s["report_no"],
+        "cert_type":     s["cert_type"],
+        "video_url":     clean_video_url(s["video_url"]),
+        "pdf_url":       "",
+        "price":         s["price"],
+        "currency":      currency,
+        "price_type":    price_type,
+        "cert_data":     s["cert_data"],
+    }
 
 def cert_selector(tab_prefix):
     """Renders cert type cards with invisible overlay buttons. Returns selected key."""
@@ -792,7 +818,7 @@ with tab2:
     if "bulk_upkey" not in st.session_state: st.session_state.bulk_upkey = 0
     b_kind = st.radio("Template type", ["Auto-detect", "Lab-grown", "Natural"],
                       horizontal=True, key="bulk_kind")
-    b_file = st.file_uploader("Upload filled template or Nivoda export (.xlsx or .csv)",
+    b_file = st.file_uploader("Upload a filled template or N-Template (.xlsx or .csv)",
                               type=["xlsx", "csv"], key=f"bulk_up_{st.session_state.bulk_upkey}")
     if b_file:
         try:
@@ -824,11 +850,31 @@ with tab2:
                 st.dataframe(prev, hide_index=True, use_container_width=True)
                 st.caption("Details above come from the spreadsheet for now — certificate lookup isn't built yet. "
                            f"Client, currency ({st.session_state.get('q_cur', 'CAD')}) and expiry use the settings above.")
-                st.radio("Quote Price type (all stones)", ["Stone price", "Price per carat"],
-                         horizontal=True, key="bulk_price_type")
-                st.info("Preview only — generating the quote is the next step (stage 3). Nothing has been saved.")
+                b_ptype = st.radio("Quote Price type (all stones)", ["Stone price", "Price per carat"],
+                                   horizontal=True, key="bulk_price_type")
+                st.caption(f"Nothing is saved until you click below. Quote for **{q_client}**.")
+                if st.button(f"🔗  Generate quote link ({n} diamond{'s' if n != 1 else ''})",
+                             type="primary", use_container_width=True, key="bulk_gen"):
+                    with st.spinner(f"Creating quote for {n} diamond(s)…"):
+                        ptype = "ppc" if "carat" in b_ptype else "stone"
+                        payload = [bulk_stone_payload(s, q_currency, ptype) for s in parsed["stones"]]
+                        link = save_quote(q_client, payload, q_expiry)
+                    if link:
+                        st.session_state.quote_link = link
+                        st.session_state.bulk_last_link = (link, q_client, n)
+                        st.session_state.bulk_upkey += 1      # clears the upload box
+                        for sp in payload:
+                            add_history(f"{parsed['filename']} · {sp['orig_filename']}",
+                                        f"···{sp['cert_last4']} → {link}", sp["cert_type"], q_client)
+                        st.rerun()
+                    else:
+                        st.error("Failed to save quote — check Supabase connection.")
     else:
         st.session_state.bulk_parsed = None
+        _bl = st.session_state.get("bulk_last_link")
+        if _bl:
+            st.success(f"✅ Quote created for {_bl[1]} · {_bl[2]} diamond(s)")
+            st.code(_bl[0], language=None)
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Diamonds — up to 3</div>', unsafe_allow_html=True)
 
@@ -879,12 +925,8 @@ with tab2:
                     "cert_data":     extract_cert_data(raw_bytes, cert_type_q),
                 })
             if ok:
-                qid  = gen_id()
-                exp  = (datetime.datetime.utcnow()+datetime.timedelta(days=q_expiry)).isoformat()+"Z"
-                body = {"id":qid,"client":q_client,"stones":stones_payload,"expires_at":exp}
-                if sb_insert("quotes", body):
-                    long_url = f"{QUOTE_BASE}/q/{qid}"
-                    link     = shorten(long_url)
+                link = save_quote(q_client, stones_payload, q_expiry)
+                if link:
                     st.session_state.quote_link = link
                     st.session_state.quote_upkey += 1
                     for s_orig, s_pay in zip(stones_ready, stones_payload):
@@ -894,7 +936,6 @@ with tab2:
                             cert_type_q,
                             q_client
                         )
-                    load_quote_history.clear()
                     st.rerun()
                 else:
                     st.error("Failed to save quote — check Supabase connection.")
