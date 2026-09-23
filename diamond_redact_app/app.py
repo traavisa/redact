@@ -336,6 +336,166 @@ def extract_cert_data(file_bytes, cert_type):
 
     return {k: v for k, v in raw.items() if v}
 
+# ── Bulk quote (spreadsheet upload) helpers ──────────────────────────────────
+# Whitelist of columns we read. Anything not listed here (Supplier, StockId,
+# Discount, Nivoda's own "Price" = vendor cost, etc.) is ignored on purpose.
+BULK_COLS = {
+    "reportno": ["reportno", "reportnumber", "certno", "certnumber", "certificateno", "certificatenumber"],
+    "lab":      ["lab", "grader", "certlab"],
+    "loupe360": ["loupe360"],
+    "videourl": ["videourl", "video", "videolink"],
+    "qprice":   ["quoteprice", "clientprice"],   # plain "price" is NEVER read
+    "shape":    ["shape"],
+    "carat":    ["carats", "carat", "caratweight", "weight"],
+    "color":    ["col", "color", "colour"],
+    "clarity":  ["clar", "clarity"],
+    "cut":      ["cut"],
+    "polish":   ["pol", "polish"],
+    "symmetry": ["symm", "sym", "symmetry"],
+    "flo":      ["flo", "fluor", "fluorescence"],
+    "flocol":   ["flocol", "fluorescencecolor", "fluorescencecolour"],
+    "length":   ["length"],
+    "width":    ["width"],
+    "height":   ["height"],
+    "ratio":    ["ratio"],
+}
+_BULK_ALIAS = {a: k for k, al in BULK_COLS.items() for a in al}
+_GRADE_WORDS = {"EX": "Excellent", "EXC": "Excellent", "ID": "Ideal", "VG": "Very Good",
+                "G": "Good", "GD": "Good", "F": "Fair", "FR": "Fair", "P": "Poor", "PR": "Poor"}
+_FLUOR_WORDS = {"N": "None", "NON": "None", "NONE": "None", "FNT": "Faint", "F": "Faint", "FAINT": "Faint",
+                "MED": "Medium", "M": "Medium", "MEDIUM": "Medium", "STG": "Strong", "S": "Strong",
+                "STRONG": "Strong", "VST": "Very Strong", "VSTG": "Very Strong", "VS": "Very Strong",
+                "VERYSTRONG": "Very Strong", "SL": "Slight", "SLIGHT": "Slight", "VSL": "Very Slight"}
+
+def _bnorm(h):
+    return _re.sub(r"[^a-z0-9]", "", str(h).lower())
+
+def _bcell(v):
+    """Cell → clean string. Handles NaN/None, whitespace, and Excel's 123.0 floats."""
+    if v is None: return ""
+    try:
+        if v != v: return ""          # NaN
+    except Exception: pass
+    if isinstance(v, float) and v.is_integer(): v = int(v)
+    s = str(v).strip()
+    if s.lower() in ("nan", "null", "n/a", "na", "-"): return ""
+    return s
+
+def _bnum(s, dp=2):
+    try: return f"{float(str(s).replace(',', '')):.{dp}f}"
+    except Exception: return ""
+
+def _bgrade(s):
+    return _GRADE_WORDS.get(s.upper().replace(" ", ""), s.title()) if s else ""
+
+def bulk_read_table(uploaded):
+    """Returns (list_of_header_keys, list_of_row_lists, first_data_excel_row) from an .xlsx or .csv."""
+    import pandas as pd
+    name = uploaded.name.lower()
+    if name.endswith(".csv"):
+        df = pd.read_csv(uploaded, header=None, dtype=object, keep_default_na=False, encoding_errors="replace")
+    else:
+        sheets = pd.read_excel(uploaded, sheet_name=None, header=None, dtype=object)
+        df = sheets.get("Stones")
+        if df is None:   # otherwise first sheet that has a ReportNo header
+            df = next((d for d in sheets.values()
+                       if any(_BULK_ALIAS.get(_bnorm(c)) == "reportno" for c in d.head(10).values.ravel())),
+                      next(iter(sheets.values())))
+    rows = df.values.tolist()
+    # Header = first row (within top 10) that contains a ReportNo-type column
+    hdr_i = next((i for i, r in enumerate(rows[:10])
+                  if any(_BULK_ALIAS.get(_bnorm(c)) == "reportno" for c in r)), None)
+    if hdr_i is None:
+        raise ValueError("Couldn't find a ReportNo column — is this one of the Pure Carbon templates or a Nivoda export?")
+    keys = [_BULK_ALIAS.get(_bnorm(c)) for c in rows[hdr_i]]
+    return keys, rows[hdr_i + 1:], hdr_i + 2
+
+def bulk_detect_kind(keys, recs):
+    if "loupe360" in keys: return "Lab-grown"
+    if "videourl" in keys or "flocol" in keys: return "Natural"
+    labs = [r.get("lab", "").upper() for r in recs]
+    return "Lab-grown" if sum("IGI" in l for l in labs) > sum("GIA" in l for l in labs) else "Natural"
+
+def bulk_parse(uploaded, kind_choice="Auto-detect"):
+    """Parse spreadsheet → dict(kind, stones, errors, skipped_blank). No writes anywhere."""
+    keys, rows, first_row = bulk_read_table(uploaded)
+    recs = []
+    for i, r in enumerate(rows):
+        rec = {}
+        for k, v in zip(keys, r):
+            if k and k not in rec:          # first matching column wins
+                rec[k] = _bcell(v)
+        recs.append((first_row + i, rec))
+    kind = kind_choice if kind_choice != "Auto-detect" else bulk_detect_kind(keys, [r for _, r in recs])
+    vid_main, vid_alt = ("loupe360", "videourl") if kind == "Lab-grown" else ("videourl", "loupe360")
+    vid_label = "Loupe360" if kind == "Lab-grown" else "Video URL"
+
+    stones, errors, seen, blank = [], [], set(), 0
+    for rownum, rec in recs:
+        if not any(v for v in rec.values()):
+            blank += 1; continue
+        rep = rec.get("reportno", "").replace(" ", "")
+        if rep.endswith(".0"): rep = rep[:-2]
+        lab_raw = rec.get("lab", "").upper()
+        lab = "GIA" if "GIA" in lab_raw else "IGI" if "IGI" in lab_raw else ""
+        video = rec.get(vid_main) or rec.get(vid_alt, "")
+        missing = []
+        if not rep: missing.append("ReportNo")
+        if not lab: missing.append("Lab (must be IGI or GIA)" if lab_raw else "Lab")
+        if not video: missing.append(vid_label)
+        elif not video.lower().startswith("http"): missing.append(f"{vid_label} (not a link)")
+        if missing:
+            errors.append(f"Row {rownum}: missing {', '.join(missing)}"); continue
+        if "xxxx" in video.lower():
+            errors.append(f"Row {rownum}: looks like the template's sample row — skipped"); continue
+        if rep in seen:
+            errors.append(f"Row {rownum}: ReportNo {rep} appears twice — kept the first"); continue
+        seen.add(rep)
+
+        color = rec.get("color", "")
+        color = color.upper() if len(color) <= 2 else color.title()
+        is_fancy = len(color) > 2
+        L, W, H = (_bnum(rec.get(k, "")) for k in ("length", "width", "height"))
+        meas = " x ".join([L, W, H]) if (L and W and H) else ""
+        ratio = _bnum(rec.get("ratio", ""))
+        if not ratio and L and W:
+            try: ratio = f"{float(L) / float(W):.2f}"
+            except Exception: pass
+        flo = rec.get("flo", "")
+        flo = _FLUOR_WORDS.get(flo.upper().replace(" ", ""), flo.title()) if flo else ""
+        flocol = rec.get("flocol", "").title()
+        if flo and flo != "None" and flocol: flo = f"{flo} {flocol}"
+
+        price = ""
+        pr = _re.sub(r"[^\d.]", "", rec.get("qprice", ""))
+        if pr:
+            try:
+                pv = float(pr)
+                if pv > 0: price = str(int(pv)) if pv.is_integer() else f"{pv:.2f}"
+            except Exception:
+                errors.append(f"Row {rownum}: Quote Price '{rec.get('qprice')}' isn't a number — no price shown")
+
+        cert_data = {
+            "shape": rec.get("shape", "").title(), "carat": _bnum(rec.get("carat", "")),
+            "color": color, "clarity": rec.get("clarity", "").upper().replace(" ", ""),
+            "cut": _bgrade(rec.get("cut", "")), "polish": _bgrade(rec.get("polish", "")),
+            "symmetry": _bgrade(rec.get("symmetry", "")), "fluorescence": flo,
+            "measurements": meas, "ratio": ratio,
+        }
+        stones.append({
+            "report_no":  rep,
+            "lab":        lab,
+            "cert_type":  "GIA Colour" if (lab == "GIA" and is_fancy) else lab,
+            "cert_last4": "".join(filter(str.isdigit, rep))[-4:],
+            "video_url":  video,
+            "price":      price,
+            "cert_data":  {k: v for k, v in cert_data.items() if v},
+            "row":        rownum,
+        })
+    return {"kind": kind, "stones": stones, "errors": errors, "skipped_blank": blank,
+            "filename": uploaded.name}
+
+
 def cert_selector(tab_prefix):
     """Renders cert type cards with invisible overlay buttons. Returns selected key."""
     cols = st.columns(3)
@@ -626,7 +786,49 @@ with tab2:
                     use_container_width=True, key=f"tpl_dl_{_word}")
             else:
                 st.caption(f"⚠️ {_label} template not found in the templates folder")
-    st.caption("Required: ReportNo, Lab, and the video link (Loupe360 / Video URL). Price and all other columns are optional.")
+    st.caption("Required: ReportNo, Lab, and the video link (Loupe360 / Video URL). Quote Price and all other columns are optional.")
+
+    # ── Bulk upload + preview (nothing is written to Supabase here) ───────────
+    if "bulk_upkey" not in st.session_state: st.session_state.bulk_upkey = 0
+    b_kind = st.radio("Template type", ["Auto-detect", "Lab-grown", "Natural"],
+                      horizontal=True, key="bulk_kind")
+    b_file = st.file_uploader("Upload filled template or Nivoda export (.xlsx or .csv)",
+                              type=["xlsx", "csv"], key=f"bulk_up_{st.session_state.bulk_upkey}")
+    if b_file:
+        try:
+            b_file.seek(0)
+            parsed = bulk_parse(b_file, b_kind)
+        except Exception as e:
+            parsed = None
+            st.error(f"Couldn't read that file: {e}")
+        st.session_state.bulk_parsed = parsed
+        if parsed:
+            n = len(parsed["stones"])
+            st.markdown(f"**{parsed['kind']}** · **{n} stone(s) ready** for one quote"
+                        + (f" · {parsed['skipped_blank']} blank row(s) ignored" if parsed["skipped_blank"] else ""))
+            if parsed["errors"]:
+                st.warning("Rows needing attention (not included):\n\n" +
+                           "\n".join(f"- {e}" for e in parsed["errors"]))
+            if n:
+                import pandas as pd
+                from urllib.parse import urlparse
+                prev = pd.DataFrame([{
+                    "Row": s["row"], "ReportNo": s["report_no"], "Lab": s["cert_type"],
+                    "Shape": s["cert_data"].get("shape", ""), "Carat": s["cert_data"].get("carat", ""),
+                    "Color": s["cert_data"].get("color", ""), "Clarity": s["cert_data"].get("clarity", ""),
+                    "Cut": s["cert_data"].get("cut", ""), "Polish": s["cert_data"].get("polish", ""),
+                    "Symmetry": s["cert_data"].get("symmetry", ""), "Fluor": s["cert_data"].get("fluorescence", ""),
+                    "Measurements": s["cert_data"].get("measurements", ""), "Ratio": s["cert_data"].get("ratio", ""),
+                    "Quote Price": s["price"], "Video": urlparse(s["video_url"]).netloc,
+                } for s in parsed["stones"]])
+                st.dataframe(prev, hide_index=True, use_container_width=True)
+                st.caption("Details above come from the spreadsheet for now — certificate lookup isn't built yet. "
+                           f"Client, currency ({st.session_state.get('q_cur', 'CAD')}) and expiry use the settings above.")
+                st.radio("Quote Price type (all stones)", ["Stone price", "Price per carat"],
+                         horizontal=True, key="bulk_price_type")
+                st.info("Preview only — generating the quote is the next step (stage 3). Nothing has been saved.")
+    else:
+        st.session_state.bulk_parsed = None
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     st.markdown('<div class="section-label">Diamonds — up to 3</div>', unsafe_allow_html=True)
 
