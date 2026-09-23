@@ -579,6 +579,28 @@ with tab1:
     else:
         st.caption("No files processed yet.")
 
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+
+    # ── Bulk quote from spreadsheet (templates) ───────────────────────────────
+    st.markdown('<div class="section-label">Bulk quote from spreadsheet</div>', unsafe_allow_html=True)
+    _tpl_dir = Path(__file__).parent / "templates"
+    _tpl_files = sorted(_tpl_dir.glob("*.xlsx")) if _tpl_dir.exists() else []
+    def _find_tpl(word):
+        for _p in _tpl_files:
+            if word in _p.name.lower().replace("-", "").replace("_", "").replace(" ", ""):
+                return _p
+        return None
+    _tc1, _tc2 = st.columns(2)
+    for _col, _label, _word in [(_tc1, "Lab-grown", "labgrown"), (_tc2, "Natural", "natural")]:
+        with _col:
+            _tp = _find_tpl(_word)
+            if _tp:
+                st.download_button(f"⬇  Download {_label} template", _tp.read_bytes(), _tp.name,
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True, key=f"tpl_dl_{_word}")
+            else:
+                st.caption(f"⚠️ {_label} template not found in diamond_redact_app/templates/")
+    st.caption("Required: ReportNo, Lab, and the video link (Loupe360 / Video URL). Price and all other columns are optional.")
 # ═══════════════════════════════════════════════════
 # TAB 2 — CREATE QUOTE
 # ═══════════════════════════════════════════════════
