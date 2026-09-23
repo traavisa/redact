@@ -69,6 +69,13 @@ VIEWER_BASE   = "https://video.alldiamondeverything.com/?u="
 QUOTE_BASE    = "https://quote.alldiamondeverything.com"
 SUPABASE_URL  = "https://srlbevzrkovruyerixdi.supabase.co"
 SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNybGJldnpya292cnV5ZXJpeGRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NTk0NjQsImV4cCI6MjA5NDQzNTQ2NH0.wB8eSR-MClr9CLwj8V998aJbCNAVlw2wK9PppB_DnIA"
+# Server-side key for the database (Streamlit Cloud → App settings → Secrets:
+#   SUPABASE_SERVICE_KEY = "…service_role key from Supabase → Project Settings → API…"
+# It never reaches a browser. Falls back to the public key until the secret is added.
+try:
+    SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_KEY", "") or SUPABASE_ANON
+except Exception:
+    SUPABASE_KEY = SUPABASE_ANON
 
 
 # ── Cert zone definitions ─────────────────────────────────────────────────────
@@ -113,20 +120,20 @@ PADDING       = 1.5
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 def sb_get(table, filters=""):
     r = requests.get(f"{SUPABASE_URL}/rest/v1/{table}?{filters}&select=*",
-        headers={"apikey":SUPABASE_ANON,"Authorization":f"Bearer {SUPABASE_ANON}"},
+        headers={"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}"},
         timeout=10)
     return r.json() if r.status_code == 200 else []
 
 def sb_insert(table, payload):
     r = requests.post(f"{SUPABASE_URL}/rest/v1/{table}",
-        headers={"apikey":SUPABASE_ANON,"Authorization":f"Bearer {SUPABASE_ANON}",
+        headers={"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}",
                  "Content-Type":"application/json","Prefer":"return=minimal"},
         data=json.dumps(payload), timeout=10)
     return r.status_code in (200,201,204)
 
 def sb_delete(table, filter_str):
     r = requests.delete(f"{SUPABASE_URL}/rest/v1/{table}?{filter_str}",
-        headers={"apikey":SUPABASE_ANON,"Authorization":f"Bearer {SUPABASE_ANON}"},
+        headers={"apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}"},
         timeout=10)
     return r.status_code in (200,204)
 
@@ -153,7 +160,7 @@ def load_quote_history():
 def upload_pdf(pdf_bytes, filename):
     url = f"{SUPABASE_URL}/storage/v1/object/certificates/{filename}"
     r = requests.post(url, headers={
-        "apikey":SUPABASE_ANON,"Authorization":f"Bearer {SUPABASE_ANON}",
+        "apikey":SUPABASE_KEY,"Authorization":f"Bearer {SUPABASE_KEY}",
         "Content-Type":"application/pdf"}, data=pdf_bytes, timeout=30)
     if r.status_code in (200,201):
         return f"{SUPABASE_URL}/storage/v1/object/public/certificates/{filename}"
@@ -661,6 +668,10 @@ st.markdown(f"""
     <div class="pcg-sub">Pure Carbon Group</div>
   </div>
 </div>""", unsafe_allow_html=True)
+
+if SUPABASE_KEY == SUPABASE_ANON:
+    st.warning("Database key not set: add SUPABASE_SERVICE_KEY in Streamlit → App settings → Secrets. "
+               "Until then the app uses the public key, and once the database is locked it can't save or load quotes.")
 
 tab2, tab1 = st.tabs(["  \U0001f517  Create quote  ", "  \U0001f48e  Redact certificate  "])
 
