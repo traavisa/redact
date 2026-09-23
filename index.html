@@ -136,6 +136,13 @@
       background: #181818;
       border-color: #252525;
     }
+
+    /* ---- Viewer: fit small frames (phones / quote page cards) ---- */
+    @media (max-height: 563px) {
+      #viewer-wrap { gap: 0 !important; }
+      #viewer-wrap > div { width: min(100vw, 100vh) !important; height: min(100vw, 100vh) !important; border-radius: 0 !important; box-shadow: none !important; }
+      #viewer-wrap > img { position: fixed; left: 8px; bottom: 8px; width: 22px !important; height: 22px !important; pointer-events: none; }
+    }
   </style>
 </head>
 <body>
@@ -360,6 +367,18 @@
     document.getElementById('viewer-wrap').style.display = 'flex';
     const frame = document.getElementById('viewer-frame');
     frame.src = url;
+    // Scale the vendor spinner to fit: it always lays out at 500px wide, then shrinks to the box
+    function fitFrame() {
+      const box = frame.parentElement;
+      const w = box.clientWidth, h = box.clientHeight;
+      const s = Math.min(1, w / 500);
+      frame.style.width = (w / s) + 'px';
+      frame.style.height = (h / s) + 'px';
+      frame.style.transformOrigin = '0 0';
+      frame.style.transform = s < 1 ? 'scale(' + s + ')' : '';
+    }
+    fitFrame();
+    window.addEventListener('resize', fitFrame);
     frame.addEventListener('load', () => document.getElementById('loading').classList.add('hidden'));
     setTimeout(() => document.getElementById('loading').classList.add('hidden'), 8000);
   })();
