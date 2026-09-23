@@ -298,8 +298,6 @@ const CLIENT_LOGOS = {
 };
 document.getElementById('loading-logo').src = CLIENT_LOGOS['Pure Carbon Group'];
 
-const SUPABASE_URL  = "https://srlbevzrkovruyerixdi.supabase.co";
-const SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNybGJldnpya292cnV5ZXJpeGRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NTk0NjQsImV4cCI6MjA5NDQzNTQ2NH0.wB8eSR-MClr9CLwj8V998aJbCNAVlw2wK9PppB_DnIA";
 
 function copyText(text, btn, label) {
   navigator.clipboard.writeText(text).catch(() => {
@@ -337,13 +335,11 @@ async function init() {
   const id = window.location.pathname.split('/').pop();
   if (!id || id === 'quote.html') { showError(); return; }
   try {
-    const res = await fetch(
-      `${SUPABASE_URL}/rest/v1/quotes?id=eq.${id}&select=*`,
-      { headers: { apikey: SUPABASE_ANON, Authorization: 'Bearer ' + SUPABASE_ANON } }
-    );
-    const rows = await res.json();
-    if (!rows || rows.length === 0) { showError(); return; }
-    const s = rows[0];
+    // Loaded through our own server function — the database is not readable from the browser.
+    const res = await fetch(`/.netlify/functions/get-quote/${encodeURIComponent(id)}`);
+    if (!res.ok) { showError(); return; }
+    const s = await res.json();
+    if (!s || !Array.isArray(s.stones)) { showError(); return; }
     const isExpired = new Date(s.expires_at) < new Date();
 
     // Scan each stone's PDF for cert type — run in parallel
