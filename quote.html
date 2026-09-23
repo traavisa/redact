@@ -212,6 +212,9 @@
     .pdf-frame-wrap { display: block; }
     .pdf-frame-wrap.closed { display: none; }
     .pdf-frame { width: 100%; height: 680px; border: none; display: block; background: #111; }
+    .pdf-pages { display: block; background: #111; }
+    .pdf-pages canvas { display: block; width: 100%; height: auto; }
+    .pdf-pages canvas + canvas { margin-top: 8px; }
 
     /* Divider */
     .divider { border: none; border-top: 1px solid #111; margin: 0; }
@@ -480,7 +483,7 @@ function render(s, certTypes, isExpired) {
           <span class="pdf-toggle-icon open">▾</span>
         </div>
         <div class="pdf-frame-wrap">
-          <iframe class="pdf-frame" src="${stone.pdf_url}#toolbar=0&navpanes=0"></iframe>
+          <iframe class="pdf-frame" ${MOBILE_PDF ? 'data-src' : 'src'}="${stone.pdf_url}#toolbar=0&navpanes=0"></iframe>
           <div style="padding: 16px 24px 20px;">
             <a class="btn btn-primary" href="${stone.pdf_url}" download="certificate-${stone.cert_last4}.pdf" style="max-width:260px;">
               ↓ &nbsp;Download certificate
@@ -519,6 +522,34 @@ function render(s, certTypes, isExpired) {
 
   document.getElementById('loading').classList.add('hidden');
   document.getElementById('page').style.display = 'block';
+  renderMobilePdfs();
+}
+
+// Phones: draw certificate pages as full-width images (PDF iframes don't fit on phones)
+const MOBILE_PDF = window.matchMedia('(max-width: 680px)').matches;
+async function renderMobilePdfs() {
+  if (!MOBILE_PDF) return;
+  const cssW = document.getElementById('stones').clientWidth || window.innerWidth;
+  for (const frame of document.querySelectorAll('.pdf-frame[data-src]')) {
+    const url = frame.dataset.src.split('#')[0];
+    try {
+      const pdf = await pdfjsLib.getDocument({ url, withCredentials: false }).promise;
+      const holder = document.createElement('a');
+      holder.className = 'pdf-pages'; holder.href = url; holder.target = '_blank'; holder.rel = 'noopener';
+      for (let p = 1; p <= Math.min(pdf.numPages, 4); p++) {
+        const page = await pdf.getPage(p);
+        const scale = Math.min(cssW * 3, 1800) / page.getViewport({ scale: 1 }).width;
+        const vp = page.getViewport({ scale });
+        const c = document.createElement('canvas');
+        c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+        await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+        holder.appendChild(c);
+      }
+      frame.replaceWith(holder);
+    } catch (e) {
+      frame.src = frame.dataset.src; // fall back to the old iframe
+    }
+  }
 }
 
 function togglePdf(toggleEl) {
