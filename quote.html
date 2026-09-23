@@ -478,7 +478,7 @@ function render(s, certTypes, isExpired) {
         </div>
       </div>
 
-      <div class="pdf-section">
+      ${stone.pdf_url ? `<div class="pdf-section">
         <div class="pdf-toggle" onclick="togglePdf(this)">
           <span class="pdf-toggle-label">Certificate</span>
           <span class="pdf-toggle-icon open">▾</span>
@@ -491,7 +491,7 @@ function render(s, certTypes, isExpired) {
             </a>
           </div>
         </div>
-      </div>`;
+      </div>` : ''}`;
 
     stonesEl.appendChild(card);
   });
