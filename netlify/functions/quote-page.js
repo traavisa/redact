@@ -30,7 +30,7 @@ exports.handler = async function (event) {
 
   if (id) {
     try {
-      const { data } = await supabase.from('quotes').select('*').eq('id', id).single();
+      const { data } = await supabase.from('quotes').select('client,stones').eq('id', id).single();
       if (data) {
         const client = data.client || '';
         const shapes = shapesLabel(data.stones);
