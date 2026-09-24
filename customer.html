@@ -295,8 +295,11 @@
 // Customer share page. All content comes from the part of the link after "#",
 // which the browser never sends to any server. This page calls no quote
 // functions, stores nothing and has no analytics.
-// The server adds this store's logo (and only this one) when it serves the page.
+// Short links (/c/<store>/<code>#<key>) fetch an ENCRYPTED copy by its code and
+// unlock it here with the key after "#"; the server can't read it.
+// The server adds this store's logo and name (and only this one) when it serves the page.
 const STORE_LOGO = null;
+const STORE_NAME = null;
 
 const VIEWER_BASE = 'https://video.alldiamondeverything.com/?u=';
 const PDF_BASE = 'https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/certificates/';
@@ -327,12 +330,29 @@ async function inflateRaw(bytes) {
   await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako_inflate.min.js');
   return window.pako.inflateRaw(bytes);
 }
-async function decodeHash(h) {
-  const kind = h.charAt(0), body = h.slice(1);
-  if (!body || (kind !== 'z' && kind !== 'j')) throw new Error('bad link');
-  let bytes = b64urlToBytes(body);
+async function decodeBytes(kind, bytes) {
+  if (kind !== 'z' && kind !== 'j') throw new Error('bad link');
   if (kind === 'z') bytes = await inflateRaw(bytes);
   return JSON.parse(new TextDecoder().decode(bytes));
+}
+async function decodeHash(h) {                       // older long links
+  if (!h.slice(1)) throw new Error('bad link');
+  return decodeBytes(h.charAt(0), b64urlToBytes(h.slice(1)));
+}
+// Short links: fetch the locked copy, unlock it with the key from the link
+async function decodeShort(code, keyText) {
+  const res = await fetch('/.netlify/functions/get-share-link/' + encodeURIComponent(code), { cache: 'no-store', referrerPolicy: 'no-referrer' });
+  if (res.status === 404 || res.status === 410) return { gone: true };
+  if (!res.ok) throw new Error('unavailable');
+  const blob = b64urlToBytes((await res.json()).d || '');
+  const key = await crypto.subtle.importKey('raw', b64urlToBytes(keyText), 'AES-GCM', false, ['decrypt']);
+  const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv: blob.slice(0, 12) }, key, blob.slice(12)));
+  return { data: await decodeBytes(String.fromCharCode(plain[0]), plain.slice(1)) };
+}
+function showExpired(client) {
+  document.getElementById('loading').classList.add('hidden');
+  if (client) document.getElementById('expired-text').textContent = 'Please contact ' + client + ' for an updated selection.';
+  document.getElementById('expired').classList.add('visible');
 }
 
 // Only our own viewer and certificate storage can be shown on this page
@@ -364,22 +384,26 @@ function setBrand(client) {
 
 async function init() {
   const h = (window.location.hash || '').slice(1);
+  const parts = window.location.pathname.split('/').filter(Boolean);   // c / store / code
+  const code = parts[0] === 'c' && parts.length >= 3 ? parts[2] : '';
   let d;
   try {
-    d = await decodeHash(h);
+    if (code) {
+      if (!/^[a-z0-9]{6,16}$/.test(code) || !/^[A-Za-z0-9_-]{22}$/.test(h)) throw new Error('bad');
+      const r = await decodeShort(code, h);
+      if (r.gone) { setBrand(STORE_NAME || ''); showExpired(STORE_NAME); return; }   // expired or switched off
+      d = r.data;
+    } else {
+      d = await decodeHash(h);
+    }
     if (!d || d.v !== 1 || !Array.isArray(d.s) || !d.s.length) throw new Error('bad');
   } catch (e) { showError(); return; }
 
   const client = typeof d.c === 'string' ? d.c.slice(0, 80) : '';
   setBrand(client);
 
-  // Soft expiry: the date travels inside the link and is checked here
-  if (typeof d.e === 'number' && Date.now() / 1000 > d.e) {
-    document.getElementById('loading').classList.add('hidden');
-    if (client) document.getElementById('expired-text').textContent = 'Please contact ' + client + ' for an updated selection.';
-    document.getElementById('expired').classList.add('visible');
-    return;
-  }
+  // Expiry date inside the link (short links are also refused by the server after 30 days)
+  if (typeof d.e === 'number' && Date.now() / 1000 > d.e) { showExpired(client); return; }
   render(d, client);
 }
 

@@ -1,6 +1,6 @@
-// Serves the customer share page at /c/<store>#<data>.
-// Only the store name in the path reaches this server. Everything after "#"
-// (the diamonds, specs and any price) stays in the customer's browser.
+// Serves the customer share page at /c/<store>/<code>#<key> (short, encrypted)
+// and /c/<store>#<data> (older long links). Only the store and the short code
+// reach this server. The key or data after "#" stays in the customer's browser.
 // No database, no quote data, no logging.
 //
 // The store's logo is taken from the CLIENT_LOGOS list in quote.html, so a new
@@ -46,7 +46,9 @@ function stores() {
 
 exports.handler = async function (event) {
   let html = fs.readFileSync(path.join(__dirname, '..', '..', 'customer.html'), 'utf8');
-  const slug = (String(event.path || '').split('/').filter(Boolean).pop() || '').toLowerCase();
+  // Path is /c/<store> or /c/<store>/<code>; pick the segment that is a known store
+  const parts = String(event.path || '').toLowerCase().split('/').filter(Boolean);
+  const slug = parts.find((p) => stores()[p]) || '';
   const store = stores()[slug];
 
   let title = 'Diamond Selection';
@@ -64,7 +66,8 @@ exports.handler = async function (event) {
     }
     html = html
       .replace('<link rel="icon" id="favicon" href="data:,">', `<link rel="icon" id="favicon" href="${store.logo}">`)
-      .replace('const STORE_LOGO = null;', `const STORE_LOGO = ${JSON.stringify(store.logo)};`);
+      .replace('const STORE_LOGO = null;', `const STORE_LOGO = ${JSON.stringify(store.logo)};`)
+      .replace('const STORE_NAME = null;', `const STORE_NAME = ${JSON.stringify(store.name).replace(/</g, '\\u003c')};`);
   }
 
   html = html.replace(

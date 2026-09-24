@@ -387,7 +387,7 @@
       <div class="pc-title" id="pc-title">Share with your customer</div>
       <button type="button" class="pc-close" id="pc-close" aria-label="Close">&times;</button>
     </div>
-    <div class="pc-note" id="pc-note-share">This link is created on your device. Pure Carbon doesn't save your selections or prices, and never sees who you send it to.</div>
+    <div class="pc-note" id="pc-note-share">This link is locked on your device. Pure Carbon keeps only an encrypted copy it can't read, so the link works. It's deleted after 30 days, and we never see who you send it to.</div>
     <div class="pc-note" id="pc-note-view">Your quote prices are hidden while customer view is on. Nothing is sent anywhere.</div>
 
     <div class="pc-sec" id="pc-sec-stones">
@@ -931,15 +931,32 @@ function pcB64url(u8) {
   for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
-async function pcEncode(obj) {
+async function pcCompress(obj) {
   const bytes = new TextEncoder().encode(JSON.stringify(obj));
   try {
     const cs = new CompressionStream('deflate-raw');
     const buf = await new Response(new Blob([bytes]).stream().pipeThrough(cs)).arrayBuffer();
-    return 'z' + pcB64url(new Uint8Array(buf));
+    return { kind: 'z', bytes: new Uint8Array(buf) };
   } catch (e) {
-    return 'j' + pcB64url(bytes);          // older browsers: uncompressed
+    return { kind: 'j', bytes };             // older browsers: uncompressed
   }
+}
+// Short link: lock the share with a new random key ON THIS DEVICE, store only the
+// locked copy, and put the key after "#" (never sent to any server).
+async function pcShortLink(packed, slug) {
+  const keyBytes = crypto.getRandomValues(new Uint8Array(16));
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const key = await crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt']);
+  const plain = new Uint8Array(packed.bytes.length + 1);
+  plain[0] = packed.kind.charCodeAt(0); plain.set(packed.bytes, 1);
+  const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, plain));
+  const blob = new Uint8Array(iv.length + ct.length); blob.set(iv); blob.set(ct, iv.length);
+  const res = await fetch('/.netlify/functions/create-share-link', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ d: pcB64url(blob) }),
+  });
+  const out = res.ok ? await res.json() : null;
+  if (!out || !/^[a-z0-9]{6,16}$/.test(out.id || '')) throw new Error('not saved');
+  return location.origin + '/c/' + slug + '/' + out.id + '#' + pcB64url(keyBytes);
 }
 
 // Builds ONLY the fields the customer page needs. Never the quote price.
@@ -987,9 +1004,14 @@ async function pcCreate() {
   const go = pc$('pc-go');
   go.disabled = true; go.textContent = 'Creating…';
   try {
-    const hash = await pcEncode(pcPayload());
+    const packed = await pcCompress(pcPayload());
     const slug = pcSlug(PC.s.client) || 'store';
-    PC.link = location.origin + '/c/' + slug + '#' + hash;
+    try {
+      PC.link = await pcShortLink(packed, slug);
+    } catch (e) {
+      // No signal / server busy: fall back to a long link that needs no server at all
+      PC.link = location.origin + '/c/' + slug + '#' + packed.kind + pcB64url(packed.bytes);
+    }
   } catch (e) {
     pcError('Could not create the link on this browser.'); PC.link = '';
   }
