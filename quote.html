@@ -246,6 +246,100 @@
       .stone-label { padding: 12px 18px; }
       .pdf-toggle { padding: 12px 18px; }
     }
+
+    /* ── Share with your customer + Customer view ── */
+    .pc-bar { display: none; position: fixed; z-index: 60; right: 24px; bottom: 24px; gap: 10px; }
+    .pc-bar.visible { display: flex; }
+    .pc-bar button {
+      font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 500; letter-spacing: 0.08em;
+      text-transform: uppercase; border-radius: 30px; padding: 13px 20px; cursor: pointer;
+    }
+    .pc-share-btn { background: #c9a84c; color: #0a0a0a; border: 1px solid #c9a84c; box-shadow: 0 10px 30px -8px rgba(201,168,76,0.45); }
+    .pc-share-btn:hover { background: #d4b55e; }
+    .pc-view-btn { background: rgba(12,12,12,0.92); color: #c9a84c; border: 1px solid #3a3220; }
+    .pc-view-btn:hover { border-color: #c9a84c; }
+
+    .pc-overlay { display: none; position: fixed; inset: 0; z-index: 80; background: rgba(0,0,0,0.62); align-items: center; justify-content: center; padding: 24px; }
+    .pc-overlay.open { display: flex; }
+    .pc-sheet {
+      background: #111; border: 1px solid #242424; border-radius: 10px; width: 100%; max-width: 520px;
+      max-height: calc(100vh - 48px); overflow-y: auto; overflow-x: hidden; padding: 22px 22px 18px; color: #e8e8e0;
+      -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+    }
+    .pc-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+    .pc-title { font-family: 'Cormorant Garamond', serif; font-size: 24px; font-weight: 500; color: #fff; line-height: 1.2; }
+    .pc-close { background: none; border: 1px solid #2a2a2a; color: #aaa; width: 34px; height: 34px; border-radius: 50%; font-size: 18px; line-height: 1; cursor: pointer; flex-shrink: 0; }
+    .pc-note { font-size: 12px; line-height: 1.6; color: #b0b0a8; background: #0c0c0c; border: 1px solid #1e1e1e; border-left: 2px solid #c9a84c; padding: 10px 12px; border-radius: 4px; }
+    .pc-sec { margin-top: 18px; }
+    .pc-sec-label { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: #8a8a8a; margin-bottom: 8px; }
+    .pc-check { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid #1e1e1e; border-radius: 6px; margin-bottom: 6px; font-size: 13px; color: #d8d8d0; cursor: pointer; background: #0d0d0d; min-width: 0; }
+    .pc-check span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pc-check input { width: 18px; height: 18px; accent-color: #c9a84c; flex-shrink: 0; margin: 0; }
+    .pc-check.disabled { opacity: 0.4; cursor: default; }
+    .pc-parts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+    .pc-parts .pc-check { margin: 0; }
+    .pc-seg { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid #2a2a2a; border-radius: 6px; overflow: hidden; }
+    .pc-seg button { background: #0d0d0d; color: #aaa; border: none; border-right: 1px solid #2a2a2a; padding: 11px 4px; font-size: 12px; font-family: 'Inter', sans-serif; cursor: pointer; }
+    .pc-seg button:last-child { border-right: none; }
+    .pc-seg button.on { background: #c9a84c; color: #0a0a0a; font-weight: 500; }
+    .pc-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+    .pc-chip { background: #0d0d0d; border: 1px solid #2a2a2a; color: #ccc; border-radius: 20px; padding: 8px 14px; font-size: 12px; cursor: pointer; font-family: 'Inter', sans-serif; }
+    .pc-chip.on { border-color: #c9a84c; color: #c9a84c; }
+    .pc-row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+    .pc-input, .pc-select {
+      background: #0a0a0a; border: 1px solid #2a2a2a; color: #fff; border-radius: 6px; padding: 10px 12px;
+      font-size: 16px; font-family: 'Inter', sans-serif; min-width: 0;
+    }
+    .pc-input:focus, .pc-select:focus { outline: none; border-color: #c9a84c; }
+    .pc-small { font-size: 11px; color: #8a8a8a; line-height: 1.5; margin-top: 8px; }
+    .pc-prices { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+    .pc-prices:empty { display: none; }
+    .pc-price-row { border: 1px solid #1e1e1e; border-radius: 6px; padding: 10px 12px; background: #0d0d0d; }
+    .pc-price-top { display: flex; align-items: center; gap: 8px; }
+    .pc-price-name { font-size: 12px; color: #bbb; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pc-price-row .pc-input { width: 130px; text-align: right; padding: 8px 10px; }
+    .pc-cur { font-size: 11px; color: #8a8a8a; width: 30px; flex-shrink: 0; }
+    .pc-price-note { font-size: 11px; color: #7a7a7a; margin-top: 6px; line-height: 1.5; }
+    .pc-warn { color: #e0a040; }
+    .pc-go { width: 100%; margin-top: 18px; padding: 15px; font-size: 12px; }
+    .pc-error { color: #e07a60; font-size: 12px; margin-top: 12px; display: none; line-height: 1.5; }
+    .pc-result { display: none; margin-top: 16px; border-top: 1px solid #1e1e1e; padding-top: 16px; }
+    .pc-link { width: 100%; font-size: 12px; font-family: monospace; color: #bbb; }
+    .pc-send { display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; margin-top: 10px; }
+    .pc-send .btn { padding: 13px 8px; }
+    .pc-send .btn-ghost { color: #d0d0c8; border-color: #2a2a2a; }
+    .pc-send .btn-ghost:hover { color: #fff; }
+    .pc-send .pc-wide { grid-column: span 2; }
+    .pc-exit {
+      display: none; position: fixed; z-index: 60; right: 14px; bottom: calc(14px + env(safe-area-inset-bottom));
+      background: rgba(12,12,12,0.85); color: #666; border: 1px solid #222; border-radius: 20px; padding: 8px 14px;
+      font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; font-family: 'Inter', sans-serif; cursor: pointer;
+    }
+    body.pc-cv .pc-exit { display: block; }
+    body.pc-cv .price-block:not(.pc-cvp),
+    body.pc-cv .watermark-logo,
+    body.pc-cv .expiry-note { display: none; }
+    body.pc-noscroll { overflow: hidden; }
+
+    @media (max-width: 680px) {
+      body.pc-has-bar .page { padding-bottom: 130px; }
+      .pc-bar {
+        left: 0; right: 0; bottom: 0; gap: 8px;
+        padding: 10px 14px calc(10px + env(safe-area-inset-bottom));
+        background: rgba(12,12,12,0.94); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+        border-top: 1px solid #1e1e1e;
+      }
+      .pc-bar button { flex: 1; border-radius: 6px; padding: 14px 8px; }
+      .pc-bar .pc-share-btn { flex: 1.7; box-shadow: none; }
+      .pc-overlay { align-items: flex-end; padding: 0; }
+      .pc-sheet {
+        max-width: none; border-radius: 14px 14px 0 0; border-bottom: none; max-height: 92vh;
+        padding: 18px 16px calc(18px + env(safe-area-inset-bottom));
+      }
+    }
+    @media (max-width: 420px) {
+      .pc-parts { grid-template-columns: 1fr; }
+    }
   </style>
 </head>
 <body>
@@ -277,6 +371,89 @@
     <div class="footer-name" id="footer-name"></div>
     <img class="watermark-logo" id="watermark-logo" src="" alt=""/>
     <div class="expiry-note" id="expiry-note"></div>
+  </div>
+</div>
+
+<!-- Share with your customer + Customer view (all on this device; nothing is sent to us) -->
+<div class="pc-bar" id="pc-bar">
+  <button type="button" class="pc-view-btn" id="pc-view-open">Customer view</button>
+  <button type="button" class="pc-share-btn" id="pc-share-open">Share with your customer</button>
+</div>
+<button type="button" class="pc-exit" id="pc-exit">Exit customer view</button>
+
+<div class="pc-overlay" id="pc-overlay" role="dialog" aria-modal="true" aria-labelledby="pc-title">
+  <div class="pc-sheet" id="pc-sheet">
+    <div class="pc-head">
+      <div class="pc-title" id="pc-title">Share with your customer</div>
+      <button type="button" class="pc-close" id="pc-close" aria-label="Close">&times;</button>
+    </div>
+    <div class="pc-note" id="pc-note-share">This link is created on your device. Pure Carbon doesn't save your selections or prices, and never sees who you send it to.</div>
+    <div class="pc-note" id="pc-note-view">Your quote prices are hidden while customer view is on. Nothing is sent anywhere.</div>
+
+    <div class="pc-sec" id="pc-sec-stones">
+      <div class="pc-sec-label">Diamonds</div>
+      <div id="pc-stones"></div>
+    </div>
+
+    <div class="pc-sec" id="pc-sec-parts">
+      <div class="pc-sec-label">Include</div>
+      <div class="pc-parts">
+        <label class="pc-check" id="pc-lab-video"><input type="checkbox" id="pc-p-video" checked><span>360° video</span></label>
+        <label class="pc-check" id="pc-lab-cert"><input type="checkbox" id="pc-p-cert" checked><span>Certificate</span></label>
+        <label class="pc-check" id="pc-lab-specs"><input type="checkbox" id="pc-p-specs" checked><span>Specs</span></label>
+      </div>
+    </div>
+
+    <div class="pc-sec">
+      <div class="pc-sec-label">Price</div>
+      <div class="pc-seg" id="pc-seg">
+        <button type="button" data-m="none" class="on">No price</button>
+        <button type="button" data-m="markup">Add a markup</button>
+        <button type="button" data-m="own">Type my own</button>
+      </div>
+      <div id="pc-markup" style="display:none;">
+        <div class="pc-chips" id="pc-chips">
+          <button type="button" class="pc-chip" data-x="2">×2 keystone</button>
+          <button type="button" class="pc-chip" data-x="2.5">×2.5</button>
+          <button type="button" class="pc-chip" data-x="3">×3</button>
+          <button type="button" class="pc-chip" data-x="custom">Custom</button>
+        </div>
+        <div class="pc-row" id="pc-custom-row" style="display:none;">
+          <input class="pc-input" id="pc-mk-val" inputmode="decimal" autocomplete="off" placeholder="e.g. 120" style="width:110px;">
+          <select class="pc-select" id="pc-mk-unit">
+            <option value="pct">% markup</option>
+            <option value="x">× multiplier</option>
+          </select>
+        </div>
+        <div class="pc-row">
+          <span class="pc-small" style="margin:0;">Round to</span>
+          <select class="pc-select" id="pc-round">
+            <option value="r100">Nearest $100</option>
+            <option value="r10">Nearest $10</option>
+            <option value="n9">Ends in 99 (e.g. 12,499)</option>
+            <option value="none">No rounding</option>
+          </select>
+        </div>
+        <div class="pc-small">Your markup is saved only on this device.</div>
+      </div>
+      <div class="pc-prices" id="pc-prices"></div>
+    </div>
+
+    <div class="pc-error" id="pc-error"></div>
+    <button type="button" class="btn btn-primary pc-go" id="pc-go">Create link</button>
+
+    <div class="pc-result" id="pc-result">
+      <input class="pc-input pc-link" id="pc-link" readonly aria-label="Customer link">
+      <div class="pc-send">
+        <button type="button" class="btn btn-primary pc-wide" id="pc-copy">Copy link</button>
+        <a class="btn btn-ghost" id="pc-sms" href="#">Text message</a>
+        <a class="btn btn-ghost" id="pc-wa" href="#" target="_blank" rel="noopener noreferrer">WhatsApp</a>
+        <a class="btn btn-ghost" id="pc-mail" href="#">Email</a>
+        <a class="btn btn-ghost" id="pc-preview" href="#" target="_blank" rel="noopener noreferrer">Preview</a>
+        <button type="button" class="btn btn-ghost pc-wide" id="pc-native" style="display:none;">Share…</button>
+      </div>
+      <div class="pc-small">You send it yourself. Anyone with this link can view it until it expires in 30 days.</div>
+    </div>
   </div>
 </div>
 
@@ -523,6 +700,7 @@ function render(s, certTypes, isExpired) {
   document.getElementById('loading').classList.add('hidden');
   document.getElementById('page').style.display = 'block';
   renderMobilePdfs();
+  pcSetup(s, certTypes, isExpired);
 }
 
 // Phones: draw certificate pages as full-width images (PDF iframes don't fit on phones)
@@ -558,6 +736,359 @@ function togglePdf(toggleEl) {
   const isClosed = wrap.classList.contains('closed');
   wrap.classList.toggle('closed', !isClosed);
   icon.classList.toggle('open', !isClosed);
+}
+
+
+// ── Share with your customer + Customer view ─────────────────────────────────
+// Everything below runs only in this browser. The customer link carries its
+// content after "#", which browsers never send to any server. Your quote price
+// is never put in the link; only a price the associate sets (or a markup result).
+const PC_VIEWER = 'https://video.alldiamondeverything.com/?u=';
+const PC_PDF = 'https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/certificates/';
+const PC_DAYS = 30;
+const PC = {
+  s: null, certTypes: [], isExpired: false, mode: 'share', price: 'none',
+  mk: { x: '2', val: '', unit: 'pct', round: 'r100' },
+  markVals: {}, ownVals: {}, sel: {}, link: '', favicon: null,
+};
+const pc$ = (id) => document.getElementById(id);
+
+function pcEsc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function pcSlug(name) {
+  return String(name || '').toLowerCase().replace(/&/g, 'and').replace(/['’]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+}
+function pcNum(v) {
+  const n = Number(String(v == null ? '' : v).replace(/[^0-9.]/g, ''));
+  return isFinite(n) && n > 0 ? n : 0;
+}
+function pcCur(i) { return (PC.s.stones[i].currency === 'USD') ? 'USD' : 'CAD'; }
+function pcFmt(n, cur) { return (cur === 'USD' ? 'US$' : 'CA$') + Math.round(n).toLocaleString('en-CA'); }
+
+// Associate's cost for the whole stone (per-carat quotes × carat weight)
+function pcCost(i) {
+  const st = PC.s.stones[i];
+  let p = pcNum(st.price);
+  if (!p) return null;
+  if (st.price_type === 'ppc') {
+    const ct = parseFloat((st.cert_data || {}).carat);
+    if (!(ct > 0)) return null;
+    p = p * ct;
+  }
+  return p;
+}
+function pcMultiplier() {
+  if (PC.mk.x !== 'custom') return Number(PC.mk.x);
+  const v = parseFloat(String(PC.mk.val).replace(',', '.'));
+  if (!(v > 0)) return null;
+  if (PC.mk.unit === 'pct') return 1 + v / 100;
+  return v > 1 ? v : null;
+}
+function pcRound(x) {
+  switch (PC.mk.round) {
+    case 'r10':  return Math.round(x / 10) * 10;
+    case 'n9':   return Math.ceil(x / 100) * 100 - 1;
+    case 'none': return Math.round(x);
+    default:     return Math.round(x / 100) * 100;
+  }
+}
+function pcLoadPrefs() {
+  try {
+    const p = JSON.parse(localStorage.getItem('pc_markup') || 'null');
+    if (p && typeof p === 'object') {
+      if (['2', '2.5', '3', 'custom'].includes(String(p.x))) PC.mk.x = String(p.x);
+      if (typeof p.val === 'string') PC.mk.val = p.val.slice(0, 8);
+      if (['pct', 'x'].includes(p.unit)) PC.mk.unit = p.unit;
+      if (['r100', 'r10', 'n9', 'none'].includes(p.round)) PC.mk.round = p.round;
+    }
+  } catch (e) {}
+}
+function pcSavePrefs() { try { localStorage.setItem('pc_markup', JSON.stringify(PC.mk)); } catch (e) {} }
+
+function pcIdx() {
+  const all = PC.s.stones.map((_, i) => i);
+  return PC.mode === 'share' ? all.filter((i) => PC.sel[i]) : all;
+}
+function pcVals() { return PC.price === 'own' ? PC.ownVals : PC.markVals; }
+function pcFinal(i) { return PC.price === 'none' ? 0 : pcNum(pcVals()[i]); }
+
+function pcStoneName(i) {
+  const st = PC.s.stones[i]; const cd = st.cert_data || {};
+  const bits = ['Diamond ' + (i + 1)];
+  const desc = [cd.carat ? cd.carat + ' ct' : '', cd.shape || ''].filter(Boolean).join(' ');
+  if (desc) bits.push(desc);
+  if (st.cert_last4) bits.push('···' + st.cert_last4);
+  return bits.join(' · ');
+}
+
+function pcApplyMarkup() {
+  const m = pcMultiplier();
+  PC.markVals = {};
+  if (!m) return false;
+  PC.s.stones.forEach((_, i) => { const c = pcCost(i); if (c) PC.markVals[i] = String(pcRound(c * m)); });
+  return true;
+}
+
+function pcNoteHtml(i) {
+  const st = PC.s.stones[i]; const cur = pcCur(i); const c = pcCost(i);
+  const v = pcNum(pcVals()[i]);
+  let html = '';
+  if (c != null) {
+    html = 'Your cost ' + pcFmt(c, cur);
+    if (st.price_type === 'ppc') html += ' (' + pcFmt(pcNum(st.price), cur) + '/ct × ' + pcEsc((st.cert_data || {}).carat) + ' ct)';
+    if (v) html += ' → customer ' + pcFmt(v, cur);
+    if (v && v <= c) html += '<br><span class="pc-warn">⚠ At or below your cost</span>';
+  } else if (PC.price === 'markup') {
+    html = 'No quote price on this diamond — type a price or leave blank.';
+  }
+  return html;
+}
+
+function pcRenderPrices(recalc) {
+  const box = pc$('pc-prices');
+  box.innerHTML = '';
+  pc$('pc-markup').style.display = PC.price === 'markup' ? 'block' : 'none';
+  document.querySelectorAll('#pc-seg button').forEach((b) => b.classList.toggle('on', b.dataset.m === PC.price));
+  document.querySelectorAll('#pc-chips .pc-chip').forEach((b) => b.classList.toggle('on', b.dataset.x === PC.mk.x));
+  pc$('pc-custom-row').style.display = PC.mk.x === 'custom' ? 'flex' : 'none';
+  if (PC.price === 'none') return;
+  if (PC.price === 'markup') {
+    if (!pcMultiplier()) {
+      box.innerHTML = '<div class="pc-small pc-warn">Enter a markup above 0% (or a multiplier above ×1).</div>';
+      return;
+    }
+    if (recalc || !PC.markReady) { pcApplyMarkup(); PC.markReady = true; }   // keeps hand edits otherwise
+  }
+  const vals = pcVals();
+  pcIdx().forEach((i) => {
+    const row = document.createElement('div');
+    row.className = 'pc-price-row';
+    row.innerHTML =
+      '<div class="pc-price-top"><span class="pc-price-name"></span>' +
+      '<input class="pc-input" inputmode="decimal" autocomplete="off" placeholder="Your price">' +
+      '<span class="pc-cur"></span></div><div class="pc-price-note"></div>';
+    row.querySelector('.pc-price-name').textContent = pcStoneName(i);
+    row.querySelector('.pc-cur').textContent = pcCur(i);
+    const inp = row.querySelector('input');
+    inp.value = vals[i] || '';
+    const note = row.querySelector('.pc-price-note');
+    note.innerHTML = pcNoteHtml(i);
+    inp.addEventListener('input', () => { pcVals()[i] = inp.value; note.innerHTML = pcNoteHtml(i); });
+    box.appendChild(row);
+  });
+  const tip = document.createElement('div');
+  tip.className = 'pc-small';
+  tip.textContent = 'Leave a price blank to show no price for that diamond.';
+  box.appendChild(tip);
+}
+
+function pcRenderStones() {
+  const box = pc$('pc-stones');
+  box.innerHTML = '';
+  PC.s.stones.forEach((_, i) => {
+    const lab = document.createElement('label');
+    lab.className = 'pc-check';
+    lab.innerHTML = '<input type="checkbox"><span></span>';
+    lab.querySelector('span').textContent = pcStoneName(i);
+    const cb = lab.querySelector('input');
+    cb.checked = !!PC.sel[i];
+    cb.addEventListener('change', () => { PC.sel[i] = cb.checked; pcRenderPrices(); });
+    box.appendChild(lab);
+  });
+}
+
+function pcInvalidate() {
+  PC.link = '';
+  pc$('pc-result').style.display = 'none';
+  pc$('pc-error').style.display = 'none';
+}
+function pcError(msg) { const e = pc$('pc-error'); e.textContent = msg; e.style.display = 'block'; }
+
+function pcOpen(mode) {
+  PC.mode = mode;
+  const share = mode === 'share';
+  pc$('pc-title').textContent = share ? 'Share with your customer' : 'Customer view';
+  pc$('pc-note-share').style.display = share ? 'block' : 'none';
+  pc$('pc-note-view').style.display = share ? 'none' : 'block';
+  pc$('pc-sec-stones').style.display = share ? 'block' : 'none';
+  pc$('pc-sec-parts').style.display = share ? 'block' : 'none';
+  pc$('pc-go').textContent = share ? 'Create link' : 'Show customer view';
+  pcInvalidate();
+  pcRenderPrices();
+  pc$('pc-overlay').classList.add('open');
+  document.body.classList.add('pc-noscroll');
+  pc$('pc-sheet').scrollTop = 0;
+}
+function pcClose() {
+  pc$('pc-overlay').classList.remove('open');
+  document.body.classList.remove('pc-noscroll');
+}
+
+function pcB64url(u8) {
+  let s = '';
+  for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+async function pcEncode(obj) {
+  const bytes = new TextEncoder().encode(JSON.stringify(obj));
+  try {
+    const cs = new CompressionStream('deflate-raw');
+    const buf = await new Response(new Blob([bytes]).stream().pipeThrough(cs)).arrayBuffer();
+    return 'z' + pcB64url(new Uint8Array(buf));
+  } catch (e) {
+    return 'j' + pcB64url(bytes);          // older browsers: uncompressed
+  }
+}
+
+// Builds ONLY the fields the customer page needs. Never the quote price.
+function pcPayload() {
+  const inc = { v: pc$('pc-p-video').checked, c: pc$('pc-p-cert').checked, d: pc$('pc-p-specs').checked };
+  const stones = pcIdx().map((i) => {
+    const st = PC.s.stones[i]; const o = {};
+    if (st.cert_last4) o.l = String(st.cert_last4).slice(-4);
+    if (PC.certTypes[i] === 'GIA' || PC.certTypes[i] === 'IGI') o.t = PC.certTypes[i];
+    if (inc.d && st.cert_data) {
+      const cd = st.cert_data;
+      const d = [cd.shape, cd.carat, cd.color, cd.clarity, cd.cut, cd.polish, cd.symmetry, cd.fluorescence, cd.measurements, cd.ratio]
+        .map((x) => (x == null ? '' : String(x)));
+      while (d.length && !d[d.length - 1]) d.pop();
+      if (d.length) o.d = d;
+    }
+    if (inc.v && st.video_url) {
+      const vu = String(st.video_url);
+      let raw = null;
+      if (vu.startsWith(PC_VIEWER)) {
+        try { const r = atob(vu.slice(PC_VIEWER.length)); if (btoa(r) === vu.slice(PC_VIEWER.length)) raw = r; } catch (e) {}
+      }
+      if (raw) o.u = raw; else if (vu.startsWith(PC_VIEWER)) o.U = vu;
+    }
+    if (inc.c && st.pdf_url) {
+      const pu = String(st.pdf_url);
+      const rest = pu.startsWith(PC_PDF) ? pu.slice(PC_PDF.length) : '';
+      if (/^[A-Za-z0-9._-]+$/.test(rest)) o.p = rest; else if (pu.startsWith(PC_PDF)) o.P = pu;
+    }
+    const r = pcFinal(i);
+    if (r) { o.r = Math.round(r * 100) / 100; if (pcCur(i) === 'USD') o.k = 'U'; }
+    return o;
+  });
+  return { v: 1, c: PC.s.client || '', e: Math.floor(Date.now() / 1000) + PC_DAYS * 86400, s: stones };
+}
+
+async function pcCreate() {
+  pc$('pc-error').style.display = 'none';
+  if (PC.mode === 'view') { pcShowCustomerView(); return; }
+  if (!pcIdx().length) { pcError('Tick at least one diamond.'); return; }
+  if (!pc$('pc-p-video').checked && !pc$('pc-p-cert').checked && !pc$('pc-p-specs').checked && PC.price === 'none') {
+    pcError('Tick at least one thing to include.'); return;
+  }
+  if (PC.price === 'markup' && !pcMultiplier()) { pcError('Enter a markup above 0%.'); return; }
+  const go = pc$('pc-go');
+  go.disabled = true; go.textContent = 'Creating…';
+  try {
+    const hash = await pcEncode(pcPayload());
+    const slug = pcSlug(PC.s.client) || 'store';
+    PC.link = location.origin + '/c/' + slug + '#' + hash;
+  } catch (e) {
+    pcError('Could not create the link on this browser.'); PC.link = '';
+  }
+  go.disabled = false; go.textContent = 'Create link';
+  if (!PC.link) return;
+
+  const store = PC.s.client || '';
+  const intro = store ? `Here are the diamonds we've selected for you at ${store}:` : `Here are the diamonds we've selected for you:`;
+  const text = intro + '\n' + PC.link;
+  const subject = store ? `Your diamond selection from ${store}` : 'Your diamond selection';
+  pc$('pc-link').value = PC.link;
+  pc$('pc-sms').href = 'sms:?&body=' + encodeURIComponent(text);
+  pc$('pc-wa').href = 'https://wa.me/?text=' + encodeURIComponent(text);
+  pc$('pc-mail').href = 'mailto:?subject=' + encodeURIComponent(subject) + '&body=' + encodeURIComponent(text);
+  pc$('pc-preview').href = PC.link;
+  const nat = pc$('pc-native');
+  nat.style.display = navigator.share ? 'flex' : 'none';
+  nat.onclick = () => navigator.share({ title: store ? `${store} — Diamond Selection` : 'Diamond Selection', text: intro, url: PC.link }).catch(() => {});
+  pc$('pc-result').style.display = 'block';
+  pc$('pc-result').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+}
+
+// ── Customer view: hides your quote price on this screen, shows the chosen price
+function pcShowCustomerView() {
+  if (PC.price === 'markup' && !pcMultiplier()) { pcError('Enter a markup above 0%.'); return; }
+  document.querySelectorAll('.pc-cvp').forEach((n) => n.remove());
+  PC.s.stones.forEach((_, i) => {
+    const r = pcFinal(i);
+    const left = document.querySelector('#stone-' + i + ' .stone-left');
+    if (!r || !left) return;
+    const cur = pcCur(i);
+    const div = document.createElement('div');
+    div.className = 'price-block pc-cvp';
+    div.innerHTML = `<div class="price-amount">${pcFmt(r, cur)}</div><span class="price-currency-badge ${cur === 'USD' ? 'usd' : 'cad'}">${cur}</span>`;
+    left.insertBefore(div, left.firstChild);
+  });
+  document.body.classList.add('pc-cv');
+  pc$('pc-bar').classList.remove('visible');
+  // Hide our own logo/name inside the 360° viewer while the customer is looking
+  document.querySelectorAll('.video-wrap iframe').forEach((f) => {
+    if (f.src.startsWith(PC_VIEWER) && !f.src.includes('&plain=1')) { f.dataset.pcSrc = f.src; f.src = f.src + '&plain=1'; }
+  });
+  const icon = document.querySelector('link[rel="icon"]');
+  const logo = CLIENT_LOGOS[PC.s.client];
+  if (icon && logo) { PC.favicon = icon.href; icon.href = logo; }
+  pcClose();
+  window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+function pcExitCustomerView() {
+  if (!confirm('Show your quote prices again?')) return;
+  document.querySelectorAll('.pc-cvp').forEach((n) => n.remove());
+  document.body.classList.remove('pc-cv');
+  pc$('pc-bar').classList.add('visible');
+  document.querySelectorAll('.video-wrap iframe[data-pc-src]').forEach((f) => { f.src = f.dataset.pcSrc; delete f.dataset.pcSrc; });
+  const icon = document.querySelector('link[rel="icon"]');
+  if (icon && PC.favicon) icon.href = PC.favicon;
+}
+
+function pcSetup(s, certTypes, isExpired) {
+  if (isExpired || !s || !Array.isArray(s.stones) || !s.stones.length) return;
+  PC.s = s; PC.certTypes = certTypes || [];
+  s.stones.forEach((_, i) => { PC.sel[i] = true; });
+  pcLoadPrefs();
+  pc$('pc-mk-val').value = PC.mk.val;
+  pc$('pc-mk-unit').value = PC.mk.unit;
+  pc$('pc-round').value = PC.mk.round;
+
+  // Parts that don't exist on any stone are greyed out
+  const has = {
+    video: s.stones.some((st) => st.video_url),
+    cert: s.stones.some((st) => st.pdf_url),
+    specs: s.stones.some((st) => st.cert_data && Object.values(st.cert_data).some(Boolean)),
+  };
+  Object.keys(has).forEach((k) => {
+    if (!has[k]) { pc$('pc-p-' + k).checked = false; pc$('pc-p-' + k).disabled = true; pc$('pc-lab-' + k).classList.add('disabled'); }
+  });
+  pcRenderStones();
+
+  pc$('pc-share-open').addEventListener('click', () => pcOpen('share'));
+  pc$('pc-view-open').addEventListener('click', () => pcOpen('view'));
+  pc$('pc-close').addEventListener('click', pcClose);
+  pc$('pc-overlay').addEventListener('click', (e) => { if (e.target.id === 'pc-overlay') pcClose(); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape') pcClose(); });
+  pc$('pc-exit').addEventListener('click', pcExitCustomerView);
+  pc$('pc-go').addEventListener('click', pcCreate);
+  pc$('pc-copy').addEventListener('click', () => copyText(PC.link, pc$('pc-copy'), 'Copy link'));
+  pc$('pc-link').addEventListener('focus', (e) => e.target.select());
+
+  document.querySelectorAll('#pc-seg button').forEach((b) => b.addEventListener('click', () => { PC.price = b.dataset.m; pcRenderPrices(); pcInvalidate(); }));
+  document.querySelectorAll('#pc-chips .pc-chip').forEach((b) => b.addEventListener('click', () => { PC.mk.x = b.dataset.x; pcSavePrefs(); pcRenderPrices(true); pcInvalidate(); }));
+  pc$('pc-mk-val').addEventListener('input', (e) => { PC.mk.val = e.target.value; pcSavePrefs(); pcRenderPrices(true); });
+  pc$('pc-mk-unit').addEventListener('change', (e) => { PC.mk.unit = e.target.value; pcSavePrefs(); pcRenderPrices(true); });
+  pc$('pc-round').addEventListener('change', (e) => { PC.mk.round = e.target.value; pcSavePrefs(); pcRenderPrices(true); });
+  // Any change after a link is made hides the old link, so a stale one can't be sent
+  pc$('pc-sheet').addEventListener('input', (e) => { if (e.target.id !== 'pc-link') pcInvalidate(); });
+  pc$('pc-sheet').addEventListener('change', (e) => { if (e.target.id !== 'pc-link') pcInvalidate(); });
+
+  pc$('pc-bar').classList.add('visible');
+  document.body.classList.add('pc-has-bar');
 }
 
 init();

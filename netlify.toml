@@ -4,17 +4,29 @@
 [functions."quote-page"]
   included_files = ["quote.html"]
 
-[functions."share-page"]
-  included_files = ["share.html"]
+[functions."customer-page"]
+  included_files = ["customer.html", "quote.html"]
 
 [[redirects]]
   from = "/q/*"
   to = "/.netlify/functions/quote-page/:splat"
   status = 200
 
+# Old share links: retired. Shows a "no longer active" page, loads no data.
 [[redirects]]
   from = "/s/*"
   to = "/.netlify/functions/share-page/:splat"
+  status = 200
+
+# Customer share page. Everything after "#" never reaches the server.
+[[redirects]]
+  from = "/c/*"
+  to = "/.netlify/functions/customer-page/:splat"
+  status = 200
+
+[[redirects]]
+  from = "/c"
+  to = "/.netlify/functions/customer-page"
   status = 200
 
 [[redirects]]

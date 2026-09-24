@@ -365,6 +365,10 @@
       return;
     }
     document.getElementById('viewer-wrap').style.display = 'flex';
+    // &plain=1 (customer share pages): hide our own logo and name, show only the diamond
+    if (params.get('plain') === '1') {
+      document.querySelectorAll('#viewer-wrap > img, #brand').forEach((el) => { el.style.display = 'none'; });
+    }
     const frame = document.getElementById('viewer-frame');
     frame.src = url;
     // Scale the vendor spinner to fit: it always lays out at 500px wide, then shrinks to the box

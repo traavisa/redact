@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex">
+  <title>Diamond Selection</title>
+  <link rel="icon" id="favicon" href="data:,">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    html { scroll-behavior: smooth; }
+    html, body {
+      background: #0c0c0c;
+      font-family: 'Inter', -apple-system, sans-serif;
+      color: #e8e8e0;
+      min-height: 100%;
+    }
+
+    #loading { position: fixed; inset: 0; background: #0c0c0c; display: flex; align-items: center; justify-content: center; z-index: 100; }
+    #loading.hidden { display: none; }
+    .loading-inner { display: flex; flex-direction: column; align-items: center; gap: 18px; }
+    .loading-logo { width: 40px; height: 40px; border-radius: 50%; object-fit: cover; opacity: 0; animation: logoFade 1s ease forwards 0.15s; }
+    @keyframes logoFade { to { opacity: 0.95; } }
+    .spinner { width: 22px; height: 22px; border: 1.5px solid #222; border-top-color: #c9a84c; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #error { display: none; position: fixed; inset: 0; background: #0c0c0c; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 2rem; }
+    #error.visible { display: flex; }
+    #error h2 { font-size: 18px; font-weight: 400; color: #999; }
+    #error p { font-size: 13px; color: #555; max-width: 300px; line-height: 1.7; }
+    #expired-overlay { display: none; position: fixed; inset: 0; background: rgba(12,12,12,0.32); flex-direction: column; align-items: center; justify-content: center; z-index: 50; pointer-events: none; padding: 2rem; }
+    #expired-overlay.visible { display: flex; }
+    #expired-banner { background: rgba(10,10,10,0.92); border: 1px solid #333; border-radius: 6px; padding: 18px 28px; text-align: center; box-shadow: 0 8px 24px rgba(0,0,0,0.45); }
+    #expired-overlay h2 { font-size: 20px; font-weight: 600; color: #fff; letter-spacing: 0.1em; text-transform: uppercase; margin: 0 0 6px; }
+    #expired-overlay p { font-size: 13px; color: #ccc; max-width: 300px; line-height: 1.7; margin: 0; }
+    .watermark-logo { width: 16px; height: 16px; border-radius: 50%; object-fit: cover; opacity: 0.08; margin-top: 6px; }
+
+    .page { max-width: 860px; margin: 0 auto; padding: 48px 24px 100px; }
+
+    /* ── Header ── */
+    .header {
+      display: flex; align-items: center; gap: 16px;
+      margin-bottom: 40px; padding-bottom: 32px;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    .header-logo { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
+    .header-text { min-width: 0; }
+    .header-name {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: clamp(18px, 4.5vw, 22px); font-weight: 500; letter-spacing: 0.04em;
+      color: #e8e8e0; line-height: 1.2;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .header-sub { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: #8a8a8a; margin-top: 3px; }
+
+    /* ── Stone navigation (multi-diamond quotes) ── */
+    .stone-nav {
+      display: none; position: sticky; top: 0; z-index: 30;
+      gap: 8px; justify-content: center; flex-wrap: wrap;
+      padding: 12px 0; margin: -12px 0 32px;
+      background: rgba(12,12,12,0.85);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    }
+    .stone-nav.visible { display: flex; }
+    .stone-nav-item {
+      font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase;
+      color: #888; padding: 7px 16px; border: 1px solid #202020; border-radius: 20px;
+      cursor: pointer; transition: all 0.15s; background: transparent;
+      font-family: 'Inter', sans-serif;
+    }
+    .stone-nav-item.active { color: #0a0a0a; background: #c9a84c; border-color: #c9a84c; }
+
+    /* ── Page intro ── */
+    .page-intro { margin-bottom: 48px; }
+    .page-title {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: clamp(27px, 6vw, 38px); font-weight: 300; letter-spacing: -0.01em;
+      color: #fff; line-height: 1.15; margin-bottom: 8px;
+    }
+    .page-sub { font-size: 12px; color: #9a9a9a; letter-spacing: 0.06em; text-transform: uppercase; }
+
+    /* ── Stones ── */
+    .stones { display: flex; flex-direction: column; gap: 56px; }
+
+    .stone-card {
+      background: #0f0f0f;
+      border: 1px solid #181818;
+      border-radius: 8px;
+      overflow: hidden;
+      box-shadow: 0 20px 40px -24px rgba(0,0,0,0.6);
+      opacity: 0; transform: translateY(14px);
+      animation: cardIn 0.55s cubic-bezier(0.16,1,0.3,1) forwards;
+    }
+    @keyframes cardIn { to { opacity: 1; transform: translateY(0); } }
+    @media (hover: hover) {
+      .stone-card { transition: border-color 0.25s, box-shadow 0.25s; }
+      .stone-card:hover { border-color: #2a2a2a; box-shadow: 0 24px 48px -20px rgba(0,0,0,0.7); }
+    }
+
+    /* Card top label */
+    .stone-label {
+      padding: 12px 24px;
+      display: flex; align-items: center; justify-content: space-between;
+      border-bottom: 1px solid #141414;
+    }
+    .stone-num { font-size: 10px; letter-spacing: 0.14em; text-transform: uppercase; color: #9a9a9a; }
+    .stone-cert { font-size: 11px; font-family: monospace; color: #6e6e6e; }
+
+    /* ── Main body: specs+price left, video right ── */
+    .stone-body {
+      display: grid;
+      grid-template-columns: 230px 1fr;
+      gap: 0;
+    }
+
+    /* Left panel */
+    .stone-left {
+      padding: 28px;
+      border-right: 1px solid #141414;
+      display: flex; flex-direction: column;
+      justify-content: space-between;
+    }
+
+    .price-block { margin-bottom: 28px; }
+    .price-amount {
+      font-family: 'Cormorant Garamond', serif;
+      font-size: clamp(27px, 6vw, 36px); font-weight: 400; letter-spacing: -0.02em;
+      line-height: 1; color: #fff;
+      background: linear-gradient(135deg, #ffffff 30%, #d9bb6c 100%);
+      -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
+    }
+    .price-currency-badge {
+      display: inline-block;
+      font-size: 10px; letter-spacing: 0.1em; font-weight: 500;
+      text-transform: uppercase;
+      padding: 3px 8px; border-radius: 2px; margin-top: 6px;
+    }
+    .price-currency-badge.usd { background: #0a1828; color: #4a9eff; border: 1px solid #1a3050; }
+    .price-currency-badge.cad { background: #1a0a0a; color: #c9a84c; border: 1px solid #3a1a0a; }
+    .price-type-note { font-size: 11px; color: #9a9a9a; margin-top: 4px; letter-spacing: 0.04em; }
+
+    /* Specs */
+    .specs-block {}
+    .specs-label {
+      font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase;
+      color: #8a8a8a; margin-bottom: 12px;
+    }
+    .spec-row {
+      display: flex; justify-content: space-between; align-items: flex-start;
+      gap: 12px;
+      padding: 7px 0;
+      border-bottom: 1px solid #1e1e1e;
+    }
+    .spec-row:last-child { border-bottom: none; }
+    .spec-key {
+      font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+      color: #9a9a9a; font-weight: 500;
+      flex-shrink: 0; line-height: 1.5;
+    }
+    .spec-val {
+      font-size: 13px; color: #d8d8d0; font-weight: 400;
+      flex: 1 1 auto; min-width: 0; text-align: right; line-height: 1.5;
+    }
+
+    /* Natural Diamond badge */
+    .origin-badge {
+      display: inline-flex; align-items: center; gap: 6px;
+      margin-bottom: 16px;
+    }
+    .origin-badge-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #c9a84c; flex-shrink: 0;
+    }
+    .origin-badge-text {
+      font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase;
+      color: #c9a84c; font-weight: 500;
+    }
+    .stone-actions { margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
+    .btn {
+      display: flex; align-items: center; justify-content: center;
+      padding: 11px 16px; border-radius: 4px;
+      font-size: 11px; font-weight: 500; letter-spacing: 0.08em; text-transform: uppercase;
+      cursor: pointer; transition: all 0.15s; border: none;
+      font-family: 'Inter', sans-serif; text-decoration: none;
+    }
+    .btn:active { transform: scale(0.97); }
+    .btn-primary { background: #c9a84c; color: #0a0a0a; }
+    .btn-primary:hover { background: #d4b55e; }
+    .btn-ghost { background: transparent; color: #444; border: 1px solid #202020; }
+    .btn-ghost:hover { background: #141414; color: #666; }
+    .btn-ghost.copied { border-color: #1a3020; color: #4caf80; }
+
+    /* Right panel — video */
+    .stone-right { background: #080808; display: flex; align-items: stretch; }
+    .video-wrap { width: 100%; aspect-ratio: 1 / 1; border-left: 1px solid #141414; }
+    .video-wrap iframe { width: 100%; height: 100%; border: none; display: block; }
+
+    /* PDF section */
+    .pdf-section {
+      border-top: 1px solid #141414;
+    }
+    .pdf-toggle {
+      padding: 14px 24px;
+      display: flex; align-items: center; justify-content: space-between;
+      cursor: pointer; user-select: none;
+    }
+    .pdf-toggle-label { font-size: 10px; letter-spacing: 0.1em; text-transform: uppercase; color: #8a8a8a; }
+    .pdf-toggle-icon { font-size: 11px; color: #777; transition: transform 0.2s; }
+    .pdf-toggle-icon.open { transform: rotate(180deg); }
+    .pdf-frame-wrap { display: block; }
+    .pdf-frame-wrap.closed { display: none; }
+    .pdf-frame { width: 100%; height: 680px; border: none; display: block; background: #111; }
+    .pdf-pages { display: block; background: #111; }
+    .pdf-pages canvas { display: block; width: 100%; height: auto; }
+    .pdf-pages canvas + canvas { margin-top: 8px; }
+
+    /* Divider */
+    .divider { border: none; border-top: 1px solid #111; margin: 0; }
+
+    /* Footer */
+    .footer {
+      text-align: center; margin-top: 64px;
+      display: flex; flex-direction: column; align-items: center; gap: 8px;
+    }
+    .footer-logo { width: 24px; height: 24px; border-radius: 50%; object-fit: cover; opacity: 0.2; }
+    .footer-name { font-size: 9px; color: #666; letter-spacing: 0.14em; text-transform: uppercase; }
+    .expiry-note { font-size: 10px; color: #666; letter-spacing: 0.06em; }
+
+    /* ── Responsive: stack on mobile ── */
+    @media (max-width: 680px) {
+      .page { padding: 36px 18px 80px; }
+      .header { margin-bottom: 28px; padding-bottom: 24px; }
+      .stones { gap: 36px; }
+      .stone-body { grid-template-columns: 1fr; }
+      .stone-left { border-right: none; border-bottom: 1px solid #141414; padding: 22px; }
+      .video-wrap { border-left: none; border-top: 1px solid #141414; }
+      .pdf-frame { height: 58vh; min-height: 320px; }
+    }
+
+    @media (max-width: 420px) {
+      .page { padding: 28px 14px 64px; }
+      .header-logo { width: 44px; height: 44px; }
+      .stone-left { padding: 18px; }
+      .stone-label { padding: 12px 18px; }
+      .pdf-toggle { padding: 12px 18px; }
+    }
+    /* ── Customer page extras ── */
+    .stone-body.single { grid-template-columns: 1fr; }
+    .stone-body.single .stone-left { border-right: none; }
+    .stone-body.single .stone-right { justify-content: center; }
+    .stone-body.single .video-wrap { max-width: 560px; border-left: none; }
+    .header-logo[hidden] { display: none; }
+    #expired { display: none; position: fixed; inset: 0; background: #0c0c0c; flex-direction: column; align-items: center; justify-content: center; gap: 14px; text-align: center; padding: 2rem; }
+    #expired.visible { display: flex; }
+    #expired img { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; }
+    #expired h2 { font-family: 'Cormorant Garamond', serif; font-size: 24px; font-weight: 400; color: #e8e8e0; }
+    #expired p { font-size: 13px; color: #8a8a8a; max-width: 300px; line-height: 1.7; }
+  </style>
+</head>
+<body>
+<div id="loading"><div class="loading-inner"><div class="spinner"></div></div></div>
+<div id="error"><h2>This link couldn't be opened</h2><p>It may be incomplete. Please ask your jeweller to send it again.</p></div>
+<div id="expired"><img id="expired-logo" alt="" hidden /><h2>This link has expired</h2><p id="expired-text">Please contact your jeweller for an updated selection.</p></div>
+
+<div class="page" id="page" style="display:none;">
+  <div class="header">
+    <img class="header-logo" id="header-logo" src="" alt="" hidden />
+    <div class="header-text">
+      <div class="header-name" id="header-name"></div>
+      <div class="header-sub">Diamond Selection</div>
+    </div>
+  </div>
+
+  <div class="page-intro">
+    <div class="page-title" id="page-title">Diamond Options</div>
+    <div class="page-sub" id="page-sub"></div>
+  </div>
+
+  <div class="stone-nav" id="stone-nav"></div>
+
+  <div class="stones" id="stones"></div>
+
+  <div class="footer">
+    <img class="footer-logo" id="footer-logo" src="" alt="" hidden />
+    <div class="footer-name" id="footer-name"></div>
+    <div class="expiry-note" id="expiry-note"></div>
+  </div>
+</div>
+
+<script>
+// Customer share page. All content comes from the part of the link after "#",
+// which the browser never sends to any server. This page calls no quote
+// functions, stores nothing and has no analytics.
+// The server adds this store's logo (and only this one) when it serves the page.
+const STORE_LOGO = null;
+
+const VIEWER_BASE = 'https://video.alldiamondeverything.com/?u=';
+const PDF_BASE = 'https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/certificates/';
+const MOBILE_PDF = window.matchMedia('(max-width: 680px)').matches;
+pdfjsLib.GlobalWorkerOptions.workerSrc =
+  'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+
+function esc(v) {
+  return String(v == null ? '' : v).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function b64urlToBytes(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  const bin = atob(s); const u = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i);
+  return u;
+}
+function loadScript(src) {
+  return new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
+}
+async function inflateRaw(bytes) {
+  if (typeof DecompressionStream !== 'undefined') {
+    try {
+      const out = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+      return new Uint8Array(await new Response(out).arrayBuffer());
+    } catch (e) { /* older browser: fall through */ }
+  }
+  await loadScript('https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako_inflate.min.js');
+  return window.pako.inflateRaw(bytes);
+}
+async function decodeHash(h) {
+  const kind = h.charAt(0), body = h.slice(1);
+  if (!body || (kind !== 'z' && kind !== 'j')) throw new Error('bad link');
+  let bytes = b64urlToBytes(body);
+  if (kind === 'z') bytes = await inflateRaw(bytes);
+  return JSON.parse(new TextDecoder().decode(bytes));
+}
+
+// Only our own viewer and certificate storage can be shown on this page
+function videoUrl(st) {
+  // &plain=1 hides the viewer's own logo/name so only the store's branding shows
+  if (typeof st.u === 'string' && /^https?:\/\//i.test(st.u)) {
+    try { return VIEWER_BASE + btoa(st.u) + '&plain=1'; } catch (e) { return null; }
+  }
+  if (typeof st.U === 'string' && st.U.startsWith(VIEWER_BASE)) return st.U.split('&plain=')[0] + '&plain=1';
+  return null;
+}
+function pdfUrl(st) {
+  if (typeof st.p === 'string' && /^[A-Za-z0-9._-]+$/.test(st.p)) return PDF_BASE + st.p;
+  if (typeof st.P === 'string' && st.P.startsWith(PDF_BASE) && !/["'<>\s]/.test(st.P)) return st.P;
+  return null;
+}
+
+function setBrand(client) {
+  const logo = STORE_LOGO;
+  ['header-logo', 'footer-logo', 'expired-logo'].forEach((id) => {
+    const img = document.getElementById(id);
+    if (logo) { img.src = logo; img.hidden = false; }
+  });
+  if (logo) document.getElementById('favicon').href = logo;
+  document.getElementById('header-name').textContent = client;
+  document.getElementById('footer-name').textContent = client;
+  document.title = client ? client + ' — Diamond Selection' : 'Diamond Selection';
+}
+
+async function init() {
+  const h = (window.location.hash || '').slice(1);
+  let d;
+  try {
+    d = await decodeHash(h);
+    if (!d || d.v !== 1 || !Array.isArray(d.s) || !d.s.length) throw new Error('bad');
+  } catch (e) { showError(); return; }
+
+  const client = typeof d.c === 'string' ? d.c.slice(0, 80) : '';
+  setBrand(client);
+
+  // Soft expiry: the date travels inside the link and is checked here
+  if (typeof d.e === 'number' && Date.now() / 1000 > d.e) {
+    document.getElementById('loading').classList.add('hidden');
+    if (client) document.getElementById('expired-text').textContent = 'Please contact ' + client + ' for an updated selection.';
+    document.getElementById('expired').classList.add('visible');
+    return;
+  }
+  render(d, client);
+}
+
+function showError() {
+  document.getElementById('loading').classList.add('hidden');
+  document.getElementById('error').classList.add('visible');
+}
+
+function render(d, client) {
+  const stones = d.s.slice(0, 30);
+  const n = stones.length;
+  document.getElementById('page-sub').textContent =
+    n === 1 ? '1 diamond selected for you' : `${n} diamonds selected for you`;
+  const allGIA = stones.every((st) => st.t === 'GIA');
+  document.getElementById('page-title').textContent = allGIA ? 'Natural Diamond Options' : 'Diamond Options';
+  if (typeof d.e === 'number') {
+    const until = new Date(d.e * 1000).toLocaleDateString('en-CA', { month: 'long', day: 'numeric', year: 'numeric' });
+    document.getElementById('expiry-note').textContent = 'Link valid until ' + until;
+  }
+
+  const stonesEl = document.getElementById('stones');
+  stones.forEach((st, i) => {
+    const card = document.createElement('div');
+    card.className = 'stone-card';
+    card.id = 'stone-' + i;
+    card.style.animationDelay = Math.min(i * 90, 360) + 'ms';
+
+    // Price: only a price the jeweller chose to add
+    let priceHtml = '';
+    const r = Number(st.r);
+    if (isFinite(r) && r > 0) {
+      const cur = st.k === 'U' ? 'USD' : 'CAD';
+      priceHtml = `
+        <div class="price-block">
+          <div class="price-amount">${cur === 'USD' ? 'US$' : 'CA$'}${esc(Math.round(r).toLocaleString('en-CA'))}</div>
+          <span class="price-currency-badge ${cur === 'USD' ? 'usd' : 'cad'}">${cur}</span>
+        </div>`;
+    }
+
+    const originBadge = st.t === 'GIA' ? `
+      <div class="origin-badge">
+        <div class="origin-badge-dot"></div>
+        <span class="origin-badge-text">Natural Diamond</span>
+      </div>` : '';
+
+    let specsHtml = '';
+    if (Array.isArray(st.d)) {
+      const cd = st.d.map((x) => (x == null ? '' : String(x).slice(0, 80)));
+      const rows = [
+        ['Shape', cd[0]], ['Carat', cd[1] ? cd[1] + ' ct' : ''], ['Color', cd[2]], ['Clarity', cd[3]],
+        ['Cut', cd[4]], ['Polish', cd[5]], ['Symmetry', cd[6]], ['Fluorescence', cd[7]],
+        ['Measurements', cd[8]], ['Ratio', cd[9]],
+      ].filter((row) => row[1]);
+      if (rows.length) {
+        specsHtml = `
+          <div class="specs-block">
+            ${originBadge}
+            <div class="specs-label">Certificate details</div>
+            ${rows.map((row) => `
+              <div class="spec-row">
+                <span class="spec-key">${row[0]}</span>
+                <span class="spec-val">${esc(row[1])}</span>
+              </div>`).join('')}
+          </div>`;
+      }
+    }
+    if (!specsHtml && originBadge && priceHtml) specsHtml = `<div class="specs-block">${originBadge}</div>`;
+
+    const vid = videoUrl(st);
+    const pdf = pdfUrl(st);
+    const last4 = /^[0-9A-Za-z]{1,4}$/.test(String(st.l || '')) ? String(st.l) : '';
+    const hasLeft = !!(priceHtml || specsHtml);
+
+    let body = '';
+    if (hasLeft || vid) {
+      body = `
+      <div class="stone-body${hasLeft && vid ? '' : ' single'}">
+        ${hasLeft ? `<div class="stone-left">${priceHtml}${specsHtml}</div>` : ''}
+        ${vid ? `<div class="stone-right">
+          <div class="video-wrap">
+            <iframe src="${esc(vid)}" allowfullscreen allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe>
+          </div>
+        </div>` : ''}
+      </div>`;
+    }
+
+    card.innerHTML = `
+      <div class="stone-label">
+        <span class="stone-num">Diamond ${i + 1} of ${n}</span>
+        <span class="stone-cert">${last4 ? '···' + esc(last4) : ''}</span>
+      </div>
+      ${body}
+      ${pdf ? `<div class="pdf-section"${body ? '' : ' style="border-top:none;"'}>
+        <div class="pdf-toggle" onclick="togglePdf(this)">
+          <span class="pdf-toggle-label">Certificate</span>
+          <span class="pdf-toggle-icon open">▾</span>
+        </div>
+        <div class="pdf-frame-wrap">
+          <iframe class="pdf-frame" ${MOBILE_PDF ? 'data-src' : 'src'}="${esc(pdf)}#toolbar=0&navpanes=0"></iframe>
+          <div style="padding: 16px 24px 20px;">
+            <a class="btn btn-primary" href="${esc(pdf)}" download="certificate${last4 ? '-' + esc(last4) : ''}.pdf" style="max-width:260px;">
+              ↓ &nbsp;Download certificate
+            </a>
+          </div>
+        </div>
+      </div>` : ''}`;
+
+    stonesEl.appendChild(card);
+  });
+
+  if (n > 1) {
+    const nav = document.getElementById('stone-nav');
+    nav.classList.add('visible');
+    stones.forEach((_, i) => {
+      const item = document.createElement('button');
+      item.type = 'button';
+      item.className = 'stone-nav-item';
+      item.textContent = `Diamond ${i + 1}`;
+      item.addEventListener('click', () => {
+        document.getElementById('stone-' + i).scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+      nav.appendChild(item);
+    });
+    const navItems = nav.querySelectorAll('.stone-nav-item');
+    const observer = new IntersectionObserver((entries) => {
+      entries.forEach((entry) => {
+        if (entry.isIntersecting) {
+          const idx = Array.from(stonesEl.children).indexOf(entry.target);
+          navItems.forEach((el, j) => el.classList.toggle('active', j === idx));
+        }
+      });
+    }, { rootMargin: '-35% 0px -55% 0px', threshold: 0 });
+    Array.from(stonesEl.children).forEach((c) => observer.observe(c));
+  }
+
+  document.getElementById('loading').classList.add('hidden');
+  document.getElementById('page').style.display = 'block';
+  renderMobilePdfs();
+}
+
+// Phones: draw certificate pages as full-width images (same as the quote page)
+async function renderMobilePdfs() {
+  if (!MOBILE_PDF) return;
+  const cssW = document.getElementById('stones').clientWidth || window.innerWidth;
+  for (const frame of document.querySelectorAll('.pdf-frame[data-src]')) {
+    const url = frame.dataset.src.split('#')[0];
+    try {
+      const pdf = await pdfjsLib.getDocument({ url, withCredentials: false }).promise;
+      const holder = document.createElement('a');
+      holder.className = 'pdf-pages'; holder.href = url; holder.target = '_blank'; holder.rel = 'noopener noreferrer';
+      for (let p = 1; p <= Math.min(pdf.numPages, 4); p++) {
+        const page = await pdf.getPage(p);
+        const scale = Math.min(cssW * 3, 1800) / page.getViewport({ scale: 1 }).width;
+        const vp = page.getViewport({ scale });
+        const c = document.createElement('canvas');
+        c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+        await page.render({ canvasContext: c.getContext('2d'), viewport: vp }).promise;
+        holder.appendChild(c);
+      }
+      frame.replaceWith(holder);
+    } catch (e) {
+      frame.src = frame.dataset.src; // fall back to the iframe
+    }
+  }
+}
+
+function togglePdf(toggleEl) {
+  const icon = toggleEl.querySelector('.pdf-toggle-icon');
+  const wrap = toggleEl.nextElementSibling;
+  const isClosed = wrap.classList.contains('closed');
+  wrap.classList.toggle('closed', !isClosed);
+  icon.classList.toggle('open', !isClosed);
+}
+
+window.addEventListener('hashchange', () => window.location.reload());
+init();
+</script>
+</body>
+</html>

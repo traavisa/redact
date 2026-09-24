@@ -1,66 +1,37 @@
-const { createClient } = require('@supabase/supabase-js');
-const fs = require('fs');
-const path = require('path');
+// Old customer share links (/s/<id>) are retired.
+// This page loads NO share data and never contacts the database.
+const PAGE = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex">
+  <meta name="referrer" content="no-referrer">
+  <title>Link no longer active</title>
+  <style>
+    html, body { margin: 0; min-height: 100%; background: #0c0c0c; color: #e8e8e0;
+      font-family: -apple-system, 'Inter', 'Segoe UI', sans-serif; }
+    .wrap { min-height: 100vh; display: flex; align-items: center; justify-content: center;
+      padding: 2rem; box-sizing: border-box; text-align: center; }
+    .box { max-width: 340px; }
+    .dot { width: 6px; height: 6px; border-radius: 50%; background: #c9a84c; margin: 0 auto 18px; }
+    h1 { font-size: 18px; font-weight: 400; color: #ddd; margin: 0 0 10px; }
+    p { font-size: 13px; color: #8a8a8a; line-height: 1.7; margin: 0; }
+  </style>
+</head>
+<body>
+  <div class="wrap"><div class="box">
+    <div class="dot"></div>
+    <h1>This link is no longer active</h1>
+    <p>Please ask your jeweller for a new link.</p>
+  </div></div>
+</body>
+</html>`;
 
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
-
-function escapeHtml(str) {
-  return String(str).replace(/[&<>"']/g, (c) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
-  }[c]));
-}
-
-function shapesLabel(stones) {
-  const shapes = (stones || []).map((s) => (s.cert_data && s.cert_data.shape) || '').filter(Boolean);
-  if (!shapes.length) return '';
-  const unique = [...new Set(shapes)];
-  if (unique.length === 1) {
-    const shape = unique[0];
-    return shapes.length > 1 && !shape.toLowerCase().endsWith('s') ? `${shape}s` : shape;
-  }
-  return unique.join(', ');
-}
-
-exports.handler = async function (event) {
-  const id = event.path.split('/').filter(Boolean).pop();
-  const html = fs.readFileSync(path.join(__dirname, '..', '..', 'share.html'), 'utf8');
-
-  let title = 'Diamond Options';
-  let description = 'View your diamond selection.';
-
-  if (id) {
-    try {
-      const { data } = await supabase.from('shares').select('*').eq('id', id).single();
-      if (data) {
-        const client = data.client || '';
-        const shapes = shapesLabel(data.stones);
-        title = client ? `${client} Diamond Options` : 'Diamond Options';
-        if (shapes) title += ` — ${shapes}`;
-        const n = (data.stones || []).length;
-        description = shapes
-          ? `${n} diamond${n === 1 ? '' : 's'} selected — ${shapes}`
-          : `${n} diamond${n === 1 ? '' : 's'} selected`;
-      }
-    } catch (e) {
-      // fall back to defaults on any lookup failure
-    }
-  }
-
-  const metaBlock = `<meta property="og:title" content="${escapeHtml(title)}" />
-  <meta property="og:description" content="${escapeHtml(description)}" />
-  <meta property="og:type" content="website" />
-  <meta name="twitter:card" content="summary" />
-  <meta name="twitter:title" content="${escapeHtml(title)}" />
-  <meta name="twitter:description" content="${escapeHtml(description)}" />`;
-
-  const out = html.replace(
-    '<title>Diamond Options</title>',
-    `<title>${escapeHtml(title)}</title>\n  ${metaBlock}`
-  );
-
+exports.handler = async function () {
   return {
-    statusCode: 200,
-    headers: { 'Content-Type': 'text/html; charset=utf-8' },
-    body: out,
+    statusCode: 410,
+    headers: { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'public, max-age=3600' },
+    body: PAGE,
   };
 };
