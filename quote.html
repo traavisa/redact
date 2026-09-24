@@ -310,15 +310,6 @@
     .pc-send .btn-ghost { color: #d0d0c8; border-color: #2a2a2a; }
     .pc-send .btn-ghost:hover { color: #fff; }
     .pc-send .pc-wide { grid-column: span 2; }
-    .pc-exit {
-      display: none; position: fixed; z-index: 60; right: 14px; bottom: calc(14px + env(safe-area-inset-bottom));
-      background: rgba(12,12,12,0.85); color: #666; border: 1px solid #222; border-radius: 20px; padding: 8px 14px;
-      font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; font-family: 'Inter', sans-serif; cursor: pointer;
-    }
-    body.pc-cv .pc-exit { display: block; }
-    body.pc-cv .price-block:not(.pc-cvp),
-    body.pc-cv .watermark-logo,
-    body.pc-cv .expiry-note { display: none; }
     body.pc-noscroll { overflow: hidden; }
 
     @media (max-width: 680px) {
@@ -379,7 +370,6 @@
   <button type="button" class="pc-view-btn" id="pc-view-open">Customer view</button>
   <button type="button" class="pc-share-btn" id="pc-share-open">Share with your customer</button>
 </div>
-<button type="button" class="pc-exit" id="pc-exit">Exit customer view</button>
 
 <div class="pc-overlay" id="pc-overlay" role="dialog" aria-modal="true" aria-labelledby="pc-title">
   <div class="pc-sheet" id="pc-sheet">
@@ -388,7 +378,7 @@
       <button type="button" class="pc-close" id="pc-close" aria-label="Close">&times;</button>
     </div>
     <div class="pc-note" id="pc-note-share">This link is locked on your device. Pure Carbon keeps only an encrypted copy it can't read, so the link works. It's deleted after 30 days, and we never see who you send it to.</div>
-    <div class="pc-note" id="pc-note-view">Your quote prices are hidden while customer view is on. Nothing is sent anywhere.</div>
+    <div class="pc-note" id="pc-note-view">Opens the customer page in a new tab: the same page your customer gets from a link. Your quote prices are never on it, so it's safe to show, and its address is safe to send.</div>
 
     <div class="pc-sec" id="pc-sec-stones">
       <div class="pc-sec-label">Diamonds</div>
@@ -809,7 +799,7 @@ function pcSavePrefs() { try { localStorage.setItem('pc_markup', JSON.stringify(
 
 function pcIdx() {
   const all = PC.s.stones.map((_, i) => i);
-  return PC.mode === 'share' ? all.filter((i) => PC.sel[i]) : all;
+  return all.filter((i) => PC.sel[i]);
 }
 function pcVals() { return PC.price === 'own' ? PC.ownVals : PC.markVals; }
 function pcFinal(i) { return PC.price === 'none' ? 0 : pcNum(pcVals()[i]); }
@@ -912,9 +902,7 @@ function pcOpen(mode) {
   pc$('pc-title').textContent = share ? 'Share with your customer' : 'Customer view';
   pc$('pc-note-share').style.display = share ? 'block' : 'none';
   pc$('pc-note-view').style.display = share ? 'none' : 'block';
-  pc$('pc-sec-stones').style.display = share ? 'block' : 'none';
-  pc$('pc-sec-parts').style.display = share ? 'block' : 'none';
-  pc$('pc-go').textContent = share ? 'Create link' : 'Show customer view';
+  pc$('pc-go').textContent = share ? 'Create link' : 'Open customer view';
   pcInvalidate();
   pcRenderPrices();
   pc$('pc-overlay').classList.add('open');
@@ -995,14 +983,17 @@ function pcPayload() {
 
 async function pcCreate() {
   pc$('pc-error').style.display = 'none';
-  if (PC.mode === 'view') { pcShowCustomerView(); return; }
+  const view = PC.mode === 'view';
   if (!pcIdx().length) { pcError('Tick at least one diamond.'); return; }
   if (!pc$('pc-p-video').checked && !pc$('pc-p-cert').checked && !pc$('pc-p-specs').checked && PC.price === 'none') {
     pcError('Tick at least one thing to include.'); return;
   }
   if (PC.price === 'markup' && !pcMultiplier()) { pcError('Enter a markup above 0%.'); return; }
+  // Customer view: open the tab now (while the tap counts) and send it to the customer page once ready
+  const tab = view ? window.open('about:blank', '_blank') : null;
+  if (tab) { try { tab.opener = null; } catch (e) {} }
   const go = pc$('pc-go');
-  go.disabled = true; go.textContent = 'Creating…';
+  go.disabled = true; go.textContent = view ? 'Opening…' : 'Creating…';
   try {
     const packed = await pcCompress(pcPayload());
     const slug = pcSlug(PC.s.client) || 'store';
@@ -1015,8 +1006,13 @@ async function pcCreate() {
   } catch (e) {
     pcError('Could not create the link on this browser.'); PC.link = '';
   }
-  go.disabled = false; go.textContent = 'Create link';
-  if (!PC.link) return;
+  go.disabled = false; go.textContent = view ? 'Open customer view' : 'Create link';
+  if (!PC.link) { if (tab) tab.close(); return; }
+  if (view) {
+    if (tab) { tab.location.href = PC.link; pcClose(); return; }
+    window.location.href = PC.link;        // pop-ups blocked: open it here instead
+    return;
+  }
 
   const store = PC.s.client || '';
   const intro = store ? `Here are the diamonds we've selected for you at ${store}:` : `Here are the diamonds we've selected for you:`;
@@ -1032,42 +1028,6 @@ async function pcCreate() {
   nat.onclick = () => navigator.share({ title: store ? `${store} — Diamond Selection` : 'Diamond Selection', text: intro, url: PC.link }).catch(() => {});
   pc$('pc-result').style.display = 'block';
   pc$('pc-result').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
-}
-
-// ── Customer view: hides your quote price on this screen, shows the chosen price
-function pcShowCustomerView() {
-  if (PC.price === 'markup' && !pcMultiplier()) { pcError('Enter a markup above 0%.'); return; }
-  document.querySelectorAll('.pc-cvp').forEach((n) => n.remove());
-  PC.s.stones.forEach((_, i) => {
-    const r = pcFinal(i);
-    const left = document.querySelector('#stone-' + i + ' .stone-left');
-    if (!r || !left) return;
-    const cur = pcCur(i);
-    const div = document.createElement('div');
-    div.className = 'price-block pc-cvp';
-    div.innerHTML = `<div class="price-amount">${pcFmt(r, cur)}</div><span class="price-currency-badge ${cur === 'USD' ? 'usd' : 'cad'}">${cur}</span>`;
-    left.insertBefore(div, left.firstChild);
-  });
-  document.body.classList.add('pc-cv');
-  pc$('pc-bar').classList.remove('visible');
-  // Hide our own logo/name inside the 360° viewer while the customer is looking
-  document.querySelectorAll('.video-wrap iframe').forEach((f) => {
-    if (f.src.startsWith(PC_VIEWER) && !f.src.includes('&plain=1')) { f.dataset.pcSrc = f.src; f.src = f.src + '&plain=1'; }
-  });
-  const icon = document.querySelector('link[rel="icon"]');
-  const logo = CLIENT_LOGOS[PC.s.client];
-  if (icon && logo) { PC.favicon = icon.href; icon.href = logo; }
-  pcClose();
-  window.scrollTo({ top: 0, behavior: 'smooth' });
-}
-function pcExitCustomerView() {
-  if (!confirm('Show your quote prices again?')) return;
-  document.querySelectorAll('.pc-cvp').forEach((n) => n.remove());
-  document.body.classList.remove('pc-cv');
-  pc$('pc-bar').classList.add('visible');
-  document.querySelectorAll('.video-wrap iframe[data-pc-src]').forEach((f) => { f.src = f.dataset.pcSrc; delete f.dataset.pcSrc; });
-  const icon = document.querySelector('link[rel="icon"]');
-  if (icon && PC.favicon) icon.href = PC.favicon;
 }
 
 function pcSetup(s, certTypes, isExpired) {
@@ -1095,7 +1055,6 @@ function pcSetup(s, certTypes, isExpired) {
   pc$('pc-close').addEventListener('click', pcClose);
   pc$('pc-overlay').addEventListener('click', (e) => { if (e.target.id === 'pc-overlay') pcClose(); });
   document.addEventListener('keydown', (e) => { if (e.key === 'Escape') pcClose(); });
-  pc$('pc-exit').addEventListener('click', pcExitCustomerView);
   pc$('pc-go').addEventListener('click', pcCreate);
   pc$('pc-copy').addEventListener('click', () => copyText(PC.link, pc$('pc-copy'), 'Copy link'));
   pc$('pc-link').addEventListener('focus', (e) => e.target.select());
