@@ -68,7 +68,6 @@ CLIENT_LOGOS = {
 # Ordered list — Pure Carbon always first
 CLIENT_ORDER = ["Pure Carbon Group", "Nash Jewellers", "NFR", "Cavalier", "Foe & Dear", "Harlings", "Rodan", "Janina's", "IJL", "Gem by Carati", "Vena Nova", "Touch of Gold", "Bijouterie Italienne", "Perrara", "Bell Diamonds", "Barclay's"]
 
-VIEWER_BASE   = "https://video.alldiamondeverything.com/?u="
 QUOTE_BASE    = "https://quote.alldiamondeverything.com"
 SUPABASE_URL  = "https://srlbevzrkovruyerixdi.supabase.co"
 # ── Settings: environment variable first (Render), then st.secrets (Streamlit Cloud) ──
@@ -255,20 +254,6 @@ def get_logo_img(name):
     if b64:
         return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
     return None
-
-def clean_video_url(raw_url):
-    try:
-        from urllib.parse import urlparse, parse_qs
-        u = urlparse(raw_url)
-        embed = raw_url
-        if u.hostname in ("www.youtube.com","youtube.com") and u.path=="/watch":
-            vid = parse_qs(u.query).get("v",[""])[0]
-            if vid: embed = f"https://www.youtube.com/embed/{vid}?autoplay=0"
-        elif u.hostname == "youtu.be":
-            embed = f"https://www.youtube.com/embed/{u.path[1:]}?autoplay=0"
-    except: embed = raw_url
-    encoded = base64.b64encode(embed.encode()).decode()
-    return VIEWER_BASE + encoded
 
 def redact_pdf(file_bytes, cert_type, logo_img):
     zones = CERT_ZONES[cert_type]["zones"]
@@ -558,9 +543,33 @@ def bulk_parse(uploaded, kind_choice="Auto-detect"):
             "filename": uploaded.name}
 
 
+def rehost_media(stones_payload):
+    """Replaces every stone's image/video link, in place, with our own /media/ copy, an
+    opaque /v/ viewer link, or nothing (see quote_media.py). Vendor links are never saved.
+    Returns short notes for anything that couldn't be copied. Never raises."""
+    import quote_media
+    notes = []
+    items = [(s.get("video_url") or "", s.get("image_url") or "") for s in stones_payload]
+    try:
+        pairs = quote_media.process_stones(SUPABASE_URL, SUPABASE_KEY, items)
+    except Exception:
+        pairs = [({"url": "", "note": "video couldn't be saved — left out" if v else ""},
+                  {"url": "", "note": "image couldn't be saved — left out" if i else ""}) for v, i in items]
+    for n, (s, (vid, img)) in enumerate(zip(stones_payload, pairs), 1):
+        s["video_url"] = vid["url"]
+        if img["url"]:
+            s["image_url"] = img["url"]
+        else:
+            s.pop("image_url", None)
+        label = f"···{s['cert_last4']}" if s.get("cert_last4") else f"Diamond {n}"
+        notes += quote_media.notes_for(label, (vid, img))
+    return notes
+
 def save_quote(client, stones_payload, expiry_days):
     """Writes one quote row to Supabase and returns its link, or None on failure.
-    Shared by the manual flow and the spreadsheet (bulk) flow."""
+    Shared by the manual flow, the spreadsheet (bulk) flow and Live Search.
+    Media is re-hosted first; notes about media left out go to st.session_state.media_notes."""
+    st.session_state.media_notes = rehost_media(stones_payload)
     qid  = gen_id()
     exp  = (datetime.datetime.utcnow()+datetime.timedelta(days=expiry_days)).isoformat()+"Z"
     body = {"id":qid,"client":client,"stones":stones_payload,"expires_at":exp}
@@ -569,6 +578,13 @@ def save_quote(client, stones_payload, expiry_days):
     load_quote_history.clear()
     return shorten(f"{QUOTE_BASE}/q/{qid}")
 
+def show_media_notes():
+    """Small note under a new quote link when some media couldn't be copied."""
+    notes = st.session_state.get("media_notes") or []
+    if notes:
+        st.caption("Media note — the quote was saved; these items were handled differently:\n\n"
+                   + "\n".join(f"- {n}" for n in notes))
+
 def bulk_stone_payload(s, currency, price_type):
     """Spreadsheet stone → the same stone dict the manual flow stores.
     No certificate PDF yet (cert lookup not built), so pdf_url is blank."""
@@ -576,7 +592,7 @@ def bulk_stone_payload(s, currency, price_type):
         "cert_last4":    s["cert_last4"],
         "orig_filename": s["report_no"],
         "cert_type":     s["cert_type"],
-        "video_url":     clean_video_url(s["video_url"]),
+        "video_url":     s["video_url"],          # re-hosted by save_quote()
         "pdf_url":       "",
         "price":         s["price"],
         "currency":      currency,
@@ -600,7 +616,7 @@ def cert_selector(tab_prefix):
               <div style="font-size:10px;opacity:0.35;">{cfg["short"]}</div>
               {check}
             </div>''', unsafe_allow_html=True)
-            if st.button("\u200b", key=f"{tab_prefix}_c_{key}", use_container_width=True):
+            if st.button("\u200b", key=f"ovl_{tab_prefix}_c_{key}", use_container_width=True):
                 st.session_state.cert_type=key
                 st.session_state.results=None
                 st.session_state.upkey+=1
@@ -634,7 +650,7 @@ def client_selector(key_prefix, session_key):
               <div style="font-size:11px;font-weight:600;">{name}</div>
               {check}
             </div>''', unsafe_allow_html=True)
-            if st.button("\u200b", key=f"{key_prefix}_{name}", use_container_width=True):
+            if st.button("\u200b", key=f"ovl_{key_prefix}_{name}", use_container_width=True):
                 st.session_state[session_key] = name
 
     with st.expander("➕  Add a new client"):
@@ -690,19 +706,28 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; }
 .hb-giac { background: rgba(74,122,86,0.12);  color: #4a7a56; }
 .hb-igi  { background: rgba(37,99,168,0.12);  color: #2563a8; }
 .divider { border: none; border-top: 1px solid rgba(128,128,128,0.12); margin: 1.3rem 0; }
-/* Cert selector — invisible button overlays the card */
-div[data-testid="stButton"]:has(button[kind="secondary"]) {
+/* Card selectors (certificate type, client): an invisible button overlays each card.
+   Scoped to those buttons only — their keys start with "ovl_". */
+div[class*="st-key-ovl_"] div[data-testid="stButton"] {
     margin-top: -130px !important;
     position: relative !important;
     z-index: 10 !important;
     opacity: 0 !important;
     height: 130px !important;
 }
-div[data-testid="stButton"]:has(button[kind="secondary"]) button {
+div[class*="st-key-ovl_"] div[data-testid="stButton"] button {
     height: 130px !important;
     background: transparent !important;
     border: none !important;
 }
+/* Every other secondary button (Clear, Save client, …): visible, outlined, app font */
+.stButton > button[kind="secondary"] {
+    background: transparent !important; color: inherit !important;
+    border: 1px solid rgba(128,128,128,0.35) !important; border-radius: 8px !important;
+    font-family: 'DM Sans', sans-serif !important; font-weight: 500 !important;
+}
+.stButton > button[kind="secondary"]:hover { border-color: #c9a84c !important; color: #c9a84c !important; }
+.stButton > button[kind="secondary"]:disabled { opacity: 0.4 !important; }
 .link-box { background:#111; border:1px solid #1e1e1e; border-radius:10px; padding:14px 16px; margin-top:8px; }
 .link-label { font-size:11px; opacity:0.35; text-transform:uppercase; letter-spacing:0.08em; margin-bottom:8px; }
 .link-url { font-family:monospace; font-size:14px; word-break:break-all; color:#c9a84c; }
@@ -853,7 +878,7 @@ with tab2:
     for i in range(3):
         with st.expander(f"Diamond {i+1}", expanded=(i==0)):
             q_pdf   = st.file_uploader("Raw certificate PDF (auto-redacted)", type="pdf", key=f"qpdf_{i}_{st.session_state.quote_upkey}")
-            q_vid   = st.text_input("Video URL (optional, auto-cleaned)", placeholder="https://... (leave blank if none)", key=f"qvid_{i}_{st.session_state.quote_upkey}")
+            q_vid   = st.text_input("Video URL (optional — copied to our own server)", placeholder="https://... (leave blank if none)", key=f"qvid_{i}_{st.session_state.quote_upkey}")
             q_price_raw = st.text_input("Your price (optional)", placeholder="e.g. 4500", key=f"qpri_{i}_{st.session_state.quote_upkey}")
             q_price = int(q_price_raw.strip()) if q_price_raw.strip().isdigit() else None
             q_type  = st.radio("Price type", ["Stone price","Price per carat"], horizontal=True, key=f"qtyp_{i}_{st.session_state.quote_upkey}")
@@ -884,11 +909,10 @@ with tab2:
                 pdf_url = upload_pdf(redacted, fname)
                 if not pdf_url:
                     st.error(f"Upload failed for ···{s['cert_last4']}"); ok=False; break
-                cleaned_video = clean_video_url(s["video_url"]) if s["video_url"].strip() else ""
                 stones_payload.append({
                     "cert_last4":    s["cert_last4"],
                     "orig_filename": s["file"].name,
-                    "video_url":     cleaned_video,
+                    "video_url":     s["video_url"].strip(),   # re-hosted by save_quote()
                     "pdf_url":       pdf_url,
                     "price":         s["price"],
                     "currency":      q_currency,
@@ -922,6 +946,7 @@ with tab2:
         st.markdown('<div class="section-label" style="margin-top:1rem;">Quote link — ready to send</div>', unsafe_allow_html=True)
         st.code(_qlink, language=None)
         st.caption("Use the copy button (top right of the box above) to copy the link.")
+        show_media_notes()
         if st.button("Clear", key="clr_quote", use_container_width=True):
             st.session_state.quote_link = None
             st.rerun()

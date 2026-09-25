@@ -1,0 +1,24 @@
+-- Quote media setup. Run once in Supabase → SQL Editor.
+
+-- 1. Storage bucket for re-hosted quote media (images / videos under random UUID names).
+--    Public read so Netlify can proxy /media/<file>; only the service key can write.
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('quote-media', 'quote-media', true, 52428800,
+        array['image/jpeg', 'image/png', 'video/mp4', 'video/webm'])
+on conflict (id) do update
+  set public = excluded.public,
+      file_size_limit = excluded.file_size_limit,
+      allowed_mime_types = excluded.allowed_mime_types;
+
+-- 2. Opaque viewer links: /v/<token> -> vendor URL (for 360 viewer pages that can't be copied).
+create table if not exists public.media_links (
+  token      text primary key check (token ~ '^[a-z2-9]{8,32}$'),
+  vendor_url text not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists media_links_vendor_url_idx on public.media_links (vendor_url);
+
+-- Row Level Security on, and NO policies: the public (anon / authenticated) can't read or
+-- write anything. Only the service key (Render app, Netlify functions) bypasses RLS.
+alter table public.media_links enable row level security;
+revoke all on public.media_links from anon, authenticated;

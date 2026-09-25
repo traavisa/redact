@@ -198,6 +198,7 @@
     .stone-right { background: #080808; display: flex; align-items: stretch; }
     .video-wrap { width: 100%; aspect-ratio: 1 / 1; border-left: 1px solid #141414; }
     .video-wrap iframe { width: 100%; height: 100%; border: none; display: block; }
+    .video-wrap video, .video-wrap img { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; border: none; }
 
     /* PDF section */
     .pdf-section {
@@ -302,6 +303,9 @@ const STORE_LOGO = null;
 const STORE_NAME = null;
 
 const VIEWER_BASE = 'https://video.alldiamondeverything.com/?u=';
+const VIEWER_LINK_BASE = 'https://video.alldiamondeverything.com/v/';
+const MEDIA_BASE = 'https://quote.alldiamondeverything.com/media/';
+const MEDIA_FILE_RE = /^[a-f0-9]{32}\.(jpg|png|mp4|webm)$/;
 const PDF_BASE = 'https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/certificates/';
 const MOBILE_PDF = window.matchMedia('(max-width: 680px)').matches;
 pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -355,14 +359,30 @@ function showExpired(client) {
   document.getElementById('expired').classList.add('visible');
 }
 
-// Only our own viewer and certificate storage can be shown on this page
+// Only our own media, viewer and certificate storage can be shown on this page
+function mediaFile(f) { return typeof f === 'string' && MEDIA_FILE_RE.test(f) ? f : ''; }
 function videoUrl(st) {
-  // &plain=1 hides the viewer's own logo/name so only the store's branding shows
+  // plain=1 hides the viewer's own logo/name so only the store's branding shows
+  if (typeof st.w === 'string' && /^[a-z2-9]{8,32}$/.test(st.w)) return VIEWER_LINK_BASE + st.w + '?plain=1';
+  // Older customer links (made before media was re-hosted)
   if (typeof st.u === 'string' && /^https?:\/\//i.test(st.u)) {
     try { return VIEWER_BASE + btoa(st.u) + '&plain=1'; } catch (e) { return null; }
   }
   if (typeof st.U === 'string' && st.U.startsWith(VIEWER_BASE)) return st.U.split('&plain=')[0] + '&plain=1';
   return null;
+}
+// Re-hosted media: a video (with the image as its poster) or just an image
+function mediaHtml(st) {
+  const m = mediaFile(st.m), im = mediaFile(st.i);
+  const img = /\.(jpg|png)$/.test(im) ? MEDIA_BASE + im : '';
+  if (/\.(mp4|webm)$/.test(m)) {
+    return `<video src="${MEDIA_BASE + m}"${img ? ` poster="${img}"` : ''} controls autoplay muted loop playsinline preload="metadata"></video>`;
+  }
+  if (/\.(jpg|png)$/.test(m)) return `<img src="${MEDIA_BASE + m}" alt="">`;
+  const vid = videoUrl(st);
+  if (vid) return `<iframe src="${esc(vid)}" allowfullscreen allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe>`;
+  if (img) return `<img src="${img}" alt="">`;
+  return '';
 }
 function pdfUrl(st) {
   if (typeof st.p === 'string' && /^[A-Za-z0-9._-]+$/.test(st.p)) return PDF_BASE + st.p;
@@ -472,7 +492,7 @@ function render(d, client) {
     }
     if (!specsHtml && originBadge && priceHtml) specsHtml = `<div class="specs-block">${originBadge}</div>`;
 
-    const vid = videoUrl(st);
+    const vid = mediaHtml(st);
     const pdf = pdfUrl(st);
     const last4 = /^[0-9A-Za-z]{1,4}$/.test(String(st.l || '')) ? String(st.l) : '';
     const hasLeft = !!(priceHtml || specsHtml);
@@ -484,7 +504,7 @@ function render(d, client) {
         ${hasLeft ? `<div class="stone-left">${priceHtml}${specsHtml}</div>` : ''}
         ${vid ? `<div class="stone-right">
           <div class="video-wrap">
-            <iframe src="${esc(vid)}" allowfullscreen allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe>
+            ${vid}
           </div>
         </div>` : ''}
       </div>`;

@@ -2,9 +2,27 @@
 // Reads Supabase with the server-side service key (never sent to the browser),
 // so the quotes table can stay locked to the public.
 const SAFE_STONE_FIELDS = [
-  'cert_last4', 'cert_type', 'video_url', 'pdf_url',
+  'cert_last4', 'cert_type', 'video_url', 'image_url', 'pdf_url',
   'price', 'currency', 'price_type', 'cert_data',
 ];
+
+// Media may only point at our own addresses: re-hosted files (/media/), opaque viewer
+// links (/v/<token>) or, for older quotes, the legacy viewer link. Anything else is dropped.
+const MEDIA_BASE = 'https://quote.alldiamondeverything.com/media/';
+const VIEWER_LINK_BASE = 'https://video.alldiamondeverything.com/v/';
+const LEGACY_VIEWER_BASE = 'https://video.alldiamondeverything.com/?u=';
+const MEDIA_FILE_RE = /^[a-f0-9]{32}\.(jpg|png|mp4|webm)$/;
+function safeVideo(u) {
+  u = String(u || '');
+  if (u.startsWith(MEDIA_BASE)) return MEDIA_FILE_RE.test(u.slice(MEDIA_BASE.length)) ? u : undefined;
+  if (u.startsWith(VIEWER_LINK_BASE)) return /^[a-z2-9]{8,32}$/.test(u.slice(VIEWER_LINK_BASE.length)) ? u : undefined;
+  if (u.startsWith(LEGACY_VIEWER_BASE)) return u;
+  return undefined;
+}
+function safeImage(u) {
+  u = String(u || '');
+  return u.startsWith(MEDIA_BASE) && MEDIA_FILE_RE.test(u.slice(MEDIA_BASE.length)) ? u : undefined;
+}
 
 function certTypeOf(stone) {
   if (stone.cert_type) return stone.cert_type;
@@ -36,6 +54,8 @@ exports.handler = async function (event) {
   const stones = expired ? [] : (q.stones || []).map((s) => {
     const out = {};
     SAFE_STONE_FIELDS.forEach((k) => { if (s[k] !== undefined) out[k] = s[k]; });
+    if ('video_url' in out) { const v = safeVideo(out.video_url); if (v) out.video_url = v; else delete out.video_url; }
+    if ('image_url' in out) { const v = safeImage(out.image_url); if (v) out.image_url = v; else delete out.image_url; }
     const ct = certTypeOf(s);
     if (ct) out.cert_type = ct;
     return out;

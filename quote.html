@@ -196,6 +196,7 @@
     .stone-right { background: #080808; display: flex; align-items: stretch; }
     .video-wrap { width: 100%; aspect-ratio: 1 / 1; border-left: 1px solid #141414; }
     .video-wrap iframe { width: 100%; height: 100%; border: none; display: block; }
+    .video-wrap video, .video-wrap img.media-img { width: 100%; height: 100%; object-fit: contain; background: #000; display: block; border: none; }
 
     /* PDF section */
     .pdf-section {
@@ -639,7 +640,7 @@ function render(s, certTypes, isExpired) {
         </div>
         <div class="stone-right">
           <div class="video-wrap">
-            <iframe src="${stone.video_url}" allowfullscreen allow="autoplay; fullscreen"></iframe>
+            ${mediaHtml(stone)}
           </div>
         </div>
       </div>
@@ -691,6 +692,31 @@ function render(s, certTypes, isExpired) {
   document.getElementById('page').style.display = 'block';
   renderMobilePdfs();
   pcSetup(s, certTypes, isExpired);
+}
+
+// Stone media. Re-hosted files (/media/<uuid>) play natively; viewer links (/v/<token>,
+// or older ?u= links) open in the viewer frame. Nothing here ever points at a vendor.
+const MEDIA_BASE = 'https://quote.alldiamondeverything.com/media/';
+const VIEWER_LINK_BASE = 'https://video.alldiamondeverything.com/v/';
+const MEDIA_FILE_RE = /^[a-f0-9]{32}\.(jpg|png|mp4|webm)$/;
+function mediaFile(u) {
+  u = String(u || '');
+  if (!u.startsWith(MEDIA_BASE)) return '';
+  const f = u.slice(MEDIA_BASE.length);
+  return MEDIA_FILE_RE.test(f) ? f : '';
+}
+function mediaHtml(stone) {
+  const vf = mediaFile(stone.video_url), imf = mediaFile(stone.image_url);
+  const poster = /\.(jpg|png)$/.test(imf) ? ` poster="${MEDIA_BASE + imf}"` : '';
+  if (/\.(mp4|webm)$/.test(vf)) {
+    return `<video src="${MEDIA_BASE + vf}"${poster} controls autoplay muted loop playsinline preload="metadata"></video>`;
+  }
+  if (/\.(jpg|png)$/.test(vf)) return `<img class="media-img" src="${MEDIA_BASE + vf}" alt="">`;
+  if (stone.video_url && !vf) {
+    return `<iframe src="${pcEsc(stone.video_url)}" allowfullscreen allow="autoplay; fullscreen"></iframe>`;
+  }
+  if (imf) return `<img class="media-img" src="${MEDIA_BASE + imf}" alt="">`;
+  return `<iframe src="" allowfullscreen allow="autoplay; fullscreen"></iframe>`;
 }
 
 // Phones: draw certificate pages as full-width images (PDF iframes don't fit on phones)
@@ -961,13 +987,14 @@ function pcPayload() {
       while (d.length && !d[d.length - 1]) d.pop();
       if (d.length) o.d = d;
     }
-    if (inc.v && st.video_url) {
-      const vu = String(st.video_url);
-      let raw = null;
-      if (vu.startsWith(PC_VIEWER)) {
-        try { const r = atob(vu.slice(PC_VIEWER.length)); if (btoa(r) === vu.slice(PC_VIEWER.length)) raw = r; } catch (e) {}
-      }
-      if (raw) o.u = raw; else if (vu.startsWith(PC_VIEWER)) o.U = vu;
+    if (inc.v) {
+      // Only our own media addresses go into the customer link, never a vendor's.
+      const vu = String(st.video_url || '');
+      const vf = mediaFile(vu), imf = mediaFile(st.image_url);
+      if (vf) o.m = vf;
+      else if (vu.startsWith(VIEWER_LINK_BASE) && /^[a-z2-9]{8,32}$/.test(vu.slice(VIEWER_LINK_BASE.length))) o.w = vu.slice(VIEWER_LINK_BASE.length);
+      else if (vu.startsWith(PC_VIEWER)) o.U = vu;            // older quotes: link passed on unchanged
+      if (imf) o.i = imf;
     }
     if (inc.c && st.pdf_url) {
       const pu = String(st.pdf_url);
@@ -1041,7 +1068,7 @@ function pcSetup(s, certTypes, isExpired) {
 
   // Parts that don't exist on any stone are greyed out
   const has = {
-    video: s.stones.some((st) => st.video_url),
+    video: s.stones.some((st) => st.video_url || st.image_url),
     cert: s.stones.some((st) => st.pdf_url),
     specs: s.stones.some((st) => st.cert_data && Object.values(st.cert_data).some(Boolean)),
   };

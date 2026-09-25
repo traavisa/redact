@@ -5,7 +5,8 @@ Rules this module follows:
   - Stones are whitelisted in nivoda_client.whitelist(); supplier fields are never requested.
   - Search filters come only from the form, built by deterministic code. The AI can
     pre-fill the form ("Read request") but never runs or changes a search.
-  - Saved quotes carry no media URLs (they would expose the source's domain).
+  - Saved quotes never carry the source's media URLs: save_quote() copies each image/video
+    to our own /media/ address or swaps it for an opaque /v/ viewer link (quote_media.py).
 """
 import datetime
 import html
@@ -1523,8 +1524,9 @@ def _quote_payload(s, show_price):
         "cert_last4":    "".join(filter(str.isdigit, s.get("cert_no", "")))[-4:],
         "orig_filename": f"Live Search · {lab} {s.get('cert_no', '')}".strip(),
         "cert_type":     "GIA Colour" if (lab == "GIA" and fancy) else lab,
-        # No media: the source's image/video links would expose its domain on the share page.
-        "video_url":     "",
+        # Raw links go no further than save_quote(), which re-hosts them (or drops them) before saving.
+        "video_url":     s.get("video") or "",
+        "image_url":     s.get("image") or "",
         "pdf_url":       "",
         "price":         str(int(round(pv["client"]))) if (show_price and pv) else "",
         "currency":      "CAD",
@@ -1555,7 +1557,7 @@ def _quote_box(rows, deps):
     if st.button(f"🔗  Add to quote ({len(chosen)} stone{'s' if len(chosen) != 1 else ''})", type="primary",
                  use_container_width=True, key="ls_add_quote", disabled=not chosen):
         payload = [_quote_payload(s, show_price) for s in chosen]
-        with st.spinner("Creating quote…"):
+        with st.spinner("Creating quote and copying media…"):
             link = deps["save_quote"](q_client, payload, exp)
         if link:
             for p in payload:
@@ -1570,3 +1572,6 @@ def _quote_box(rows, deps):
         link, who, n = ss.ls_last_link
         st.success(f"✅ Quote created for {who} · {n} diamond(s)")
         st.code(link, language=None)
+        if ss.get("media_notes"):
+            st.caption("Media note — the quote was saved; these items were handled differently:\n\n"
+                       + "\n".join(f"- {m}" for m in ss.media_notes))

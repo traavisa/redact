@@ -168,7 +168,7 @@
     <div class="brand">All Diamond Everything</div>
 
     <div class="page-title">Video & 360° Link Generator</div>
-    <div class="page-sub">Paste any vendor URL to generate a branded share link.</div>
+    <div class="page-sub">Paste any vendor URL to generate a private share link.</div>
 
     <div class="section-label">Generate link</div>
     <div class="input-row">
@@ -210,7 +210,11 @@
 <div id="brand">All Diamond Everything</div>
 
 <script>
-  const VIEWER_BASE = 'https://video.alldiamondeverything.com/?u=';
+  // ── Config ──
+  // Old links (?u=<base64>) can be decoded by anyone into the vendor's address.
+  // Nothing creates them any more; set this to true to stop opening them at all.
+  const DISABLE_BASE64_LINKS = false;
+
   let generatedLink = '';
 
   function toEmbedUrl(url) {
@@ -244,39 +248,40 @@
     resultBox.style.display = 'none';
 
     if (!input.startsWith('http://') && !input.startsWith('https://')) {
+      errorEl.textContent = 'Please paste a valid URL starting with https://';
       errorEl.style.display = 'block';
       return;
     }
 
     const embedUrl = toEmbedUrl(input);
-    const longUrl = VIEWER_BASE + btoa(embedUrl);
-
-    // Show loading state
     goBtn.textContent = 'Generating...';
     goBtn.disabled = true;
+    generatedLink = '';
 
+    // The address is stored server-side under a random token: the link reveals nothing
     try {
-      const res = await fetch('/.netlify/functions/shorten', {
+      const res = await fetch('/.netlify/functions/create-media-link', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ long_url: longUrl })
+        body: JSON.stringify({ url: embedUrl, pass: sessionStorage.getItem(PASS_KEY) || '' })
       });
-
-      const data = await res.json();
-
-      if (data.link) {
-        generatedLink = data.link;
+      if (res.status === 401) {
+        sessionStorage.removeItem(PW_KEY); sessionStorage.removeItem(PASS_KEY);
+        errorEl.textContent = 'Session expired. Reload the page and enter the password again.';
+        errorEl.style.display = 'block';
       } else {
-        // Fallback to long URL if Bitly fails
-        generatedLink = longUrl;
+        const data = await res.json();
+        if (data.link) generatedLink = data.link;
       }
-    } catch(e) {
-      // Fallback to long URL on network error
-      generatedLink = longUrl;
+    } catch(e) {}
+    if (!generatedLink && errorEl.style.display !== 'block') {
+      errorEl.textContent = 'Could not create the link. Please try again.';
+      errorEl.style.display = 'block';
     }
 
     goBtn.textContent = 'Generate';
     goBtn.disabled = false;
+    if (!generatedLink) return;
 
     resultUrl.textContent = generatedLink;
     resultBox.style.display = 'block';
@@ -311,6 +316,7 @@
 
   // Password protection — verified server-side
   const PW_KEY = 'ade_auth';
+  const PASS_KEY = 'ade_pass';   // signed pass from the server, needed to create links
 
   async function checkPassword() {
     const input = document.getElementById('pw-input');
@@ -326,6 +332,7 @@
       const data = await res.json();
       if (data.ok) {
         sessionStorage.setItem(PW_KEY, '1');
+        if (data.pass) sessionStorage.setItem(PASS_KEY, data.pass);
         document.getElementById('password-screen').classList.remove('visible');
         document.getElementById('landing').classList.add('visible');
       } else {
@@ -345,10 +352,17 @@
   });
 
   // Page init
-  (function() {
+  function showViewerError() {
+    document.getElementById('loading').classList.add('hidden');
+    document.getElementById('error-screen').classList.add('visible');
+  }
+
+  (async function() {
     const params = new URLSearchParams(window.location.search);
+    const tokenMatch = window.location.pathname.match(/^\/v\/([a-z2-9]{8,32})\/?$/);
     const encoded = params.get('u');
-    if (!encoded) {
+    if (!tokenMatch && window.location.pathname.startsWith('/v/')) { showViewerError(); return; }
+    if (!tokenMatch && !encoded) {
       document.getElementById('loading').classList.add('hidden');
       if (sessionStorage.getItem(PW_KEY) === '1') {
         document.getElementById('landing').classList.add('visible');
@@ -357,13 +371,18 @@
       }
       return;
     }
-    let url;
-    try { url = atob(encoded); } catch(e) { url = decodeURIComponent(encoded); }
-    if (!url.startsWith('http://') && !url.startsWith('https://')) {
-      document.getElementById('loading').classList.add('hidden');
-      document.getElementById('error-screen').classList.add('visible');
-      return;
+    let url = '';
+    if (tokenMatch) {
+      // New links: the address is looked up server-side by its random token
+      try {
+        const res = await fetch('/.netlify/functions/media-link?t=' + tokenMatch[1], { cache: 'no-store' });
+        if (res.ok) url = String((await res.json()).url || '');
+      } catch(e) {}
+    } else if (!DISABLE_BASE64_LINKS) {
+      // Old links (backward compatible until DISABLE_BASE64_LINKS is set)
+      try { url = atob(encoded); } catch(e) { url = decodeURIComponent(encoded); }
     }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) { showViewerError(); return; }
     document.getElementById('viewer-wrap').style.display = 'flex';
     // &plain=1 (customer share pages): hide our own logo and name, show only the diamond
     if (params.get('plain') === '1') {

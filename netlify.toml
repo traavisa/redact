@@ -33,3 +33,17 @@
   from = "/r/*"
   to = "/.netlify/functions/redirect"
   status = 200
+
+# Quote media (images / videos copied from vendors by the app) served from our own domain.
+# Files live in the Supabase storage bucket "quote-media" under random UUID names.
+[[redirects]]
+  from = "/media/*"
+  to = "https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/quote-media/:splat"
+  status = 200
+  force = true
+
+# Opaque viewer links: /v/<token> opens the viewer, which looks the token up server-side.
+[[redirects]]
+  from = "/v/*"
+  to = "/index.html"
+  status = 200
