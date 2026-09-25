@@ -374,12 +374,46 @@ function videoUrl(st) {
 }
 // Re-hosted media: a video (with the image as its poster) or just an image
 // Captured 360 frames (our own copies, played by spin360.js): x = [<32 hex id>, <frames>]
+// x = [id, n] was written by the first capture build (untrusted: it made captures of shared
+// page images); [id, n, top] and [id, n, top, v] by v2+. Untrusted or under 24 frames: not shown.
 function spinOf(st) {
   const x = st.x;
-  return Array.isArray(x) && /^[a-f0-9]{32}$/.test(String(x[0])) && Number.isInteger(x[1]) && x[1] >= 24 && x[1] <= 720
+  return Array.isArray(x) && x.length >= 3 && /^[a-f0-9]{32}$/.test(String(x[0])) && Number.isInteger(x[1])
+    && x[1] >= 24 && x[1] <= 720 && (x.length < 4 || (Number.isInteger(x[3]) && x[3] >= 2))
     ? { id: String(x[0]), n: x[1], top: Number.isInteger(x[2]) && x[2] >= 0 && x[2] < x[1] ? x[2] : 0 } : null;
 }
+function untrustedSpinId(st) {
+  const x = st.x;
+  return Array.isArray(x) && /^[a-f0-9]{32}$/.test(String(x[0])) && !spinOf(st) ? String(x[0]) : '';
+}
+// For an untrusted capture, ask the server what to show: the stone's re-captured frames,
+// or its original viewer (as our own /v/ link). Filled in after the page renders.
+async function resolveSpinFallbacks(root) {
+  for (const el of root.querySelectorAll('[data-fallback-id]')) {
+    let d = null;
+    try {
+      const res = await fetch('/.netlify/functions/spin-fallback?id=' + el.dataset.fallbackId, { cache: 'no-store' });
+      if (res.ok) d = await res.json();
+    } catch (e) {}
+    const img = el.dataset.img || '';
+    if (d && d.spin && window.Spin360 && Spin360.valid(d.spin)) {
+      el.removeAttribute('data-fallback-id'); Spin360.mount(el, d.spin);
+    } else if (d && /^[a-z2-9]{8,32}$/.test(String(d.token || ''))) {
+      el.outerHTML = `<iframe src="${VIEWER_LINK_BASE + d.token}?plain=1" allowfullscreen allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe>`;
+    } else if (img) {
+      el.outerHTML = `<img src="${esc(img)}" alt="">`;
+    } else {
+      el.remove();
+    }
+  }
+}
 function mediaHtml(st) {
+  const bad = untrustedSpinId(st);
+  if (bad) {
+    const im = mediaFile(st.i);
+    const img = /\.(jpg|png)$/.test(im) && !im.startsWith(bad + '/') ? MEDIA_BASE + im : '';
+    return `<div class="spin-pending" style="width:100%;height:100%;background:#000" data-fallback-id="${bad}" data-img="${esc(img)}"></div>`;
+  }
   const sp = spinOf(st);
   if (sp) return window.Spin360 ? Spin360.html(sp) : `<img src="${MEDIA_BASE + sp.id}/${String(sp.top).padStart(3, '0')}.jpg" alt="">`;
   const m = mediaFile(st.m), im = mediaFile(st.i);
@@ -571,6 +605,7 @@ function render(d, client) {
   document.getElementById('loading').classList.add('hidden');
   document.getElementById('page').style.display = 'block';
   if (window.Spin360) Spin360.mountAll(document.getElementById('stones'));
+  resolveSpinFallbacks(document.getElementById('stones'));
   renderMobilePdfs();
 }
 

@@ -39,6 +39,31 @@ from PIL import Image, ImageOps
 
 import quote_media as qm
 
+# ── Capture code version ──────────────────────────────────────────────────────
+# Bump when capture rules change. Everything captured records it (stone spin.v,
+# media_links.spin_version); pages and Netlify functions only show captures from
+# version >= TRUSTED_VERSION. Version 1 = the first build (page scraping, 8-frame minimum),
+# which made the 11-frame shared-image captures; it never recorded a version.
+# netlify/functions/capture-version.js must carry the same CAPTURE_VERSION.
+CAPTURE_VERSION = 3
+TRUSTED_VERSION = 2          # 2 = certificate 360 fields + 24-frame minimum (it wrote spin.top)
+
+
+def _commit():
+    import os, subprocess
+    c = os.environ.get("RENDER_GIT_COMMIT", "").strip()
+    if not c:
+        try:
+            c = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, timeout=5,
+                               cwd=os.path.dirname(os.path.abspath(__file__))).stdout.strip()
+        except Exception:
+            c = ""
+    return c[:7] or "unknown"
+
+
+COMMIT = _commit()
+CODE_TAG = f"capture code v{CAPTURE_VERSION} (commit {COMMIT})"
+
 MAX_FRAMES = 120             # more are evenly thinned out: 3° a frame is smooth, and far lighter on phones
 MIN_FRAMES = 24             # fewer is not a real 360 (e.g. a page's shared images)
 FRAME_WIDTH = 1000
@@ -531,7 +556,7 @@ def _format_a(url, m, facts):
     facts.append(f"certificate lookup: {'found 360 fields' if hint else reason}")
     if not hint:
         raise CaptureFailed(reason if reason.startswith("certificate") else f"certificate lookup: {reason}")
-    fs = _from_v360(hint, facts, "certificate lookup")
+    fs = _from_v360(hint, facts, "certificate lookup (API fields)")
     if fs is None:
         raise CaptureFailed("certificate lookup: its 360 fields gave no usable frames")
     return fs, ""
@@ -704,7 +729,7 @@ def capture(sb_url, key, viewer_url, hint=None):
         else:
             facts.append(f"method: {fs.method} — {len(fs.urls)} frames via {fs.source}, pattern {fs.pattern}")
             folder, n, top = store_frames(sb_url, key, fs.urls, facts, fs.top)
-            res = {"ok": True, "spin": {"id": folder, "n": n, "top": top}, "video": video, "facts": facts,
+            res = {"ok": True, "spin": {"id": folder, "n": n, "top": top, "v": CAPTURE_VERSION}, "video": video, "facts": facts,
                    "method": fs.method, "still": fs.still,
                    "note": f"360 captured via {fs.method}: {n} frames"
                            + (f" (thinned evenly from {len(fs.urls)})" if n < len(fs.urls) else "")
@@ -722,6 +747,8 @@ def capture(sb_url, key, viewer_url, hint=None):
     if res["ok"]:
         with _cache_lock:
             _cache[viewer_url] = res
+    res["facts"].append(CODE_TAG)
     print("[spin-capture] " + json.dumps({"ok": res["ok"], "note": res["note"], "facts": res["facts"],
-                                          "seconds": res["seconds"]}), flush=True)
+                                          "seconds": res["seconds"], "version": CAPTURE_VERSION,
+                                          "commit": COMMIT}), flush=True)
     return res

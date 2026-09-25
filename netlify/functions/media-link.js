@@ -2,6 +2,7 @@
 // Tokens are random (never derived from the URL); the table has no public access,
 // so only this function (with the server-side service key) can read it.
 const TOKEN_RE = /^[a-z2-9]{8,32}$/;
+const { trustedRow, mediaLinks } = require('./lib/spin');
 
 exports.handler = async function (event) {
   const json = (code, body) => ({
@@ -13,29 +14,14 @@ exports.handler = async function (event) {
   const t = String((event.queryStringParameters && event.queryStringParameters.t) || '');
   if (!TOKEN_RE.test(t)) return json(400, { error: 'Bad request' });
 
-  const KEY = process.env.SUPABASE_SERVICE_KEY;
-  const lookup = async (cols) => {
-    const res = await fetch(
-      `${process.env.SUPABASE_URL}/rest/v1/media_links?token=eq.${t}&select=${cols}&limit=1`,
-      { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } }
-    );
-    return res.ok ? await res.json() : null;
-  };
   let rows;
-  try {
-    // Before the spin columns exist (SQL update not run yet) only vendor_url can be read
-    rows = (await lookup('vendor_url,spin_id,spin_frames,spin_top')) || (await lookup('vendor_url,spin_id,spin_frames'))
-      || (await lookup('vendor_url')) || [];
-  } catch (e) { return json(502, { error: 'Unavailable' }); }
+  try { rows = (await mediaLinks(`token=eq.${t}`, '&limit=1')) || []; } catch (e) { return json(502, { error: 'Unavailable' }); }
   const row = rows && rows[0];
   if (!row) return json(404, { error: 'Not found' });
-  // Captured 360 frames: the viewer plays our own copies and never learns the vendor URL
-  const id = String(row.spin_id || ''), n = Number(row.spin_frames);
-  // Early bad captures (under 24 frames) aren't used; the viewer falls back to the page until redone
-  if (/^[a-f0-9]{32}$/.test(id) && Number.isInteger(n) && n >= 24 && n <= 720) {
-    const top = Number(row.spin_top);
-    return json(200, { spin: { id, n, top: Number.isInteger(top) && top >= 0 && top < n ? top : 0 } });
-  }
+  // Trusted captured frames: the viewer plays our own copies and never learns the vendor URL.
+  // Untrusted captures (first build, under 24 frames) are ignored: the original viewer is used.
+  const spin = trustedRow(row);
+  if (spin) return json(200, { spin });
   const url = row.vendor_url;
   if (!url || !/^https?:\/\//i.test(url)) return json(404, { error: 'Not found' });
   return json(200, { url });

@@ -710,8 +710,12 @@ function mediaFile(u) {
 // Captured 360 frames (our own copies, played by spin360.js): { id: <32 hex>, n: <frames> }
 function spinOf(stone) {
   const sp = stone && stone.spin;
-  return sp && /^[a-f0-9]{32}$/.test(String(sp.id)) && Number.isInteger(Number(sp.n)) && sp.n >= 24 && sp.n <= 720
-    ? { id: String(sp.id), n: Number(sp.n), top: Number.isInteger(sp.top) && sp.top >= 0 && sp.top < sp.n ? sp.top : 0 } : null;
+  // Only captures by capture code v2+ (a version or top frame recorded) with 24+ frames;
+  // get-quote already drops others and gives the original viewer link instead.
+  const newCode = sp && ((Number.isInteger(sp.v) && sp.v >= 2) || Number.isInteger(sp.top));
+  return sp && newCode && /^[a-f0-9]{32}$/.test(String(sp.id)) && Number.isInteger(Number(sp.n)) && sp.n >= 24 && sp.n <= 720
+    ? { id: String(sp.id), n: Number(sp.n), top: Number.isInteger(sp.top) && sp.top >= 0 && sp.top < sp.n ? sp.top : 0,
+        v: Number.isInteger(sp.v) ? sp.v : 2 } : null;
 }
 function spinHtml(sp) {
   if (window.Spin360) return Spin360.html(sp);
@@ -1005,7 +1009,7 @@ function pcPayload() {
       // Only our own media addresses go into the customer link, never a vendor's.
       const vu = String(st.video_url || '');
       const vf = mediaFile(vu), imf = mediaFile(st.image_url), sp = spinOf(st);
-      if (sp) o.x = [sp.id, sp.n, sp.top];
+      if (sp) o.x = [sp.id, sp.n, sp.top, sp.v];
       else if (vf) o.m = vf;
       else if (vu.startsWith(VIEWER_LINK_BASE) && /^[a-z2-9]{8,32}$/.test(vu.slice(VIEWER_LINK_BASE.length))) o.w = vu.slice(VIEWER_LINK_BASE.length);
       else if (vu.startsWith(PC_VIEWER)) o.U = vu;            // older quotes: link passed on unchanged

@@ -1029,36 +1029,60 @@ with tab2:
     # ── Upgrade older quotes: 360 viewer links → our own captured frames ──────
     import spin_jobs
     _up = spin_jobs.upgrade_status()
-    _todo = spin_jobs.upgradable(qhistory)
-    if _todo or _up["running"] or _up["results"]:
-        with st.expander(f"360 upgrade — {len(_todo)} stone(s) in recent quotes need capture "
-                         "(still on a viewer link, or a bad earlier capture)"
-                         if not _up["running"] else f"360 upgrade — running ({_up['done']}/{_up['total']})",
-                         expanded=_up["running"]):
-            st.caption("Captures each stone's 360 viewer as our own frames and updates the saved quote "
-                       f"(captures under {spin_jobs.sc.MIN_FRAMES} frames are redone), "
-                       "so the quote page shows our spinner instead of loading the viewer page. "
-                       "Expired quotes are skipped. Runs in the background.")
-            if _up["running"]:
-                st.progress(_up["done"] / max(1, _up["total"]), text=f"{_up['done']} of {_up['total']} done")
-                if st.button("Refresh", key="up360_refresh"):
-                    st.rerun()
-            elif _todo and st.button(f"Capture 360 frames for {len(_todo)} stone(s)", key="up360_go",
-                                     use_container_width=True):
-                spin_jobs.start_upgrade(SUPABASE_URL, SUPABASE_KEY, qhistory)
+    _aud = st.session_state.get("spin_audit")
+    _todo = spin_jobs.upgradable(_aud["quotes"] if _aud else qhistory)
+    _label = (f"360 upgrade — running ({_up['done']}/{_up['total']})" if _up["running"] else
+              f"360 upgrade — {len(_todo)} stone(s) need capture (on a viewer link, or a bad earlier capture)")
+    with st.expander(_label, expanded=_up["running"] or bool(_aud)):
+        _vok, _vmsg = spin_jobs.version_check()
+        st.markdown(("✅ " if _vok else "⛔ ") + f"**Capture code:** {_md(_vmsg)}")
+        st.caption("Bad captures (first build, or under "
+                   f"{spin_jobs.sc.MIN_FRAMES} frames, e.g. shared bridal_image pictures) are never shown: quote, "
+                   "share and viewer pages fall back to the stone's original viewer until it is re-captured.")
+        if st.button("List affected stones (all quotes)", key="up360_audit", use_container_width=True):
+            with st.spinner("Checking every quote…"):
+                st.session_state.spin_audit = spin_jobs.audit(SUPABASE_URL, SUPABASE_KEY)
+            st.rerun()
+        if _aud:
+            rows = _aud["stones"]
+            live = [r for r in rows if not r["expired"]]
+            st.markdown(f"**Affected stones** (checked {_aud['at']} UTC, {_aud['quotes_scanned']} quotes): "
+                        f"{len(rows)} stone(s) with a bad capture, {len(live)} in unexpired quotes · "
+                        f"/v/ links holding a bad capture: {_aud['links']['untrusted']} of {_aud['links']['total']} "
+                        "(all fall back to the original viewer)")
+            if rows:
+                import pandas as pd
+                st.dataframe(pd.DataFrame([{
+                    "Quote": f"{QUOTE_BASE}/q/{r['quote']}", "Client": r["client"], "Created": r["created"],
+                    "Expired": "yes" if r["expired"] else "", "Stone": f"{r['stone']} · ···{r['last4']}",
+                    "Frames": r["frames"], "Code": f"v{r['version']}", "Original viewer": r["original_viewer"],
+                    "Clients see now": r["shown_now"]} for r in rows]), hide_index=True, use_container_width=True)
+        if _up["running"]:
+            st.progress(_up["done"] / max(1, _up["total"]), text=f"{_up['done']} of {_up['total']} done")
+            if st.button("Refresh", key="up360_refresh"):
                 st.rerun()
-            if _up["results"]:
-                ok = sum(r["ok"] for r in _up["results"])
-                st.markdown(f"**Last run** (started {_up['started']} UTC"
-                            + (f", finished {_up['finished']} UTC" if _up["finished"] else "")
-                            + f"): {ok} captured, {len(_up['results']) - ok} not captured")
-                for r in _up["results"]:
-                    st.markdown(f"- {'✅' if r['ok'] else '⚠️'} **{_md(r['label'])}**: {_md(r['note'])}")
-                    if r.get("facts"):
-                        st.code("\n".join(r["facts"]), language=None)
-                if not _up["running"] and st.session_state.get("up360_seen") != _up["finished"]:
-                    st.session_state.up360_seen = _up["finished"]      # reload history once per run
-                    load_quote_history.clear()
+        elif _todo:
+            if not _aud:
+                st.caption("Tip: list affected stones first, so older quotes beyond the recent history are included.")
+            if st.button(f"Capture 360 frames for {len(_todo)} stone(s)", key="up360_go",
+                         use_container_width=True, disabled=not _vok):
+                started, msg = spin_jobs.start_upgrade(SUPABASE_URL, SUPABASE_KEY, _aud["quotes"] if _aud else qhistory)
+                (st.success if started else st.error)(msg)
+                if started:
+                    st.session_state.pop("spin_audit", None)
+                    st.rerun()
+        if _up["results"]:
+            ok = sum(r["ok"] for r in _up["results"])
+            st.markdown(f"**Last run** (started {_up['started']} UTC"
+                        + (f", finished {_up['finished']} UTC" if _up["finished"] else "")
+                        + f", {_md(_up.get('code') or '')}): {ok} captured, {len(_up['results']) - ok} not captured")
+            for r in _up["results"]:
+                st.markdown(f"- {'✅' if r['ok'] else '⚠️'} **{_md(r['label'])}** (quote `{r['quote']}`): {_md(r['note'])}")
+                if r.get("facts"):
+                    st.code("\n".join(r["facts"]), language=None)
+            if not _up["running"] and st.session_state.get("up360_seen") != _up["finished"]:
+                st.session_state.up360_seen = _up["finished"]      # reload history once per run
+                load_quote_history.clear()
 
     def render_quote_row(q):
         exp_str = ""

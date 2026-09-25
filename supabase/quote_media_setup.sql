@@ -31,3 +31,10 @@ alter table public.media_links add column if not exists spin_frames integer chec
 
 -- 4. The frame the 360 starts on (the stone's "top" view). Added later; safe to run again.
 alter table public.media_links add column if not exists spin_top integer check (spin_top >= 0);
+
+-- 5. Capture code version, and captures a re-capture replaced (added later; safe to run again).
+--    Only captures with spin_version >= 2 (or a spin_top) are ever shown; the first build's
+--    captures (none of these) fall back to the original viewer. Nothing is ever deleted.
+alter table public.media_links add column if not exists spin_version integer;
+alter table public.media_links add column if not exists old_spin_ids text[] not null default '{}';
+create index if not exists media_links_spin_id_idx on public.media_links (spin_id);

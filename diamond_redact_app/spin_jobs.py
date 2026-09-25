@@ -30,7 +30,7 @@ LEGACY_VIEWER = "https://video.alldiamondeverything.com/?u="
 
 _pool = ThreadPoolExecutor(max_workers=CAPTURE_WORKERS, thread_name_prefix="spin")
 STATUS = {}               # quote id -> {label: note}
-UPGRADE = {"running": False, "done": 0, "total": 0, "results": [], "started": None, "finished": None}
+UPGRADE = {"running": False, "done": 0, "total": 0, "results": [], "started": None, "finished": None, "code": ""}
 _lock = threading.Lock()
 
 
@@ -77,26 +77,53 @@ def vendor_url_for(sb_url, key, link):
     return ""
 
 
-def _spin_row(row):
+# ── Which captures can be shown ───────────────────────────────────────────────
+# Trusted = captured by capture code >= sc.TRUSTED_VERSION with at least MIN_FRAMES frames.
+# Captures by the first build (no version, no top frame; e.g. 11 shared bridal_image
+# pictures) are never shown or reused: the stone falls back to its original viewer link
+# until the 360 upgrade redoes it. The Netlify functions apply the same rule.
+def trusted_spin(sp):
+    if not isinstance(sp, dict) or not sp.get("id"):
+        return False
     try:
-        n = int(row.get("spin_frames") or 0)
+        n, v = int(sp.get("n") or 0), int(sp.get("v") or 0)
+    except (TypeError, ValueError):
+        return False
+    return n >= sc.MIN_FRAMES and (v >= sc.TRUSTED_VERSION or ("top" in sp and sp.get("top") is not None))
+
+
+def _row_trusted(row):
+    try:
+        n, v = int(row.get("spin_frames") or 0), int(row.get("spin_version") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(row.get("spin_id")) and n >= sc.MIN_FRAMES and (v >= sc.TRUSTED_VERSION or row.get("spin_top") is not None)
+
+
+def _spin_row(row):
+    if not _row_trusted(row):
+        return None
+    n = int(row["spin_frames"])
+    try:
         top = int(row.get("spin_top") or 0)
     except (TypeError, ValueError):
-        return None
-    if row.get("spin_id") and n >= sc.MIN_FRAMES:          # older bad captures (under the minimum) are ignored
-        return {"id": row["spin_id"], "n": n, "top": top if 0 <= top < n else 0}
-    return None
+        top = 0
+    return {"id": row["spin_id"], "n": n, "top": top if 0 <= top < n else 0,
+            "v": int(row.get("spin_version") or sc.TRUSTED_VERSION)}
+
+
+_SPIN_COLS = ("spin_id,spin_frames,spin_top,spin_version", "spin_id,spin_frames,spin_top", "spin_id,spin_frames")
 
 
 def known_spin(sb_url, key, vendor_url):
-    """Good frames already captured for this vendor URL (from any earlier quote), or None."""
-    for cols in ("spin_id,spin_frames,spin_top", "spin_id,spin_frames"):
+    """Trusted frames already captured for this vendor URL (from any earlier quote), or None."""
+    for cols in _SPIN_COLS:
         try:
             r = requests.get(f"{sb_url}/rest/v1/media_links", params={
                 "vendor_url": f"eq.{vendor_url}", "spin_id": "not.is.null", "select": cols},
                 headers=_h(key), timeout=10)
             if r.status_code != 200:
-                continue
+                continue                                   # a column doesn't exist yet: try fewer
             for row in r.json():
                 sp = _spin_row(row)
                 if sp:
@@ -108,30 +135,80 @@ def known_spin(sb_url, key, vendor_url):
 
 
 def vendor_url_for_spin(sb_url, key, spin_id):
-    """The viewer a stored capture came from (media_links row that holds it), or ''."""
-    try:
-        r = requests.get(f"{sb_url}/rest/v1/media_links", params={"spin_id": f"eq.{spin_id}", "select": "vendor_url",
-                                                                 "limit": "1"}, headers=_h(key), timeout=10)
-        rows = r.json() if r.status_code == 200 else []
-        return rows[0]["vendor_url"] if rows else ""
-    except Exception:
-        return ""
+    """The viewer a stored capture came from (the media_links row that holds it now, or
+    held it before a re-capture), or ''. Nothing is ever deleted from media_links."""
+    for params in ({"or": f"(spin_id.eq.{spin_id},old_spin_ids.cs.{{{spin_id}}})"}, {"spin_id": f"eq.{spin_id}"}):
+        try:
+            r = requests.get(f"{sb_url}/rest/v1/media_links", params={**params, "select": "vendor_url", "limit": "1"},
+                             headers=_h(key), timeout=10)
+            if r.status_code != 200:
+                continue
+            rows = r.json()
+            return rows[0]["vendor_url"] if rows else ""
+        except Exception:
+            return ""
+    return ""
 
 
 def record_spin(sb_url, key, vendor_url, spin):
     """Stores the frames on every media_links row for this vendor URL (so its /v/ links
-    show our spinner). Returns False if the table has no spin columns yet (SQL not run)."""
-    body = {"spin_id": spin["id"], "spin_frames": spin["n"], "spin_top": spin.get("top", 0)}
-    for attempt in (body, {k: v for k, v in body.items() if k != "spin_top"}):   # spin_top: newer SQL
-        try:
-            r = requests.patch(f"{sb_url}/rest/v1/media_links", params={"vendor_url": f"eq.{vendor_url}"},
-                               headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=minimal"},
-                               json=attempt, timeout=10)
-            if r.status_code in (200, 204):
-                return True
-        except Exception:
-            return False
-    return False
+    show our spinner). A capture it replaces is kept in old_spin_ids, so share links that
+    carry the old frames can still be matched. Returns False if the SQL wasn't run."""
+    body = {"spin_id": spin["id"], "spin_frames": spin["n"], "spin_top": spin.get("top", 0),
+            "spin_version": sc.CAPTURE_VERSION}
+    try:
+        r = requests.get(f"{sb_url}/rest/v1/media_links", params={"vendor_url": f"eq.{vendor_url}",
+                         "select": "token,spin_id,old_spin_ids"}, headers=_h(key), timeout=10)
+        rows = r.json() if r.status_code == 200 else None
+    except Exception:
+        rows = None
+    ok = False
+    for row in (rows if rows is not None else [None]):
+        full = dict(body)
+        if row is not None:
+            olds = [x for x in (row.get("old_spin_ids") or []) if x]
+            if row.get("spin_id") and row["spin_id"] != spin["id"] and row["spin_id"] not in olds:
+                olds.append(row["spin_id"])
+            full["old_spin_ids"] = olds
+        where = {"token": f"eq.{row['token']}"} if row is not None else {"vendor_url": f"eq.{vendor_url}"}
+        # Newest columns first; older databases get what they have
+        for drop in ((), ("old_spin_ids",), ("old_spin_ids", "spin_version"), ("old_spin_ids", "spin_version", "spin_top")):
+            try:
+                r = requests.patch(f"{sb_url}/rest/v1/media_links", params=where,
+                                   headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=minimal"},
+                                   json={k: v for k, v in full.items() if k not in drop}, timeout=10)
+                if r.status_code in (200, 204):
+                    ok = True
+                    break
+            except Exception:
+                break
+    return ok
+
+
+# ── Version gate: never capture with code older than what the site expects ─────
+SITE_VERSION_URL = "https://quote.alldiamondeverything.com/.netlify/functions/capture-version"
+_ver_cache = {"at": 0.0, "res": None}
+
+
+def version_check(force=False):
+    """(ok, message). ok only when this code's CAPTURE_VERSION is at least the version the
+    site (Netlify, deployed from main) says is current. Fails closed if it can't be read."""
+    if not force and _ver_cache["res"] and _ver_cache["res"][0] and time.time() - _ver_cache["at"] < 60:   # only "ok" is cached
+        return _ver_cache["res"]
+    try:
+        r = requests.get(SITE_VERSION_URL, timeout=8, headers={"Cache-Control": "no-cache"})
+        site = int(r.json().get("version")) if r.status_code == 200 else None
+    except Exception:
+        site = None
+    if site is None:
+        res = (False, f"couldn't read the site's capture version — this app runs {sc.CODE_TAG}")
+    elif sc.CAPTURE_VERSION < site:
+        res = (False, f"this app runs {sc.CODE_TAG} but the site is on v{site}: the new code isn't "
+                      "deployed here yet (Render still building?) — wait for the deploy, then reload")
+    else:
+        res = (True, f"{sc.CODE_TAG}; site expects v{site}")
+    _ver_cache.update(at=time.time(), res=res)
+    return res
 
 
 def capture_one(sb_url, key, vendor_url, hint=None):
@@ -195,7 +272,10 @@ def apply(stone, res):
         prev = str(stone.get("video_url") or "")
         if token_of(prev) or prev.startswith(LEGACY_VIEWER):
             stone["media_ref"] = prev
-        stone["spin"] = {"id": sp["id"], "n": n, "top": top if 0 <= top < n else 0}
+        elif res.get("ref") and not stone.get("media_ref"):
+            stone["media_ref"] = res["ref"]
+        stone["spin"] = {"id": sp["id"], "n": n, "top": top if 0 <= top < n else 0,
+                         "v": int(sp.get("v") or sc.CAPTURE_VERSION)}
         stone["video_url"] = ""
         still = str(res.get("still") or "")
         if still.startswith(qm.MEDIA_BASE):
@@ -218,10 +298,16 @@ class SaveJobs:
     def __init__(self, sb_url, key, qid):
         self.sb_url, self.key, self.qid = sb_url, key, qid
         self.jobs = []                  # (index, label, link_saved, future)
+        self.skipped = []
         self.saved = threading.Event()
         self.save_ok = False
 
     def start(self, index, label, vendor_url, link_saved, hint=None):
+        ok, why = version_check()
+        if not ok:                                      # keep the /v/ link; never capture with old code
+            self.skipped.append(f"{label}: 360 capture skipped — {why}; saved with a private viewer link")
+            _set_status(self.qid, label, "360 capture skipped: " + why)
+            return
         fut = _pool.submit(capture_one, self.sb_url, self.key, vendor_url, hint)
         self.jobs.append((index, label, link_saved, fut))
         _set_status(self.qid, label, "capturing 360 frames…")
@@ -229,10 +315,10 @@ class SaveJobs:
     def wait(self, stones, budget=SAVE_BUDGET):
         """Waits up to `budget` seconds; applies finished captures to `stones` in place.
         Returns notes, one per stone."""
+        notes = list(self.skipped)
         if not self.jobs:
-            return []
+            return notes
         fwait([f for *_, f in self.jobs], timeout=budget)
-        notes = []
         for i, label, _, fut in self.jobs:
             if fut.done():
                 res = _result(fut)
@@ -332,14 +418,10 @@ def patch_stone(sb_url, key, qid, index, link_saved, res, expect_spin=None):
 
 # ── Re-processing existing quotes ─────────────────────────────────────────────
 def bad_spin(stone):
-    """A stored capture that isn't a real 360 (e.g. the 11 shared page images of an early build)."""
+    """A stored capture that must not be shown: from the first build (no version) or under
+    the frame minimum (e.g. the 11 shared bridal_image pictures)."""
     sp = stone.get("spin")
-    if not isinstance(sp, dict) or not sp.get("id"):
-        return False
-    try:
-        return int(sp.get("n") or 0) < sc.MIN_FRAMES
-    except (TypeError, ValueError):
-        return True
+    return isinstance(sp, dict) and bool(sp.get("id")) and not trusted_spin(sp)
 
 
 def upgradable(quotes):
@@ -360,7 +442,8 @@ def upgradable(quotes):
             v = str(s.get("video_url") or "")
             label = f"{q.get('client') or 'No client'} · ···{s.get('cert_last4') or i + 1}"
             if bad_spin(s):
-                out.append((q["id"], i, label + f" (redo: bad {s['spin'].get('n')}-frame capture)",
+                out.append((q["id"], i, label + f" (redo: bad {s['spin'].get('n')}-frame capture"
+                            + (")" if s["spin"].get("v") else " by the first build)"),
                             str(s.get("media_ref") or ""), s["spin"]["id"]))
             elif not s.get("spin") and (token_of(v) or v.startswith(LEGACY_VIEWER)):
                 out.append((q["id"], i, label, v, None))
@@ -368,15 +451,21 @@ def upgradable(quotes):
 
 
 def start_upgrade(sb_url, key, quotes):
-    """Background re-processing of every upgradable stone. Returns False if already running."""
+    """Background re-processing of every upgradable stone. Returns (started, message).
+    Refuses when this code is older than the site's current capture version."""
+    ok, why = version_check(force=True)
+    if not ok:
+        _log("spin-upgrade", {"refused": why})
+        return False, "Refused: " + why
     items = upgradable(quotes)
     with _lock:
         if UPGRADE["running"]:
-            return False
+            return False, "An upgrade is already running."
         UPGRADE.update(running=True, done=0, total=len(items), results=[],
                        started=datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S"), finished=None)
+        UPGRADE["code"] = sc.CODE_TAG
     threading.Thread(target=_upgrade, args=(sb_url, key, items), daemon=True).start()
-    return True
+    return True, f"Started: {len(items)} stone(s), {sc.CODE_TAG}"
 
 
 def _upgrade(sb_url, key, items):
@@ -391,13 +480,19 @@ def _upgrade(sb_url, key, items):
             res = {"ok": False, "note": "a YouTube video, not a 360 viewer — left as is", "facts": []}
         else:
             res = capture_one(sb_url, key, vendor)
+            if res.get("ok") and bad and not link:
+                try:                                   # keep a way back to the original viewer on the stone
+                    res = {**res, "ref": qm._viewer_link(sb_url, key, vendor)}
+                except Exception:
+                    pass
             if res.get("ok") and not patch_stone(sb_url, key, qid, i, link, res, expect_spin=bad):
                 res = {**res, "ok": False, "note": res["note"] + " — but the quote couldn't be updated"}
         with _lock:
             UPGRADE["done"] += 1
             UPGRADE["results"].append({"label": label, "quote": qid, "ok": bool(res.get("ok")),
                                        "note": _note_text(res), "facts": list(res.get("facts") or [])})
-        _log("spin-upgrade", {"quote": qid, "stone": i, "ok": res.get("ok"), "note": res.get("note")})
+        _log("spin-upgrade", {"quote": qid, "stone": i, "ok": res.get("ok"), "note": res.get("note"),
+                              "version": sc.CAPTURE_VERSION, "commit": sc.COMMIT})
 
     try:
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="spin-up") as ex:   # leaves _pool free for saves
@@ -411,3 +506,56 @@ def _upgrade(sb_url, key, items):
 def upgrade_status():
     with _lock:
         return {**UPGRADE, "results": list(UPGRADE["results"])}
+
+
+# ── Audit: every stone with a capture that must not be shown ─────────────────
+def fetch_all_quotes(sb_url, key, page=500, cap=20000):
+    out, off = [], 0
+    while off < cap:
+        r = requests.get(f"{sb_url}/rest/v1/quotes", params={"select": "id,client,created_at,expires_at,stones",
+                         "order": "created_at.desc", "limit": str(page), "offset": str(off)}, headers=_h(key), timeout=30)
+        rows = r.json() if r.status_code == 200 else []
+        out += rows
+        if len(rows) < page:
+            break
+        off += page
+    return out
+
+
+def audit(sb_url, key, quotes=None):
+    """Every quote stone whose capture must not be shown, whether its original viewer URL is
+    still on record, and what clients see now. Also counts /v/ links holding such captures."""
+    quotes = quotes if quotes is not None else fetch_all_quotes(sb_url, key)
+    now = datetime.datetime.now(datetime.UTC)
+    rows = []
+    for q in quotes:
+        try:
+            exp = datetime.datetime.fromisoformat(str(q.get("expires_at")).replace("Z", "+00:00"))
+            expired = (exp if exp.tzinfo else exp.replace(tzinfo=datetime.UTC)) < now
+        except Exception:
+            expired = False
+        for i, s in enumerate(q.get("stones") or []):
+            if not bad_spin(s):
+                continue
+            sp = s["spin"]
+            ref = str(s.get("media_ref") or s.get("video_url") or "")
+            vendor = (vendor_url_for(sb_url, key, ref) if ref else "") or vendor_url_for_spin(sb_url, key, sp["id"])
+            rows.append({"quote": q["id"], "client": q.get("client") or "", "created": str(q.get("created_at") or "")[:16],
+                         "expired": expired, "stone": i + 1, "last4": s.get("cert_last4") or "",
+                         "frames": sp.get("n"), "version": sp.get("v") or 1,
+                         "original_viewer": "on record" if vendor else "NOT FOUND",
+                         "shown_now": "original viewer (fallback)" if vendor else "no 360 (image only)"})
+    links = {"total": 0, "untrusted": 0}
+    for cols in ("token,spin_id,spin_frames,spin_top,spin_version", "token,spin_id,spin_frames,spin_top", "token,spin_id,spin_frames"):
+        try:
+            r = requests.get(f"{sb_url}/rest/v1/media_links", params={"spin_id": "not.is.null", "select": cols},
+                             headers=_h(key), timeout=30)
+            if r.status_code != 200:
+                continue
+            lr = r.json()
+            links = {"total": len(lr), "untrusted": sum(1 for x in lr if not _row_trusted(x))}
+            break
+        except Exception:
+            break
+    return {"stones": rows, "links": links, "quotes_scanned": len(quotes), "quotes": quotes,
+            "at": datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")}

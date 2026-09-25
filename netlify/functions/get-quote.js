@@ -19,15 +19,10 @@ function safeVideo(u) {
   if (u.startsWith(LEGACY_VIEWER_BASE)) return u;
   return undefined;
 }
-// Captured 360 frames: our own folder /media/<32 hex>/000.jpg … (n frames)
-function safeSpin(sp) {
-  if (!sp || typeof sp !== 'object') return undefined;
-  const id = String(sp.id || ''), n = Number(sp.n);
-  // Under 24 frames isn't a real 360 (early bad captures of a page's shared images): not shown
-  if (!/^[a-f0-9]{32}$/.test(id) || !Number.isInteger(n) || n < 24 || n > 720) return undefined;
-  const top = Number(sp.top);
-  return { id, n, top: Number.isInteger(top) && top >= 0 && top < n ? top : 0 };
-}
+// Captured 360 frames: our own folder /media/<32 hex>/000.jpg … (n frames). Only captures
+// the rule in lib/spin.js trusts are served; others fall back to the original viewer.
+const { trustedSpin, rowForSpin } = require('./lib/spin');
+const VIEWER_TOKEN_RE = /^[a-z2-9]{8,32}$/;
 function safeImage(u) {
   u = String(u || '');
   return u.startsWith(MEDIA_BASE) && MEDIA_FILE_RE.test(u.slice(MEDIA_BASE.length)) ? u : undefined;
@@ -60,25 +55,33 @@ exports.handler = async function (event) {
 
   const q = rows[0];
   const expired = new Date(q.expires_at) < new Date();
-  const stones = expired ? [] : (q.stones || []).map((s) => {
+  const stones = expired ? [] : await Promise.all((q.stones || []).map(async (s) => {
     const out = {};
     SAFE_STONE_FIELDS.forEach((k) => { if (s[k] !== undefined) out[k] = s[k]; });
     if ('video_url' in out) { const v = safeVideo(out.video_url); if (v) out.video_url = v; else delete out.video_url; }
     if ('image_url' in out) { const v = safeImage(out.image_url); if (v) out.image_url = v; else delete out.image_url; }
     if ('spin' in out) {
-      const v = safeSpin(out.spin);
+      const v = trustedSpin(out.spin);
       if (v) { out.spin = v; delete out.video_url; }
       else {
+        // A capture that must not be shown: never its frames (not even as the still image).
+        const bad = String((out.spin && out.spin.id) || '');
         delete out.spin;
-        // A bad capture: fall back to our own viewer link kept with the stone, if any
-        const ref = s.media_ref && safeVideo(s.media_ref);
+        if (bad && out.image_url && out.image_url.startsWith(MEDIA_BASE + bad + '/')) delete out.image_url;
+        // Fall back to the original viewer: our /v/ link kept on the stone, else the
+        // media_links row the capture was recorded on (nothing there is ever deleted).
+        let ref = s.media_ref && safeVideo(s.media_ref);
+        if (!ref && /^[a-f0-9]{32}$/.test(bad)) {
+          const row = await rowForSpin(bad).catch(() => null);
+          if (row && VIEWER_TOKEN_RE.test(String(row.token || ''))) ref = VIEWER_LINK_BASE + row.token;
+        }
         if (ref && !out.video_url) out.video_url = ref;
       }
     }
     const ct = certTypeOf(s);
     if (ct) out.cert_type = ct;
     return out;
-  });
+  }));
 
   return json(200, { client: q.client, expires_at: q.expires_at, stones });
 };
