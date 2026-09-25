@@ -7,6 +7,7 @@ Rules this module follows:
     pre-fill the form ("Read request") but never runs or changes a search.
   - Saved quotes carry no media URLs (they would expose the source's domain).
 """
+import datetime
 import html
 import json
 import re
@@ -487,36 +488,37 @@ def _fmt_money(v):
 
 
 def classify(s, c, fx, pv):
-    """Returns (hard_fail, deviations). deviations: list of (flex_key, badge) the stone needs.
+    """Returns (hard_fail, deviations). hard_fail is False, or the name of the first hard filter
+    that removed the stone. deviations: list of (flex_key, badge) the stone needs.
     A stone with no deviations is an exact match."""
     devs = []
-    fail = lambda: (True, [])
+    fail = lambda name: (name, [])
     # Shape
     if c["shapes"] and shape_group(s["shape"]) not in c["shapes"]:
-        return fail()
+        return fail("Shape")
     # Carat
     ct = s.get("carat")
     lo, hi = c["ct_min"], c["ct_max"]
     if lo or hi:
         if ct is None:
-            return fail()
+            return fail("Carat range")
         if (lo and ct < lo - 1e-9) or (hi and ct > hi + 1e-9):
             tol = fx["ct_tol"]
             if (lo and ct < lo - tol - 1e-9) or (hi and ct > hi + tol + 1e-9):
-                return fail()
+                return fail("Carat range")
             devs.append(("ct", f"Carat {ct:.2f} (asked {lo or 0:.2f}–{hi:.2f})" if hi
                          else f"Carat {ct:.2f} (asked {lo:.2f}+)"))
     # Colour
     if c["fancy"]:
         txt = fancy_text(s)
         if not txt or c["fancy_col"].upper() not in txt.upper():
-            return fail()
+            return fail("Fancy colour")
         if c["fancy_int"] and fancy_intensity(txt) not in c["fancy_int"]:
-            return fail()
+            return fail("Fancy intensity")
     else:
         col = norm_colour(s.get("color"))
         if not col:
-            return fail()
+            return fail("Colour range")
         a, b = COLOURS.index(c["col"][0]), COLOURS.index(c["col"][1])
         i = COLOURS.index(col)
         if not a <= i <= b:
@@ -524,12 +526,12 @@ def classify(s, c, fx, pv):
                 devs.append(("col", f"Colour {col} (asked {c['col'][0]}–{c['col'][1]})"
                              if c["col"][0] != c["col"][1] else f"Colour {col} (asked {c['col'][0]})"))
             else:
-                return fail()
+                return fail("Colour range")
     # Clarity
     if tuple(c["cla"]) != ("FL", "I3"):
         cl = norm_clarity(s.get("clarity"))
         if not cl:
-            return fail()
+            return fail("Clarity range")
         a, b = CLARITIES.index(c["cla"][0]), CLARITIES.index(c["cla"][1])
         i = CLARITIES.index(cl)
         if not a <= i <= b:
@@ -537,11 +539,12 @@ def classify(s, c, fx, pv):
                 devs.append(("cla", f"Clarity {cl} (asked {c['cla'][0]}–{c['cla'][1]})"
                              if c["cla"][0] != c["cla"][1] else f"Clarity {cl} (asked {c['cla'][0]})"))
             else:
-                return fail()
+                return fail("Clarity range")
     # Cut / polish / symmetry minimums (hard)
-    for crit, field in (("cut", "cut"), ("pol", "polish"), ("sym", "symmetry")):
+    for crit, field, label in (("cut", "cut", "Cut min"), ("pol", "polish", "Polish min"),
+                               ("sym", "symmetry", "Symmetry min")):
         if c[crit] != "Any" and GRADE_RANK.get(norm_grade(s.get(field)), -1) < GRADE_RANK[c[crit]]:
-            return fail()
+            return fail(label)
     # Fluorescence
     if c["flo"] and set(c["flo"]) != set(FLUORS):
         fl = norm_fluor(s.get("flo"))
@@ -549,48 +552,56 @@ def classify(s, c, fx, pv):
             if fl == "Faint":
                 devs.append(("flo", f"Fluorescence Faint (asked {', '.join(c['flo'])})"))
             else:
-                return fail()
+                return fail("Fluorescence")
     # Lab
     if c["labs"]:
         lab = norm_lab(s.get("lab"))
         if lab not in c["labs"]:
             if not lab:
-                return fail()
+                return fail("Lab")
             devs.append(("lab", f"Lab {lab} (asked {', '.join(c['labs'])})"))
     # Price (CAD, chosen basis)
     if c["pr_min"] or c["pr_max"]:
         if not pv:
-            return fail()
+            return fail("Price")
         p = pv["client"] if c["pr_client"] else pv["cost"]
         basis = "client price" if c["pr_client"] else "cost"
         if c["pr_min"] and p < c["pr_min"]:
-            return fail()
+            return fail("Price min")
         if c["pr_max"] and p > c["pr_max"]:
             if p <= c["pr_max"] * 1.10:
                 devs.append(("budget", f"{basis.capitalize()} {_fmt_money(p)} (budget {_fmt_money(c['pr_max'])})"))
             else:
-                return fail()
+                return fail("Price max")
     # Proportions (hard)
-    for (lo, hi), val in ((c["ratio"], lw_ratio(s)), (c["depth"], s.get("depth_pct")),
-                          (c["table"], s.get("table_pct"))):
+    for (lo, hi), val, label in ((c["ratio"], lw_ratio(s), "L/W ratio"), (c["depth"], s.get("depth_pct"), "Depth %"),
+                                 (c["table"], s.get("table_pct"), "Table %")):
         if lo or hi:
             if val is None or (lo and val < lo) or (hi and val > hi):
-                return fail()
+                return fail(label)
     # As-grown (hard when the data says so; unknown is flagged on the card)
     if c["as_grown"] and as_grown_status(s) is False:
-        return fail()
+        return fail("As-grown only")
     return False, devs
 
 
-def bucket(stones, c, fx, rate, markup, divisor):
+FILTER_ORDER = ["Shape", "Carat range", "Fancy colour", "Fancy intensity", "Colour range", "Clarity range",
+                "Cut min", "Polish min", "Symmetry min", "Fluorescence", "Lab", "Price", "Price min",
+                "Price max", "L/W ratio", "Depth %", "Table %", "As-grown only"]
+
+
+def bucket(stones, c, fx, rate, markup, divisor, stats=None):
     """Splits fetched stones into exact / flexed (per enabled options) and counts what each
-    disabled flex option would add. Each stone lands in at most one section."""
+    disabled flex option would add. Each stone lands in at most one section.
+    If `stats` (a dict) is given, it's filled with per-filter removal counts for diagnostics."""
     enabled = {k for k in FLEX_LABELS if fx[k]}
     exact, flexed, adds = [], [], {k: 0 for k in FLEX_LABELS}
+    removed, needs_flex = {}, 0
     for s in stones:
         pv = price_view(s, rate, markup, divisor)
         hard, devs = classify(s, c, fx, pv)
         if hard:
+            removed[hard] = removed.get(hard, 0) + 1
             continue
         row = {**s, "pv": pv, "devs": devs}
         keys = {k for k, _ in devs}
@@ -599,9 +610,13 @@ def bucket(stones, c, fx, rate, markup, divisor):
         elif keys <= enabled:
             flexed.append(row)
         else:
+            needs_flex += 1
             missing = keys - enabled
             if len(missing) == 1:
                 adds[missing.pop()] += 1
+    if stats is not None:
+        stats.update({"removed": [(n, removed[n]) for n in FILTER_ORDER if removed.get(n)],
+                      "needs_flex": needs_flex, "exact": len(exact), "flexed": len(flexed)})
     return exact, flexed, adds
 
 
@@ -830,6 +845,8 @@ def _render(deps):
     crit = read_criteria()
     fx = flex_state()
     if st.button("🔍  Search", type="primary", use_container_width=True, key="ls_search"):
+        client.reset_diag()
+        q, schema, error = None, {}, None
         with st.spinner("Searching live stones…"):
             try:
                 schema = client.schema()
@@ -840,20 +857,119 @@ def _render(deps):
                 ss.ls_picks_ai = None
             except src.SourceError as e:
                 ss.ls_results = None
-                st.error(str(e))
-    res = ss.get("ls_results")
-    if not res:
-        return
-    try:
-        current_q = server_query(crit, client.schema())
-    except Exception:
-        current_q = res["q"]
-    if current_q != res["q"]:
-        st.warning("The criteria changed since the last search. Click **Search** to refresh the results.")
-        return
+                error = str(e)
+                st.error(error)
+        stats = {}
+        if ss.ls_results:
+            bucket(ss.ls_results["stones"], crit, fx, rate, markup, divisor, stats)
+        ss.ls_diag = _build_diag(client.diag, q, schema, error, ss.ls_results, stats, rate, markup, divisor)
+        _log_diag(ss.ls_diag)
 
-    exact, flexed, adds = bucket(res["stones"], crit, fx, rate, markup, divisor)
-    _results(exact, flexed, adds, res, crit, fx, ai_key, deps)
+    res = ss.get("ls_results")
+    live_stats = None
+    if res:
+        try:
+            current_q = server_query(crit, client.schema())
+        except Exception:
+            current_q = res["q"]
+        if current_q != res["q"]:
+            st.warning("The criteria changed since the last search. Click **Search** to refresh the results.")
+        else:
+            live_stats = {}
+            exact, flexed, adds = bucket(res["stones"], crit, fx, rate, markup, divisor, live_stats)
+            _results(exact, flexed, adds, res, crit, fx, ai_key, deps)
+    _diagnostics(ss.get("ls_diag"), live_stats)
+
+
+# ── Search diagnostics ────────────────────────────────────────────────────────
+def _build_diag(cd, q, schema, error, res, stats, rate, markup, divisor):
+    """Everything here is sanitised: no source name, hosts, credentials or supplier data."""
+    sample = None
+    raw = cd.get("sample_price_raw")
+    if raw is not None:
+        try:
+            usd = float(raw) / divisor
+            ct = src._num(cd.get("sample_carat"))
+            sample = {"raw_price": raw, "divisor": divisor, "usd": round(usd, 2), "usd_cad_rate": rate,
+                      "cost_cad": round(usd * rate, 2), "client_cad": round(usd * rate * (1 + markup / 100.0), 2),
+                      "carat": ct, "cost_cad_per_ct": round(usd * rate / ct, 2) if ct else None}
+        except (TypeError, ValueError):
+            sample = {"raw_price": src.sanitise(raw), "divisor": divisor, "note": "not a number"}
+    return {
+        "time_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S"),
+        "sign_in": cd.get("sign_in"),
+        "api_errors": list(cd.get("api_errors") or []),
+        "user_error": error,
+        "schema_verified": bool(schema.get("verified")),
+        "server_query": {"query": json.loads(json.dumps(q)) if q is not None else None,
+                         "offset": f"0, 50, 100… ({cd.get('pages', 0)} page(s))", "limit": src.PAGE_LIMIT,
+                         "order": {"type": "price", "direction": "ASC"}},
+        "api_total_count": cd.get("total_count"),
+        "api_returned": cd.get("raw_items", 0),
+        "kept_after_whitelist": len(res["stones"]) if res else 0,
+        "client_side": stats or {},
+        "sample_price": sample,
+    }
+
+
+def _log_diag(d):
+    """One line per search in the server log (Render)."""
+    try:
+        print("[live-search] " + json.dumps(d, default=str, separators=(",", ":")), flush=True)
+    except Exception:
+        pass
+
+
+def _code(v):
+    return str(v).replace("`", "'")
+
+
+def _diagnostics(d, live_stats=None):
+    if not d:
+        return
+    with st.expander("Search diagnostics", expanded=False):
+        st.caption(f"Last search: {d['time_utc']} UTC. The same details are written to the server log.")
+        ok = str(d["sign_in"]).startswith("ok")
+        st.markdown(f"**1. Sign-in:** {'✅' if ok else '❌'} {d['sign_in']}")
+        if d["api_errors"]:
+            st.markdown("**Errors returned by the API:**\n\n" + "\n".join(f"- `{_code(e)}`" for e in d["api_errors"]))
+        else:
+            st.markdown("**Errors returned by the API:** none")
+        if d.get("user_error"):
+            st.markdown(f"**Shown to you:** {d['user_error']}")
+
+        st.markdown("**2. Filters sent server-side** ("
+                    + ("schema confirmed by introspection" if d["schema_verified"]
+                       else "documented filters only; schema not confirmed") + "):")
+        st.code(json.dumps(d["server_query"], indent=2), language="json")
+        st.caption("Sign-in sends only a username and password, which are never shown or logged.")
+
+        total = d.get("api_total_count")
+        st.markdown(f"**3. Returned by the API:** {d['api_returned']} stone(s)"
+                    + (f" of {total:,} matching server-side" if isinstance(total, int) else "")
+                    + f"; {d['kept_after_whitelist']} usable after the field whitelist.")
+
+        stats = live_stats if live_stats is not None else d["client_side"]
+        if stats:
+            basis = "current form and flex settings" if live_stats is not None else "settings at search time"
+            lines = [f"- {name}: removed {n}" for name, n in stats.get("removed", [])] or ["- nothing removed"]
+            st.markdown(f"**4. Client-side hard filters** (in order; {basis}):\n\n" + "\n".join(lines)
+                        + f"\n\nOutside criteria, needs a flex option that's off: {stats.get('needs_flex', 0)} · "
+                        f"Exact: {stats.get('exact', 0)} · Outside your criteria (shown): {stats.get('flexed', 0)}")
+        else:
+            st.markdown("**4. Client-side hard filters:** no stones to filter.")
+
+        sp = d.get("sample_price")
+        if sp and "usd" in sp:
+            per_ct = f" · CA\\${sp['cost_cad_per_ct']:,.2f}/ct" if sp.get("cost_cad_per_ct") else ""
+            st.markdown(f"**5. Sample price:** raw `{_code(sp['raw_price'])}` ÷ {sp['divisor']:g} = US\\${sp['usd']:,.2f} "
+                        f"× {sp['usd_cad_rate']:g} = **CA\\${sp['cost_cad']:,.2f} cost** "
+                        f"(client CA\\${sp['client_cad']:,.2f}) for {sp['carat'] or '?'} ct{per_ct}.")
+            st.caption("Check this stone's price on the platform. If it's 100× off, change the price-divisor environment variable (see the setup notes).")
+        elif sp:
+            st.markdown(f"**5. Sample price:** raw `{_code(sp['raw_price'])}` ({sp.get('note')})")
+        else:
+            st.markdown("**5. Sample price:** none (no priced stones returned).")
 
 
 def _sort(rows, how, crit):

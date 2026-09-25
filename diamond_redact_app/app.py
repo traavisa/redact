@@ -946,8 +946,10 @@ with tab2:
         exp_str = ""
         if q.get("expires_at"):
             try:
-                exp_dt = datetime.datetime.fromisoformat(q["expires_at"].replace("Z",""))
-                expired = exp_dt < datetime.datetime.utcnow()
+                exp_dt = datetime.datetime.fromisoformat(q["expires_at"].replace("Z","+00:00"))
+                if exp_dt.tzinfo is None:
+                    exp_dt = exp_dt.replace(tzinfo=datetime.UTC)
+                expired = exp_dt < datetime.datetime.now(datetime.UTC)
                 exp_str = f"Expired" if expired else exp_dt.strftime("Exp %b %d")
             except: pass
         stones = q.get("stones",[])

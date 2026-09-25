@@ -69,6 +69,20 @@ AS_GROWN_FIELDS = ["as_grown", "asGrown", "treated", "treatment"]
 ENUM_LIST_FILTERS = ["color", "clarity", "cut", "polish", "symmetry", "labs"]
 
 
+_DOMAIN_RE = re.compile(r"\b(?:https?://[^\s)\]]+|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:net|com|io|org|co|dev|app|ai|cloud)\b(?:[/:][^\s)\]]*)?)", re.I)
+_NAME_RE = re.compile(r"nivoda\w*", re.I)
+
+
+def sanitise(text, secrets=()):
+    """Error text safe to show/log: no source name, hosts/URLs or credentials."""
+    t = str(text or "")
+    for sec in secrets:
+        if sec and len(sec) >= 4:          # very short values would mangle ordinary words
+            t = t.replace(sec, "[redacted]")
+    t = _NAME_RE.sub("[source]", _DOMAIN_RE.sub("[host]", t))
+    return re.sub(r"\s+", " ", t).strip()[:300]
+
+
 class Client:
     def __init__(self, url, username, password, state):
         """`state` is a dict-like (Streamlit session_state) used to cache the token per session."""
@@ -76,6 +90,17 @@ class Client:
         self.username = username
         self.password = password
         self.state = state
+        self.reset_diag()
+
+    def reset_diag(self):
+        """Diagnostics for the last search (shown in the tab and logged). Always sanitised."""
+        self.diag = {"sign_in": "not attempted", "api_errors": [], "pages": 0, "raw_items": 0,
+                     "sample_price_raw": None, "sample_carat": None}
+
+    def _err(self, text):
+        msg = sanitise(text, (self.username, self.password))
+        if msg and msg not in self.diag["api_errors"]:
+            self.diag["api_errors"].append(msg)
 
     # ── transport ────────────────────────────────────────────────────────────
     def _post(self, query, variables=None, token=None):
@@ -88,19 +113,26 @@ class Client:
         try:
             r = requests.post(self.url, headers=headers, data=json.dumps(body), timeout=TIMEOUT)
         except requests.Timeout:
+            self._err(f"Timed out after {TIMEOUT}s")
             raise SourceError("The stone search timed out. Try again, or narrow the criteria.")
-        except requests.RequestException:
+        except requests.RequestException as e:
+            self._err(f"Connection error: {type(e).__name__}")
             raise SourceError("Couldn't reach the stone search service. Check the connection and try again.")
         if r.status_code in (401, 403):
+            self._err(f"HTTP {r.status_code}")
             raise _AuthError()
         if r.status_code >= 500:
+            self._err(f"HTTP {r.status_code}")
             raise SourceError("The stone search service is having problems right now. Try again shortly.")
         try:
             data = r.json()
         except ValueError:
+            self._err(f"HTTP {r.status_code}: response was not JSON")
             raise SourceError("The stone search service sent an unreadable response.")
         errs = data.get("errors") or []
         if errs:
+            for e in errs:
+                self._err(e.get("message", "") if isinstance(e, dict) else e)
             msg = " ".join(str(e.get("message", "")) for e in errs if isinstance(e, dict)).lower()
             if any(w in msg for w in ("auth", "token", "expired", "jwt", "login", "permission")):
                 raise _AuthError()
@@ -111,6 +143,8 @@ class Client:
     def _token(self, force=False):
         cached = self.state.get("_ls_tok")
         if cached and not force and time.time() - cached[1] < TOKEN_TTL:
+            if self.diag["sign_in"] == "not attempted":
+                self.diag["sign_in"] = "ok (cached token)"
             return cached[0]
         q = ("query Authenticate($username: String!, $password: String!) { authenticate { "
              "username_and_password(username: $username, password: $password) { token } } }")
@@ -121,8 +155,10 @@ class Client:
             tok = None
         if not tok:
             self.state.pop("_ls_tok", None)
+            self.diag["sign_in"] = "FAILED"
             raise SourceError("Live Search couldn't sign in. Check the username and password in the settings.")
         self.state["_ls_tok"] = (tok, time.time())
+        self.diag["sign_in"] = "ok (re-signed in after the token was refused)" if force else "ok (new token)"
         return tok
 
     def call(self, query):
@@ -133,6 +169,7 @@ class Client:
             try:
                 return self._post(query, token=self._token(force=True))
             except _AuthError:
+                self.diag["sign_in"] = "FAILED (token refused after re-sign-in)"
                 raise SourceError("Live Search's sign-in was refused. Check the account settings.")
 
     # ── schema discovery (introspection) ─────────────────────────────────────
@@ -226,8 +263,17 @@ class Client:
                  "certificate { " + cert_sel + " } } } } }")
             data = self.call(q)
             res = data.get("diamonds_by_query") or {}
+            self.diag["total_count"] = res.get("total_count")
             total = int(res.get("total_count") or 0)
             items = res.get("items") or []
+            self.diag["pages"] += 1
+            self.diag["raw_items"] += len(items)
+            if self.diag["sample_price_raw"] is None:
+                for i in items:
+                    if isinstance(i, dict) and i.get("price") is not None:
+                        self.diag["sample_price_raw"] = i.get("price")
+                        self.diag["sample_carat"] = ((i.get("diamond") or {}).get("certificate") or {}).get("carats")
+                        break
             out += [s for s in (whitelist(i) for i in items) if s]
             offset += PAGE_LIMIT
             if len(items) < PAGE_LIMIT or offset >= total:
