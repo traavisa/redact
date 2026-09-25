@@ -11,8 +11,10 @@ Verified against the source's published API examples:
   - search:   diamonds_by_query(query: {...}, offset, limit <= 50, order: {type: price, direction: ASC})
               query keys documented: labgrown, shapes, sizes [{from,to}], color [enum], has_image, has_v360
               { total_count items { id price diamond { id video image availability certificate {...} } } }
-Everything else (extra filter keys, enum names, extra certificate fields) is only used
-after the live schema confirms it via GraphQL introspection.
+Everything else (extra filter keys, enum names, the count query, extra certificate fields)
+is only used after the live schema confirms it via GraphQL introspection. Introspection
+also records the schema's own descriptions of the price / total / labgrown fields so the
+diagnostics can show what the source says they mean.
 """
 import json
 import re
@@ -64,9 +66,11 @@ CERT_FIELDS = ["id", "lab", "shape", "certNumber", "cut", "carats", "clarity", "
 # Optional certificate fields — requested only if the live schema has them.
 FANCY_FIELDS = ["f_color", "f_intensity", "f_overtone"]
 AS_GROWN_FIELDS = ["as_grown", "asGrown", "treated", "treatment"]
-# Optional query keys we can push server-side if the live schema confirms them
-# (list-of-enum). Everything is still re-checked in code after fetching.
-ENUM_LIST_FILTERS = ["color", "clarity", "cut", "polish", "symmetry", "labs"]
+# Candidate boolean "is lab-grown" fields on the diamond / certificate types. If one exists it's
+# requested so the diagnostics can confirm what labgrown:false actually returned.
+LABGROWN_FLAG_FIELDS = ["labgrown", "lab_grown", "labGrown", "is_labgrown", "isLabgrown", "is_lab_grown"]
+# Field names on the search item / response that are worth reporting for the price check.
+_PRICE_WORDS = ("price", "discount", "markup", "value", "cost", "currency", "fee", "delivered")
 
 
 _DOMAIN_RE = re.compile(r"\b(?:https?://[^\s)\]]+|[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:net|com|io|org|co|dev|app|ai|cloud)\b(?:[/:][^\s)\]]*)?)", re.I)
@@ -95,7 +99,8 @@ class Client:
     def reset_diag(self):
         """Diagnostics for the last search (shown in the tab and logged). Always sanitised."""
         self.diag = {"sign_in": "not attempted", "api_errors": [], "pages": 0, "raw_items": 0,
-                     "sample_price_raw": None, "sample_carat": None}
+                     "total_count": None, "count_query_total": None, "real_total": None,
+                     "cap_hit": False, "labgrown_flags": None}
 
     def _err(self, text):
         msg = sanitise(text, (self.username, self.password))
@@ -186,7 +191,8 @@ class Client:
         except Exception:
             # Introspection unavailable: fall back to the documented filters only,
             # and try again in ~10 minutes rather than holding the fallback for hours.
-            info = {"verified": False, "filters": {}, "cert_extra": []}
+            info = {"verified": False, "filters": DOCUMENTED_FILTERS, "cert_extra": [],
+                    "count_query": None, "lg_flag": None, "docs": {}}
             stamp = time.time() - SCHEMA_TTL + 600
         Client._schema_cache[self.url] = (stamp, info)
         return info
@@ -194,91 +200,201 @@ class Client:
     def _introspect(self):
         tref = "kind name ofType { kind name ofType { kind name ofType { kind name } } }"
         q = ("{ __schema { queryType { name } types { kind name "
-             f"fields {{ name args {{ name type {{ {tref} }} }} type {{ {tref} }} }} "
-             f"inputFields {{ name type {{ {tref} }} }} enumValues {{ name }} }} }} }}")
+             f"fields {{ name description args {{ name type {{ {tref} }} }} type {{ {tref} }} }} "
+             f"inputFields {{ name description type {{ {tref} }} }} enumValues {{ name }} }} }} }}")
         data = self.call(q)
         sch = data["__schema"]
         types = {t["name"]: t for t in sch["types"] if t.get("name")}
-
-        def named(t):
-            while t and t.get("kind") in ("NON_NULL", "LIST"):
-                t = t.get("ofType")
-            return t or {}
-
-        def is_list(t):
-            while t and t.get("kind") == "NON_NULL":
-                t = t.get("ofType")
-            return bool(t) and t.get("kind") == "LIST"
-
         root = types[sch["queryType"]["name"]]
         dq = next(f for f in root["fields"] if f["name"] == "diamonds_by_query")
         qarg = next(a for a in dq["args"] if a["name"] == "query")
-        qin = types[named(qarg["type"])["name"]]
-        fields = {f["name"]: f["type"] for f in (qin.get("inputFields") or [])}
+        qin_name = _named(qarg["type"]).get("name")
+        qin = types[qin_name]
+        docs = {}
 
+        # Every query input field, described generically; live_search decides what to use.
         filters = {}
-        if named(fields.get("labgrown", {})).get("name") == "Boolean":
-            filters["labgrown"] = True
-        if "shapes" in fields and is_list(fields["shapes"]) and named(fields["shapes"]).get("name") == "String":
-            filters["shapes"] = True
-        if "sizes" in fields and is_list(fields["sizes"]):
-            st = types.get(named(fields["sizes"]).get("name"), {})
-            names = {f["name"] for f in (st.get("inputFields") or [])}
-            if {"from", "to"} <= names:
-                filters["sizes"] = True
-        for key in ENUM_LIST_FILTERS:
-            t = fields.get(key)
-            if t and is_list(t) and named(t).get("kind") == "ENUM":
-                et = types.get(named(t)["name"], {})
-                filters[key] = [e["name"] for e in (et.get("enumValues") or [])]
+        for f in qin.get("inputFields") or []:
+            spec = _filter_spec(f["type"], types)
+            if spec:
+                spec["type"] = _type_str(f["type"])
+                filters[f["name"]] = spec
+            if f.get("description"):
+                docs[f"query.{f['name']}"] = f["description"]
 
-        # Walk the documented response path to the certificate type
-        cert_extra = []
+        # A separate count query taking the same query input (the real total for the search)
+        count_query = None
+        for f in root["fields"]:
+            if f["name"] == "diamonds_by_query" or "count" not in f["name"].lower():
+                continue
+            qa = next((a for a in f.get("args") or [] if a["name"] == "query"), None)
+            if (qa and _named(qa["type"]).get("name") == qin_name
+                    and _named(f["type"]).get("name") in ("Int", "Float")
+                    and all(a["name"] == "query" or _named(a["type"]).get("kind") != "NON_NULL"
+                            for a in f["args"])):
+                if count_query is None or f["name"] == "diamonds_by_query_count":
+                    count_query = f["name"]
+                    if f.get("description"):
+                        docs[f"{f['name']}"] = f["description"]
+
+        # Walk the documented response path: result -> items -> diamond -> certificate
+        cert_extra, lg_flag = [], None
         try:
-            ret = types[named(dq["type"])["name"]]
+            ret = types[_named(dq["type"])["name"]]
+            for f in ret["fields"]:
+                if f.get("description") and (f["name"] == "total_count" or "count" in f["name"].lower()):
+                    docs[f"result.{f['name']}"] = f["description"]
             items = next(f for f in ret["fields"] if f["name"] == "items")
-            it = types[named(items["type"])["name"]]
+            it = types[_named(items["type"])["name"]]
+            for f in it["fields"]:
+                if any(w in f["name"].lower() for w in _PRICE_WORDS):
+                    docs[f"item.{f['name']}"] = f.get("description") or "(no description in the schema)"
             dia = next(f for f in it["fields"] if f["name"] == "diamond")
-            dt = types[named(dia["type"])["name"]]
+            dt = types[_named(dia["type"])["name"]]
             cf = next(f for f in dt["fields"] if f["name"] == "certificate")
-            ct = types[named(cf["type"])["name"]]
-            scalars = {f["name"] for f in ct["fields"]
-                       if named(f["type"]).get("kind") in ("SCALAR", "ENUM") and not is_list(f["type"])}
-            cert_extra = [f for f in FANCY_FIELDS + AS_GROWN_FIELDS if f in scalars]
+            ct = types[_named(cf["type"])["name"]]
+
+            def scalars(t):
+                return {f["name"]: f for f in t["fields"]
+                        if _named(f["type"]).get("kind") in ("SCALAR", "ENUM") and not _is_list(f["type"])}
+            cs, ds = scalars(ct), scalars(dt)
+            cert_extra = [f for f in FANCY_FIELDS + AS_GROWN_FIELDS if f in cs]
+            for where, fs in (("diamond", ds), ("certificate", cs)):
+                name = next((n for n in LABGROWN_FLAG_FIELDS
+                             if n in fs and _named(fs[n]["type"]).get("name") == "Boolean"), None)
+                if name:
+                    lg_flag = (where, name)
+                    if fs[name].get("description"):
+                        docs[f"{where}.{name}"] = fs[name]["description"]
+                    break
         except Exception:
             cert_extra = []
-        return {"verified": True, "filters": filters, "cert_extra": cert_extra}
+        docs = {k: sanitise(v) for k, v in docs.items()}
+        return {"verified": True, "filters": filters, "cert_extra": cert_extra,
+                "count_query": count_query, "lg_flag": lg_flag, "docs": docs}
 
     # ── search ───────────────────────────────────────────────────────────────
     def search(self, query_input, max_stones=500):
-        """Fetches up to `max_stones` stones (cheapest first) for a server-side query dict.
-        Returns (whitelisted_stones, total_count)."""
-        extra = self.schema().get("cert_extra", [])
-        cert_sel = " ".join(CERT_FIELDS + extra)
-        out, total, offset = [], 0, 0
+        """Fetches up to `max_stones` stones (cheapest first) for a server-side query dict,
+        PAGE_LIMIT per request, until every match is fetched or the cap is reached.
+        Returns (whitelisted_stones, real_total). real_total is the API's own count for the
+        query (count query if the schema has one, else the result's total_count), or None
+        if the API didn't give a trustworthy count."""
+        sch = self.schema()
+        extra = sch.get("cert_extra", [])
+        lg = sch.get("lg_flag")
+        cert_sel = " ".join(CERT_FIELDS + extra + ([lg[1]] if lg and lg[0] == "certificate" else []))
+        dia_sel = "id video image availability" + (f" {lg[1]}" if lg and lg[0] == "diamond" else "")
+        qlit = gql_literal(query_input)
+        out, offset, fetched = [], 0, 0
+        flags = {"natural": 0, "lab-grown": 0, "unknown": 0} if lg else None
         while offset < max_stones:
-            q = ("query { diamonds_by_query(query: " + gql_literal(query_input) +
-                 f", offset: {offset}, limit: {PAGE_LIMIT}, order: {{type: price, direction: ASC}}) {{ "
-                 "total_count items { id price diamond { id video image availability "
-                 "certificate { " + cert_sel + " } } } } }")
+            limit = min(PAGE_LIMIT, max_stones - offset)
+            count_sel = (f" n_total: {sch['count_query']}(query: {qlit})"
+                         if offset == 0 and sch.get("count_query") else "")
+            q = ("query { diamonds_by_query(query: " + qlit +
+                 f", offset: {offset}, limit: {limit}, order: {{type: price, direction: ASC}}) {{ "
+                 f"total_count items {{ id price diamond {{ {dia_sel} "
+                 "certificate { " + cert_sel + " } } } }" + count_sel + " }")
             data = self.call(q)
             res = data.get("diamonds_by_query") or {}
-            self.diag["total_count"] = res.get("total_count")
-            total = int(res.get("total_count") or 0)
+            if offset == 0:
+                self.diag["total_count"] = res.get("total_count")
+                if "n_total" in data:
+                    self.diag["count_query_total"] = data.get("n_total")
             items = res.get("items") or []
             self.diag["pages"] += 1
             self.diag["raw_items"] += len(items)
-            if self.diag["sample_price_raw"] is None:
-                for i in items:
-                    if isinstance(i, dict) and i.get("price") is not None:
-                        self.diag["sample_price_raw"] = i.get("price")
-                        self.diag["sample_carat"] = ((i.get("diamond") or {}).get("certificate") or {}).get("carats")
-                        break
+            fetched += len(items)
+            for i in items:
+                if flags is not None and isinstance(i, dict):
+                    d = i.get("diamond") or {}
+                    v = (d if lg[0] == "diamond" else (d.get("certificate") or {})).get(lg[1])
+                    flags["lab-grown" if v is True else "natural" if v is False else "unknown"] += 1
             out += [s for s in (whitelist(i) for i in items) if s]
-            offset += PAGE_LIMIT
-            if len(items) < PAGE_LIMIT or offset >= total:
+            offset += len(items)
+            # total_count is not used to stop paging: only a short page (or the cap) ends it.
+            if len(items) < limit:
                 break
-        return out, total
+        self.diag["labgrown_flags"] = flags
+        self.diag["cap_hit"] = fetched >= max_stones
+        real = _int(self.diag["count_query_total"])
+        if real is None:
+            tc = _int(self.diag["total_count"])
+            # A total_count below what was actually fetched isn't the real total
+            if tc is not None and tc >= fetched and not (self.diag["cap_hit"] and tc == fetched):
+                real = tc
+            elif not self.diag["cap_hit"]:
+                real = fetched      # paged to the end: everything that matches was fetched
+        self.diag["real_total"] = real
+        return out, real
+
+
+# Filters assumed from the published examples when the schema can't be read.
+DOCUMENTED_FILTERS = {"labgrown": {"kind": "bool", "type": "Boolean (documented)"},
+                      "shapes": {"kind": "list_str", "type": "[String] (documented)"},
+                      "sizes": {"kind": "ranges", "from": "from", "to": "to", "int": False,
+                                "type": "[{from, to}] (documented)"}}
+
+
+def _named(t):
+    while t and t.get("kind") in ("NON_NULL", "LIST"):
+        t = t.get("ofType")
+    return t or {}
+
+
+def _is_list(t):
+    while t and t.get("kind") == "NON_NULL":
+        t = t.get("ofType")
+    return bool(t) and t.get("kind") == "LIST"
+
+
+def _type_str(t):
+    if not t:
+        return "?"
+    if t.get("kind") == "NON_NULL":
+        return _type_str(t.get("ofType")) + "!"
+    if t.get("kind") == "LIST":
+        return "[" + _type_str(t.get("ofType")) + "]"
+    return t.get("name") or "?"
+
+
+_NUM = ("Float", "Int", "BigInt", "Decimal", "Long")
+
+
+def _range_spec(tt):
+    """Input object with a from/to (or min/max) numeric pair -> spec, else None."""
+    sub = {f["name"]: _named(f["type"]).get("name") for f in (tt.get("inputFields") or [])}
+    for a, b in (("from", "to"), ("min", "max"), ("gte", "lte")):
+        if sub.get(a) in _NUM and sub.get(b) in _NUM:
+            return {"from": a, "to": b, "int": sub[a] == "Int" and sub[b] == "Int"}
+    return None
+
+
+def _filter_spec(t, types):
+    """Describes a query input field in terms live_search can map criteria onto."""
+    n = _named(t)
+    kind, name = n.get("kind"), n.get("name")
+    lst = _is_list(t)
+    if kind == "SCALAR" and name == "Boolean" and not lst:
+        return {"kind": "bool"}
+    if kind == "SCALAR" and name == "String" and lst:
+        return {"kind": "list_str"}
+    if kind == "ENUM":
+        vals = [e["name"] for e in (types.get(name, {}).get("enumValues") or [])]
+        return {"kind": "list_enum" if lst else "enum", "values": vals}
+    if kind == "INPUT_OBJECT":
+        r = _range_spec(types.get(name, {}))
+        if r:
+            return {"kind": "ranges" if lst else "range", **r}
+    return None
+
+
+def _int(v):
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _num(v):

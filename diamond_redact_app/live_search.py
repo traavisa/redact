@@ -430,37 +430,240 @@ def _widen(seq, lo, hi, by):
     return seq[max(0, i - by): min(len(seq), j + 1 + by)]
 
 
-def server_query(c, schema):
-    """Server-side query for a search. Always fetched wide enough to include every flex option
-    (so flexed results and 'would add' counts come from the same fetch). Everything is
-    re-checked in code afterwards, so a server-side filter can only narrow, never loosen."""
-    have = schema.get("filters", {})
-    doc = not schema.get("verified")          # documented keys are assumed when not verified
-    q = {}
-    if doc or have.get("labgrown"):
-        q["labgrown"] = c["lab_grown"]
-    if c["shapes"] and (doc or have.get("shapes")):
-        q["shapes"] = [n for g in c["shapes"] for n in SHAPE_GROUPS[g]]
-    if (c["ct_min"] or c["ct_max"]) and (doc or have.get("sizes")):
-        lo = max(0.0, (c["ct_min"] or 0) - 0.10)
-        hi = (c["ct_max"] + 0.10) if c["ct_max"] else 100.0
-        q["sizes"] = [{"from": round(lo, 2), "to": round(hi, 2)}]
-    # Enum filters only when the live schema confirms the key AND every value we need.
-    ev = lambda key: set(have.get(key) or []) if isinstance(have.get(key), list) else set()
-    if not c["fancy"] and tuple(c["col"]) != ("D", "Z"):
-        want = _widen(COLOURS, c["col"][0], c["col"][1], 1)
-        if want and set(want) <= ev("color"):
-            q["color"] = [src.Enum(x) for x in want]
-    if tuple(c["cla"]) != ("FL", "I3"):
-        want = _widen(CLARITIES, c["cla"][0], c["cla"][1], 1)
-        if want and set(want) <= ev("clarity"):
-            q["clarity"] = [src.Enum(x) for x in want]
-    for key, crit in (("cut", "cut"), ("polish", "pol"), ("symmetry", "sym")):
-        if c[crit] != "Any" and ev(key):
-            ok = [e for e in ev(key) if GRADE_RANK.get(norm_grade(e), -1) >= GRADE_RANK[c[crit]]]
-            if ok:
-                q[key] = [src.Enum(x) for x in sorted(ok)]
-    return q
+# Query-input field names each criterion can use, in order of preference. A field is only
+# used when introspection shows a type the criterion can be sent as (see nivoda_client._filter_spec).
+FILTER_FIELDS = {
+    "Type": ["labgrown"],
+    "Shape": ["shapes", "shape"],
+    "Carat": ["sizes", "size", "carats", "carat"],
+    "Colour": ["color", "colors", "colour"],
+    "Fancy colour": ["fancy_colors", "fancy_color", "fancyColors", "fancyColor", "f_color"],
+    "Fancy intensity": ["fancy_intensity", "fancy_intensities", "fancyIntensity", "f_intensity"],
+    "Clarity": ["clarity", "clarities"],
+    "Cut": ["cut"], "Polish": ["polish"], "Symmetry": ["symmetry"],
+    "Fluorescence": ["fluorescence", "flouresence", "fluorescence_intensity", "fluorescenceIntensity",
+                     "floInt", "flo"],
+    "Lab": ["labs", "lab", "certificate_lab"],
+    "Price": ["dollar_value", "price", "price_range", "total_price"],
+    "L/W ratio": ["ratio", "length_width_ratio", "lw_ratio", "l_w_ratio"],
+    "Depth %": ["depth_percentage", "depthPercentage", "depth_percent", "depth_pct"],
+    "Table %": ["table_percentage", "tablePercentage", "table_percent", "table_pct", "table"],
+    "As-grown": ["as_grown", "asGrown", "is_as_grown", "treated", "is_treated", "treatment",
+                 "treatments", "lab_grown_treatment"],
+}
+# Flex option -> the criterion it widens (for "was this filtered server-side?")
+FLEX_CRITERION = {"col": "Colour", "cla": "Clarity", "ct": "Carat", "budget": "Price",
+                  "lab": "Lab", "flo": "Fluorescence"}
+_OPEN_HI = {"Carat": 100.0, "Price": 100_000_000, "L/W ratio": 100.0, "Depth %": 100.0, "Table %": 100.0}
+
+
+def _pick(have, crit, kinds):
+    for name in FILTER_FIELDS[crit]:
+        spec = have.get(name)
+        if spec and spec["kind"] in kinds:
+            return name, spec
+    return None, None
+
+
+def _enum_send(spec, values):
+    """Values -> what to send for an enum field ('enum' fields can only take one value)."""
+    vals = [src.Enum(v) for v in values]
+    if spec["kind"] == "list_enum":
+        return vals
+    return vals[0] if len(vals) == 1 else None
+
+
+def _range_send(spec, lo, hi):
+    if spec.get("int"):
+        lo, hi = int(lo // 1), int(-(-hi // 1))
+    else:
+        lo, hi = round(lo, 4), round(hi, 4)
+    r = {spec["from"]: lo, spec["to"]: hi}
+    return [r] if spec["kind"] == "ranges" else r
+
+
+def price_usd_bounds(c, fx, rate, markup):
+    """Form price range (CAD, chosen basis) -> USD bounds of the stone's source price,
+    widened only by the Budget +10% flex. Returns (lo, hi) with None for an open end."""
+    if not (c["pr_min"] or c["pr_max"]) or rate <= 0:
+        return None
+    k = rate * ((1 + markup / 100.0) if c["pr_client"] else 1.0)
+    hi = c["pr_max"] * (1.10 if fx["budget"] else 1.0) if c["pr_max"] else None
+    return ((c["pr_min"] / k) if c["pr_min"] else None, (hi / k) if hi else None)
+
+
+def server_query(c, fx, schema, rate, markup, divisor):
+    """Server-side query for a search: the form's criteria exactly, widened only where the
+    matching flex box is ticked (by exactly the band classify() puts in 'Outside your
+    criteria'). Criteria the schema can't filter are left to the client-side check.
+    Everything is re-checked in code afterwards.
+    Returns (query, plan): plan is a list of (criterion, 'server'|'client', detail)."""
+    have = schema.get("filters") or {}
+    q, plan = {}, []
+
+    def server(crit, field, value, detail=""):
+        q[field] = value
+        plan.append((crit, "server", f"{field} ({have[field].get('type', '?')}){': ' + detail if detail else ''}"))
+
+    def client(crit, why="no matching filter in the schema"):
+        plan.append((crit, "client", why))
+
+    # Type
+    f, spec = _pick(have, "Type", ("bool",))
+    if f:
+        server("Type", f, c["lab_grown"], "lab-grown" if c["lab_grown"] else "natural")
+    else:
+        client("Type")
+    # Shape
+    if c["shapes"]:
+        names = [n for g in c["shapes"] for n in SHAPE_GROUPS[g]]
+        f, spec = _pick(have, "Shape", ("list_str", "list_enum", "enum"))
+        if f and spec["kind"] == "list_str":
+            server("Shape", f, names, "names from the documented shape list")
+        elif f:
+            by_key = {_key(v): v for v in spec["values"]}
+            groups = {g: [by_key[_key(n)] for n in SHAPE_GROUPS[g] if _key(n) in by_key] for g in c["shapes"]}
+            vals = list(dict.fromkeys(v for g in c["shapes"] for v in groups[g]))
+            unmapped = [n for n in names if _key(n) not in by_key]
+            val = _enum_send(spec, vals) if all(groups.values()) else None
+            if val is not None:
+                server("Shape", f, val, "not in the schema's list: " + ", ".join(unmapped) if unmapped else "")
+            else:
+                client("Shape", f"{f}: no schema value for " + ", ".join(g for g, v in groups.items() if not v)
+                       if not all(groups.values()) else f"{f} takes a single value")
+        else:
+            client("Shape")
+    # Carat (flex widens by the chosen tolerance)
+    if c["ct_min"] or c["ct_max"]:
+        f, spec = _pick(have, "Carat", ("ranges", "range"))
+        if f:
+            tol = fx["ct_tol"] if fx["ct"] else 0.0
+            lo = max(0.0, (c["ct_min"] or 0) - tol) if c["ct_min"] else 0.0
+            hi = (c["ct_max"] + tol) if c["ct_max"] else _OPEN_HI["Carat"]
+            server("Carat", f, _range_send(spec, lo, hi), f"widened ±{tol:.2f} (flex)" if tol else "exact")
+        else:
+            client("Carat")
+
+    def enum_range(crit, seq, rng, full, flex):
+        if tuple(rng) == full:
+            return
+        want = _widen(seq, rng[0], rng[1], 1 if flex else 0)
+        f, spec = _pick(have, crit, ("list_enum", "enum"))
+        val = _enum_send(spec, want) if f and set(want) <= set(spec["values"]) else None
+        if val is not None:
+            server(crit, f, val, "widened ±1 grade (flex)" if flex else "exact")
+        else:
+            client(crit, f"{f}: schema values don't cover {want[0]}–{want[-1]}" if f else "no matching filter in the schema")
+
+    # Colour / fancy colour
+    if not c["fancy"]:
+        enum_range("Colour", COLOURS, c["col"], ("D", "Z"), fx["col"])
+    else:
+        f, spec = _pick(have, "Fancy colour", ("list_enum",))
+        vals = [v for v in (spec["values"] if f else []) if _key(c["fancy_col"]) in _key(v)]
+        if vals:
+            server("Fancy colour", f, _enum_send(spec, vals))
+        else:
+            client("Fancy colour")
+        if c["fancy_int"]:
+            f, spec = _pick(have, "Fancy intensity", ("list_enum",))
+            m = {v: fancy_intensity(v.replace("_", " ")) for v in (spec["values"] if f else [])}
+            vals = [v for v, i in m.items() if i in c["fancy_int"]]
+            if f and vals and set(c["fancy_int"]) <= set(m.values()):
+                server("Fancy intensity", f, _enum_send(spec, vals))
+            else:
+                client("Fancy intensity")
+    # Clarity
+    enum_range("Clarity", CLARITIES, c["cla"], ("FL", "I3"), fx["cla"])
+    # Cut / polish / symmetry minimums (no flex)
+    for crit, key in (("Cut", "cut"), ("Polish", "pol"), ("Symmetry", "sym")):
+        if c[key] == "Any":
+            continue
+        f, spec = _pick(have, crit, ("list_enum",))
+        ok = sorted(e for e in (spec["values"] if f else [])
+                    if GRADE_RANK.get(norm_grade(e), -1) >= GRADE_RANK[c[key]])
+        if ok:
+            server(crit, f, _enum_send(spec, ok), f"{c[key]} or better")
+        else:
+            client(crit)
+    # Fluorescence (flex adds Faint)
+    if c["flo"] and set(c["flo"]) != set(FLUORS):
+        allowed = set(c["flo"]) | ({"Faint"} if fx["flo"] else set())
+        f, spec = _pick(have, "Fluorescence", ("list_enum",))
+        m = {v: norm_fluor(v) for v in (spec["values"] if f else [])}
+        vals = [v for v, lvl in m.items() if lvl in allowed]
+        if f and allowed <= set(m.values()):
+            server("Fluorescence", f, _enum_send(spec, vals), "+ Faint (flex)" if fx["flo"] and "Faint" not in c["flo"] else "")
+        else:
+            client("Fluorescence", f"{f}: schema values don't cover {', '.join(sorted(allowed - set(m.values())))}"
+                   if f else "no matching filter in the schema")
+    # Lab (flex = any lab, so nothing is sent)
+    if c["labs"]:
+        if fx["lab"]:
+            client("Lab", "Any lab (flex) — not filtered")
+        else:
+            f, spec = _pick(have, "Lab", ("list_enum", "enum"))
+            vals = [v for v in (spec["values"] if f else []) if norm_lab(v) in c["labs"]]
+            val = _enum_send(spec, vals) if f and set(c["labs"]) <= {norm_lab(v) for v in vals} else None
+            if val is not None:
+                server("Lab", f, val)
+            else:
+                client("Lab", f"{f}: schema values don't cover {', '.join(c['labs'])}" if f else "no matching filter in the schema")
+    # Price (CAD form range -> source USD; flex widens the max by 10%)
+    b = price_usd_bounds(c, fx, rate, markup)
+    if b:
+        f, spec = _pick(have, "Price", ("range", "ranges"))
+        if f:
+            usd_unit = f.startswith("dollar")
+            mult = 1.0 if usd_unit else divisor
+            lo = (b[0] or 0) * mult
+            hi = b[1] * mult if b[1] else _OPEN_HI["Price"] * mult
+            server("Price", f, _range_send(spec, lo, hi),
+                   f"US${b[0] or 0:,.0f}–{'US$' + format(b[1], ',.0f') if b[1] else 'any'}"
+                   f"{' (budget +10% flex)' if fx['budget'] and c['pr_max'] else ''}; "
+                   + ("sent in dollars" if usd_unit else f"sent in raw price units (× {divisor:g})"))
+        else:
+            client("Price")
+    # Proportions
+    for crit, (lo, hi) in (("L/W ratio", c["ratio"]), ("Depth %", c["depth"]), ("Table %", c["table"])):
+        if lo or hi:
+            f, spec = _pick(have, crit, ("range", "ranges"))
+            if f:
+                server(crit, f, _range_send(spec, lo or 0.0, hi or _OPEN_HI[crit]))
+            else:
+                client(crit)
+    # As-grown (lab-grown only)
+    if c["as_grown"]:
+        sent = False
+        for name in FILTER_FIELDS["As-grown"]:
+            spec = have.get(name)
+            if not spec:
+                continue
+            if spec["kind"] == "bool":
+                server("As-grown", name, "treat" not in name.lower())
+                sent = True
+            elif spec["kind"] in ("list_enum", "enum"):
+                vals = [v for v in spec["values"] if _key(v) in ("ASGROWN", "NONE", "UNTREATED", "NOTREATMENT")]
+                val = _enum_send(spec, vals) if vals else None
+                if val is not None:
+                    server("As-grown", name, val)
+                    sent = True
+            if sent:
+                break
+        if not sent:
+            client("As-grown")
+    return q, plan
+
+
+def price_filter_mismatch(stones, bounds, divisor):
+    """True if the returned stones' prices don't respect the server-side price range we sent,
+    i.e. the filter's units aren't what we assumed."""
+    lo, hi = bounds
+    usd = [s["price_raw"] / divisor for s in stones if s.get("price_raw") is not None]
+    if not usd:
+        return False
+    bad = [u for u in usd if (lo and u < lo * 0.98 - 1) or (hi and u > hi * 1.02 + 1)]
+    return len(bad) > 0.05 * len(usd)
 
 
 def price_view(s, rate, markup, divisor):
@@ -678,6 +881,7 @@ def _range_slider(label, options, key):
 
 def _set_flex(key):
     st.session_state[key] = True
+    st.session_state["ls_autosearch"] = True   # the server-side query changes, so fetch again
 
 
 def _toggle_pick(sid, key):
@@ -844,32 +1048,54 @@ def _render(deps):
     # ── D. Search ────────────────────────────────────────────────────────
     crit = read_criteria()
     fx = flex_state()
-    if st.button("🔍  Search", type="primary", use_container_width=True, key="ls_search"):
+    auto = ss.pop("ls_autosearch", False)       # a flex offer button asks for a fresh search
+    if st.button("🔍  Search", type="primary", use_container_width=True, key="ls_search") or auto:
         client.reset_diag()
-        q, schema, error = None, {}, None
+        q, plan, schema, error, retry = None, [], {}, None, None
         with st.spinner("Searching live stones…"):
             try:
                 schema = client.schema()
-                q = server_query(crit, schema)
+                q, plan = server_query(crit, fx, schema, rate, markup, divisor)
                 stones, total = client.search(q, MAX_SCAN)
-                ss.ls_results = {"q": q, "stones": stones, "total": total,
+                sent = q
+                pf = next((p[2].split(" ")[0] for p in plan if p[0] == "Price" and p[1] == "server"), None)
+                bounds = price_usd_bounds(crit, fx, rate, markup)
+                if pf and (not stones or price_filter_mismatch(stones, bounds, divisor)):
+                    # The price filter's units can't be trusted for this search: fetch again
+                    # without it and check price client-side only.
+                    retry = {"reason": "no stones returned" if not stones else
+                             "returned prices were outside the range sent (units differ)",
+                             "first_attempt": {k: client.diag[k] for k in
+                                               ("pages", "raw_items", "total_count", "count_query_total")}}
+                    client.diag.update(pages=0, raw_items=0, total_count=None, count_query_total=None)
+                    sent = {k: v for k, v in q.items() if k != pf}
+                    stones, total = client.search(sent, MAX_SCAN)
+                ss.ls_results = {"q": q, "sent": sent, "stones": stones, "total": total,
+                                 "fetched": client.diag["raw_items"], "cap_hit": client.diag["cap_hit"],
+                                 "server_crit": {p[0] for p in plan if p[1] == "server"} - (
+                                     {"Price"} if retry else set()),
                                  "verified": schema.get("verified"), "crit": crit}
                 ss.ls_picks_ai = None
             except src.SourceError as e:
                 ss.ls_results = None
                 error = str(e)
                 st.error(error)
-        stats = {}
+        stats, sample = {}, None
         if ss.ls_results:
-            bucket(ss.ls_results["stones"], crit, fx, rate, markup, divisor, stats)
-        ss.ls_diag = _build_diag(client.diag, q, schema, error, ss.ls_results, stats, rate, markup, divisor)
+            ex, fl, _ = bucket(ss.ls_results["stones"], crit, fx, rate, markup, divisor, stats)
+            priced = [r for r in ex + fl if r["pv"]] or [
+                {**s, "devs": None} for s in ss.ls_results["stones"] if s.get("price_raw") is not None]
+            if priced:
+                sample = min(priced, key=lambda r: r["price_raw"])
+        ss.ls_diag = _build_diag(client.diag, q, plan, retry, schema, error, ss.ls_results, stats,
+                                 sample, rate, markup, divisor)
         _log_diag(ss.ls_diag)
 
     res = ss.get("ls_results")
     live_stats = None
     if res:
         try:
-            current_q = server_query(crit, client.schema())
+            current_q = server_query(crit, fx, client.schema(), rate, markup, divisor)[0]
         except Exception:
             current_q = res["q"]
         if current_q != res["q"]:
@@ -882,33 +1108,58 @@ def _render(deps):
 
 
 # ── Search diagnostics ────────────────────────────────────────────────────────
-def _build_diag(cd, q, schema, error, res, stats, rate, markup, divisor):
+_GRADE_ABBR = {"Excellent": "EX", "Very Good": "VG", "Good": "G", "Fair": "F", "Poor": "P"}
+
+
+def _build_diag(cd, q, plan, retry, schema, error, res, stats, sample_stone, rate, markup, divisor):
     """Everything here is sanitised: no source name, hosts, credentials or supplier data."""
     sample = None
-    raw = cd.get("sample_price_raw")
-    if raw is not None:
-        try:
-            usd = float(raw) / divisor
-            ct = src._num(cd.get("sample_carat"))
-            sample = {"raw_price": raw, "divisor": divisor, "usd": round(usd, 2), "usd_cad_rate": rate,
-                      "cost_cad": round(usd * rate, 2), "client_cad": round(usd * rate * (1 + markup / 100.0), 2),
-                      "carat": ct, "cost_cad_per_ct": round(usd * rate / ct, 2) if ct else None}
-        except (TypeError, ValueError):
-            sample = {"raw_price": src.sanitise(raw), "divisor": divisor, "note": "not a number"}
+    if sample_stone:
+        raw = sample_stone.get("price_raw")
+        usd = float(raw) / divisor
+        ct = sample_stone.get("carat")
+        devs = sample_stone.get("devs")
+        sample = {"raw_price": int(raw) if float(raw).is_integer() else raw, "divisor": divisor, "usd": round(usd, 2), "usd_cad_rate": rate,
+                  "cost_cad": round(usd * rate, 2), "client_cad": round(usd * rate * (1 + markup / 100.0), 2),
+                  "carat": ct, "usd_per_ct": round(usd / ct, 2) if ct else None,
+                  "cost_cad_per_ct": round(usd * rate / ct, 2) if ct else None,
+                  "stone": " · ".join(x for x in (
+                      shape_group(sample_stone.get("shape")), _spec_bits(sample_stone)[0],
+                      norm_clarity(sample_stone.get("clarity")) or str(sample_stone.get("clarity") or ""),
+                      "/".join(_GRADE_ABBR.get(norm_grade(sample_stone.get(k)), "—") for k in ("cut", "polish", "symmetry")),
+                      norm_lab(sample_stone.get("lab"))) if x),
+                  "which": ("cheapest exact match" if devs == [] else
+                            "cheapest stone in 'Outside your criteria'" if devs else
+                            "cheapest stone returned (none matched the form)")}
+    total_src = ("count query" if cd.get("count_query_total") is not None and cd.get("real_total") is not None
+                 else "total_count field" if cd.get("real_total") is not None and cd.get("real_total") == src._int(cd.get("total_count"))
+                 else "all pages fetched" if cd.get("real_total") is not None else "not reported")
     return {
         "time_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S"),
         "sign_in": cd.get("sign_in"),
         "api_errors": list(cd.get("api_errors") or []),
         "user_error": error,
         "schema_verified": bool(schema.get("verified")),
-        "server_query": {"query": json.loads(json.dumps(q)) if q is not None else None,
+        "plan": [list(p) for p in plan],
+        "count_query": schema.get("count_query"),
+        "price_retry": retry,
+        "server_query": {"query": json.loads(json.dumps(res["sent"] if res else q)) if q is not None else None,
                          "offset": f"0, 50, 100… ({cd.get('pages', 0)} page(s))", "limit": src.PAGE_LIMIT,
                          "order": {"type": "price", "direction": "ASC"}},
-        "api_total_count": cd.get("total_count"),
+        "api_total": cd.get("real_total"),
+        "api_total_source": total_src,
+        "api_total_count_field": cd.get("total_count"),
+        "api_count_query": cd.get("count_query_total"),
         "api_returned": cd.get("raw_items", 0),
+        "pages": cd.get("pages", 0),
+        "cap": MAX_SCAN,
+        "cap_hit": bool(cd.get("cap_hit")),
         "kept_after_whitelist": len(res["stones"]) if res else 0,
         "client_side": stats or {},
         "sample_price": sample,
+        "schema_docs": dict(schema.get("docs") or {}),
+        "labgrown_flag_field": ".".join(schema["lg_flag"]) if schema.get("lg_flag") else None,
+        "labgrown_flags": cd.get("labgrown_flags"),
     }
 
 
@@ -938,38 +1189,64 @@ def _diagnostics(d, live_stats=None):
         if d.get("user_error"):
             st.markdown(f"**Shown to you:** {d['user_error']}")
 
-        st.markdown("**2. Filters sent server-side** ("
+        st.markdown("**2. Criteria → server-side filters** ("
                     + ("schema confirmed by introspection" if d["schema_verified"]
-                       else "documented filters only; schema not confirmed") + "):")
+                       else "documented filters only; schema not confirmed") + "). "
+                    "Exact form values; widened only where a flex box is ticked. "
+                    "Every criterion is re-checked here after fetching.")
+        if d.get("plan"):
+            st.markdown("\n".join(f"- **{_esc(c)}**: {'server-side' if w == 'server' else 'client-side only'}"
+                                   f" — `{_code(det)}`" for c, w, det in d["plan"]))
+        if d.get("price_retry"):
+            r = d["price_retry"]
+            st.markdown(f"⚠️ **Price filter dropped:** {r['reason']}; searched again without it and "
+                        f"checked price here instead (first attempt: {r['first_attempt']['raw_items']} stone(s)).")
         st.code(json.dumps(d["server_query"], indent=2), language="json")
         st.caption("Sign-in sends only a username and password, which are never shown or logged.")
 
-        total = d.get("api_total_count")
-        st.markdown(f"**3. Returned by the API:** {d['api_returned']} stone(s)"
-                    + (f" of {total:,} matching server-side" if isinstance(total, int) else "")
-                    + f"; {d['kept_after_whitelist']} usable after the field whitelist.")
+        total = d.get("api_total")
+        tot_txt = (f"{total:,} matching server-side (from the {d['api_total_source']})" if isinstance(total, int)
+                   else "the API didn't report a usable total")
+        st.markdown(f"**3. Returned by the API:** {d['api_returned']} stone(s) in {d['pages']} page(s) of up to "
+                    f"{src.PAGE_LIMIT}; {tot_txt}"
+                    + (f"; **stopped at the {d['cap']}-stone cap**" if d.get("cap_hit") else "; all matches fetched")
+                    + f". {d['kept_after_whitelist']} usable after the field whitelist.")
+        st.caption(f"Count query: {d.get('count_query') or 'none in the schema'} → {d.get('api_count_query')} · "
+                   f"total_count field → {d.get('api_total_count_field')}")
 
         stats = live_stats if live_stats is not None else d["client_side"]
         if stats:
             basis = "current form and flex settings" if live_stats is not None else "settings at search time"
             lines = [f"- {name}: removed {n}" for name, n in stats.get("removed", [])] or ["- nothing removed"]
-            st.markdown(f"**4. Client-side hard filters** (in order; {basis}):\n\n" + "\n".join(lines)
+            st.markdown(f"**4. Client-side re-check** (in order; {basis}):\n\n" + "\n".join(lines)
                         + f"\n\nOutside criteria, needs a flex option that's off: {stats.get('needs_flex', 0)} · "
                         f"Exact: {stats.get('exact', 0)} · Outside your criteria (shown): {stats.get('flexed', 0)}")
         else:
-            st.markdown("**4. Client-side hard filters:** no stones to filter.")
+            st.markdown("**4. Client-side re-check:** no stones to check.")
 
         sp = d.get("sample_price")
-        if sp and "usd" in sp:
-            per_ct = f" · CA\\${sp['cost_cad_per_ct']:,.2f}/ct" if sp.get("cost_cad_per_ct") else ""
-            st.markdown(f"**5. Sample price:** raw `{_code(sp['raw_price'])}` ÷ {sp['divisor']:g} = US\\${sp['usd']:,.2f} "
+        if sp:
+            per_ct = (f" · US\\${sp['usd_per_ct']:,.2f}/ct · CA\\${sp['cost_cad_per_ct']:,.2f}/ct cost"
+                      if sp.get("cost_cad_per_ct") else "")
+            st.markdown(f"**5. Sample price** ({sp['which']}: {sp['carat'] or '?'} ct {_esc(sp['stone'])}): "
+                        f"raw `{_code(sp['raw_price'])}` ÷ {sp['divisor']:g} = US\\${sp['usd']:,.2f} "
                         f"× {sp['usd_cad_rate']:g} = **CA\\${sp['cost_cad']:,.2f} cost** "
-                        f"(client CA\\${sp['client_cad']:,.2f}) for {sp['carat'] or '?'} ct{per_ct}.")
+                        f"(client CA\\${sp['client_cad']:,.2f}){per_ct}.")
             st.caption("Check this stone's price on the platform. If it's 100× off, change the price-divisor environment variable (see the setup notes).")
-        elif sp:
-            st.markdown(f"**5. Sample price:** raw `{_code(sp['raw_price'])}` ({sp.get('note')})")
         else:
             st.markdown("**5. Sample price:** none (no priced stones returned).")
+
+        docs = d.get("schema_docs") or {}
+        keys = [k for k in docs if k.startswith(("item.", "result.", "query.labgrown", "query.dollar", "query.price"))
+                or k.endswith("count") or k.startswith(("diamond.", "certificate."))]
+        lines = [f"- `{_code(k)}`: {_esc(docs[k])}" for k in keys]
+        flags = d.get("labgrown_flags")
+        if flags:
+            lines.append(f"- Stones by the `{_code(d['labgrown_flag_field'])}` flag: natural {flags['natural']}, "
+                         f"lab-grown {flags['lab-grown']}, not stated {flags['unknown']}")
+        else:
+            lines.append("- No lab-grown flag field in the stone data to cross-check the type filter.")
+        st.markdown("**6. What the schema says about price / totals / type:**\n\n" + "\n".join(lines))
 
 
 def _sort(rows, how, crit):
@@ -1082,25 +1359,43 @@ def _flex_label(k, fx):
 def _results(exact, flexed, adds, res, crit, fx, ai_key, deps):
     ss = st.session_state
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
-    scanned = len(res["stones"])
-    if res["total"] > scanned:
-        st.caption(f"Checked the {scanned} lowest-priced of {res['total']:,} stones returned for these "
-                   "criteria. Narrow the criteria to see beyond them.")
+    fetched, total = res.get("fetched", len(res["stones"])), res.get("total")
+    if res.get("cap_hit"):
+        of = f"{total:,}" if isinstance(total, int) and total > fetched else "more than " + f"{fetched:,}"
+        st.caption(f"Checked the {fetched:,} lowest-priced of {of} stones matching these criteria "
+                   f"(the {MAX_SCAN}-stone limit). Narrow the criteria to see beyond them.")
+    elif isinstance(total, int):
+        st.caption(f"{total:,} stone(s) match these criteria; all were checked.")
     if not res.get("verified"):
         st.caption("Some criteria are checked here after fetching rather than by the stone search itself.")
 
     n_ex = len(exact)
     if n_ex < 5:
-        offers = [(k, n) for k, n in adds.items() if n and not fx[k]]
+        # Flex options on criteria filtered server-side weren't fetched, so their gain is
+        # unknown until a new search; client-side-only ones are counted from this fetch.
+        active = {"col": not crit["fancy"] and tuple(crit["col"]) != ("D", "Z"),
+                  "cla": tuple(crit["cla"]) != ("FL", "I3"), "ct": bool(crit["ct_min"] or crit["ct_max"]),
+                  "budget": bool(crit["pr_max"]), "lab": bool(crit["labs"]),
+                  "flo": bool(crit["flo"]) and "Faint" not in crit["flo"] and set(crit["flo"]) != set(FLUORS)}
+        server_side = res.get("server_crit", set())
+        offers = []
+        for k in FLEX_LABELS:
+            if fx[k] or not active[k]:
+                continue
+            if FLEX_CRITERION[k] in server_side:
+                offers.append((k, None))
+            elif adds.get(k):
+                offers.append((k, adds[k]))
         msg = (f"**{n_ex} exact match{'es' if n_ex != 1 else ''}.** " +
-               ("Flex options that would add stones (shown separately, never mixed in):"
-                if offers else "No single flex option would add stones."))
+               ("Flex options that may add stones (they search again; extra stones are shown separately, "
+                "never mixed in):" if offers else "No single flex option would add stones."))
         st.warning(msg)
         if offers:
             cols = st.columns(min(len(offers), 3))
             for i, (k, n) in enumerate(offers):
                 with cols[i % len(cols)]:
-                    st.button(f"{_flex_label(k, fx)}  (+{n})", key=f"ls_apply_{k}", type="primary",
+                    st.button(f"{_flex_label(k, fx)}  " + (f"(+{n})" if n else "(search again)"),
+                              key=f"ls_apply_{k}", type="primary",
                               on_click=_set_flex, args=(FLEX_KEYS[k],), use_container_width=True)
 
     a, b, c_ = st.columns([2.2, 1.4, 1.2])
