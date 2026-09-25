@@ -28,3 +28,6 @@ revoke all on public.media_links from anon, authenticated;
 --    A /v/<token> link whose row has spin_id set opens our own spinner, never the vendor page.
 alter table public.media_links add column if not exists spin_id text check (spin_id ~ '^[a-f0-9]{32}$');
 alter table public.media_links add column if not exists spin_frames integer check (spin_frames between 2 and 720);
+
+-- 4. The frame the 360 starts on (the stone's "top" view). Added later; safe to run again.
+alter table public.media_links add column if not exists spin_top integer check (spin_top >= 0);

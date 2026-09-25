@@ -7,11 +7,15 @@ https://quote.alldiamondeverything.com/media/<uuid>/NNN.jpg. Nothing a client lo
 then comes from a vendor.
 
 Finding the frames, in order:
-  1. Stone data from the search API (a frame base URL + count, or a list of frame URLs),
-     when the live schema has such fields (passed in as `hint`).
-  2. Viewer formats registered with @viewer_format, matched on the viewer URL's shape.
+  1. "API fields": the certificate's 360 fields from the search API (v360 / product_videos:
+     url, frame_count, top_index), passed in as `hint`. Frames are <url>/<n>.webp,
+     n = 0 … frame_count-1; frame 0 and the last frame are checked before anything is used.
+  2. Other stone data from the search API (a frame base URL + count, or a list of frame URLs).
+  3. Viewer formats registered with @viewer_format, matched on the viewer URL's shape.
+     Format A (/diamond/<certificate id>/video/<w>/<h>) is a "certificate lookup": the
+     certificate's 360 fields are fetched from the search API by that ID (CERT_LOOKUP).
      Add a new format there when a new kind of viewer page turns up.
-  3. Generic analysis of the viewer page: its HTML, inline and same-site scripts, JSON
+  4. Generic analysis of the viewer page: its HTML, inline and same-site scripts, JSON
      config and any nested viewer frame, looking for numbered frame URLs, URL templates
      ("…/" + i + ".jpg", `${i}.jpg`, {frame}), frame counts and frame base URLs.
      Candidate patterns are checked by downloading a frame before anything is used.
@@ -36,7 +40,7 @@ from PIL import Image, ImageOps
 import quote_media as qm
 
 MAX_FRAMES = 120             # more are evenly thinned out: 3° a frame is smooth, and far lighter on phones
-MIN_FRAMES = 8
+MIN_FRAMES = 24             # fewer is not a real 360 (e.g. a page's shared images)
 FRAME_WIDTH = 1000
 JPEG_QUALITY = 84
 DOWNLOAD_WORKERS = 8
@@ -47,6 +51,19 @@ MAX_SCRIPT_BYTES = 4 * 1024 * 1024
 MAX_SCRIPTS = 6
 MAX_COUNT_SEARCH = 1024
 IMG_EXT = ("jpg", "jpeg", "png", "webp")
+# Shared site images that are never a stone's frames (a page's own gallery, logos, …)
+_SHARED_ASSET = re.compile(r"bridal_image|banner|logo|icon|sprite|placeholder|avatar|thumbnail", re.I)
+
+# Certificate lookup by ID for format A viewer links: set by the app to a function
+# cert_id -> (hint dict or None, reason). None means no lookup is available.
+CERT_LOOKUP = None
+
+
+def shared_asset(url):
+    try:
+        return bool(_SHARED_ASSET.search(urlparse(str(url)).path))
+    except Exception:
+        return True
 
 
 class CaptureFailed(Exception):
@@ -133,8 +150,11 @@ class Template:
 
 
 class FrameSet:
-    def __init__(self, urls, pattern, source):
+    def __init__(self, urls, pattern, source, top=0, method=None, still=""):
         self.urls, self.pattern, self.source = urls, pattern, source
+        self.top = top if 0 <= top < len(urls) else 0      # the frame the stone is shown from first
+        self.method = method or source
+        self.still = still                                 # the certificate's still image, if any
 
 
 def _count_frames(t, known=None):
@@ -191,9 +211,14 @@ def _first_working(templates):
 
 
 def _from_template(t, known, source, facts):
+    if shared_asset(t.prefix):
+        facts.append(f"pattern {t.show()} skipped: a shared site image folder, not the stone's frames")
+        return None
     n = _count_frames(t, known)
     facts.append(f"pattern {t.show()} → {n} frame(s) found")
     if n < MIN_FRAMES:
+        if n:
+            facts.append(f"pattern {t.show()} rejected: {n} frame(s) is under the {MIN_FRAMES}-frame minimum")
         return None
     return FrameSet([t.url(t.start + i) for i in range(n)], t.show(), source)
 
@@ -224,6 +249,76 @@ def video_file_from_hint(hint):
     return ""
 
 
+def _int0(v):
+    try:
+        return int(str(v).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _v360_candidates(hint):
+    """(where, {url, frame_count, top_index}) from the certificate's 360 fields."""
+    hint = hint or {}
+    c = hint.get("certificate") if isinstance(hint.get("certificate"), dict) else {}
+    out = []
+    for where, v in (("certificate.v360", c.get("v360")), ("v360", hint.get("v360"))):
+        if isinstance(v, dict):
+            out.append((where, v))
+    pv = c.get("product_videos")
+    for v in (pv if isinstance(pv, list) else [pv] if isinstance(pv, dict) else []):
+        if isinstance(v, dict) and str(v.get("type") or "360").strip().lower() in ("360", "v360"):
+            out.append(("certificate.product_videos", v))
+    return [(w, v) for w, v in out if isinstance(v.get("url"), str) and v.get("url") and v.get("frame_count") is not None]
+
+
+def still_from_hint(hint):
+    """The certificate's still image URL, if the stone data has one."""
+    c = (hint or {}).get("certificate") or {}
+    u = c.get("image") if isinstance(c, dict) else None
+    return u if isinstance(u, str) and re.match(r"https?://", u) else ""
+
+
+def _from_v360(hint, facts, method):
+    """Frames from the certificate's 360 fields: <url>/<n>.webp for n = 0 … frame_count-1."""
+    cands = _v360_candidates(hint)
+    if not cands:
+        return None
+    tried = set()
+    for where, v in cands:
+        url, fc, top = str(v.get("url") or "").strip(), _int0(v.get("frame_count")), _int0(v.get("top_index"))
+        if not re.match(r"https?://", url) or (url, fc) in tried:
+            continue
+        tried.add((url, fc))
+        if not fc or fc < MIN_FRAMES:
+            facts.append(f"{method}: {where} has {fc or 'no'} frame(s) — under the {MIN_FRAMES}-frame minimum")
+            continue
+        if fc > MAX_COUNT_SEARCH:
+            facts.append(f"{method}: {where} frame count {fc} is implausible")
+            continue
+        if shared_asset(url):
+            facts.append(f"{method}: {where} points at a shared site image folder — skipped")
+            continue
+        base = url.split("?")[0].rstrip("/")
+        partial = False
+        for ext in ("webp", "jpg", "png"):
+            first, last = f"{base}/0.{ext}", f"{base}/{fc - 1}.{ext}"
+            if not _is_image(first):
+                continue
+            if not _is_image(last):
+                partial = True
+                facts.append(f"{method}: {mask(base)}/{{n}}.{ext} — frame 0 loads but frame {fc - 1} doesn't")
+                continue
+            top = top if top is not None and 0 <= top < fc else 0
+            pattern = f"{mask(base)}/{{n}}.{ext}"
+            facts.append(f"{method}: {where} → {fc} frames, top frame {top}, pattern {pattern} "
+                         f"(frames 0 and {fc - 1} checked)")
+            return FrameSet([f"{base}/{i}.{ext}" for i in range(fc)], pattern, f"{method} ({where})",
+                            top=top, method=method, still=still_from_hint(hint))
+        if not partial:
+            facts.append(f"{method}: {where} ({mask(base)}) — no frames answered as {{n}}.webp/.jpg/.png")
+    return None
+
+
 def _from_hint(hint, facts):
     if not hint:
         return None
@@ -235,7 +330,7 @@ def _from_hint(hint, facts):
         if re.search(r"\.(jpe?g|png|webp)(\?|$)", v, re.I) and "[" in p:
             lists.setdefault(p.rsplit("[", 1)[0], []).append(v)
     for p, vs in lists.items():
-        if len(vs) >= MIN_FRAMES:
+        if len(vs) >= MIN_FRAMES and not any(shared_asset(v) for v in vs):
             facts.append(f"stone data: {len(vs)} frame URLs in '{_clean_text(p)}'")
             return FrameSet(vs, mask(vs[0]) + f" (+{len(vs) - 1} more)", "stone data (frame list)")
     counts = [int(v) for p, v in flat if isinstance(v, (int, float, str)) and str(v).isdigit()
@@ -378,7 +473,7 @@ def _from_page(url, facts, id_hint=None):
     if id_hint:
         explicit = sorted(explicit, key=lambda x: (id_hint.lower() not in x[0].prefix.lower(), -len(x[1])))
     for t, nums in explicit[:4]:
-        if len(nums) < MIN_FRAMES and not known:
+        if (len(nums) < MIN_FRAMES and not known) or shared_asset(t.prefix):
             continue
         if _is_image(t.url(t.start)):
             fs = _from_template(t, max(known or 0, len(nums)), "viewer page (numbered links)", facts)
@@ -424,11 +519,22 @@ def viewer_format(name, pattern):
 
 @viewer_format("format A (/diamond/<id>/video/<w>/<h>)", r"^/diamond/([^/]+)/video/\d+/\d+/?$")
 def _format_a(url, m, facts):
-    """Viewer pages at /diamond/<id>/video/<w>/<h>?d_id=…&c_id=…. The page's own scripts
-    say where the frames are; links mentioning the diamond's IDs are preferred."""
-    q = dict(p.split("=", 1) for p in (urlparse(url).query or "").split("&") if "=" in p)
-    id_hint = q.get("d_id") or m.group(1)
-    return _from_page(url, facts, id_hint=id_hint)
+    """Viewer pages at /diamond/<id>/video/<w>/<h>: <id> is the search API's certificate ID.
+    The page itself only loads a script app, so its 360 fields are looked up by that ID."""
+    cert_id = m.group(1)
+    if CERT_LOOKUP is None:
+        raise CaptureFailed("certificate lookup unavailable (search API not configured)")
+    try:
+        hint, reason = CERT_LOOKUP(cert_id)
+    except Exception as e:
+        hint, reason = None, f"certificate lookup error ({type(e).__name__})"
+    facts.append(f"certificate lookup: {'found 360 fields' if hint else reason}")
+    if not hint:
+        raise CaptureFailed(reason if reason.startswith("certificate") else f"certificate lookup: {reason}")
+    fs = _from_v360(hint, facts, "certificate lookup")
+    if fs is None:
+        raise CaptureFailed("certificate lookup: its 360 fields gave no usable frames")
+    return fs, ""
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
@@ -436,7 +542,11 @@ def find_frames(viewer_url, hint=None):
     """Returns (FrameSet or None, video_file_url or '', facts[list of str])."""
     facts = []
     try:
-        fs = _from_hint(hint, facts)
+        fs = _from_v360(hint, facts, "API fields")
+        # The certificate's own 360 fields are authoritative: if they fail their checks
+        # (a frame missing, under the minimum) no looser guess is made from the same data.
+        if fs is None and not _v360_candidates(hint):
+            fs = _from_hint(hint, facts)
         if fs:
             return fs, "", facts
         for name, match, fn in FORMATS:
@@ -453,12 +563,16 @@ def find_frames(viewer_url, hint=None):
         return None, "", facts
 
 
-def _pick(urls):
-    """At most MAX_FRAMES, evenly spaced around the turn."""
-    if len(urls) <= MAX_FRAMES:
-        return urls
-    step = len(urls) / MAX_FRAMES
-    return [urls[int(i * step)] for i in range(MAX_FRAMES)]
+def pick(n, top=0, limit=None):
+    """Indices of at most `limit` (MAX_FRAMES) frames out of n, evenly spaced around the turn,
+    in rotation order and always including `top`. Returns (indices, position of top)."""
+    limit = limit or MAX_FRAMES
+    top = top if 0 <= top < n else 0
+    if n <= limit:
+        return list(range(n)), top
+    step = n / limit
+    idx = sorted({(top + round(i * step)) % n for i in range(limit)})
+    return idx, idx.index(top)
 
 
 def clean_frame(data, size=None):
@@ -506,11 +620,14 @@ def _remove(sb_url, key, paths):
         pass
 
 
-def store_frames(sb_url, key, urls, facts):
-    """Downloads, cleans and uploads the frames. Returns (folder_id, count)."""
-    urls = _pick(urls)
+def store_frames(sb_url, key, urls, facts, top=0):
+    """Downloads, cleans and uploads the frames. Returns (folder_id, count, top position)."""
+    if any(shared_asset(u) for u in urls[:1] + urls[-1:]):
+        raise CaptureFailed("frames are shared site images, not the stone")
+    idx, top_pos = pick(len(urls), top)
+    urls = [urls[i] for i in idx]
     if len(urls) < MIN_FRAMES:
-        raise CaptureFailed(f"only {len(urls)} frame(s)")
+        raise CaptureFailed(f"only {len(urls)} frame(s) — under the {MIN_FRAMES}-frame minimum")
 
     def get(u):
         for attempt in range(2):
@@ -527,18 +644,22 @@ def store_frames(sb_url, key, urls, facts):
     t0 = time.time()
     with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as ex:
         raw = list(ex.map(get, urls))
-    good = [d for d in raw if d]
+    kept = [i for i, d in enumerate(raw) if d]            # positions (in rotation order) that downloaded
+    good = [raw[i] for i in kept]
     missing = len(urls) - len(good)
     facts.append(f"downloaded {len(good)}/{len(urls)} frame(s) in {time.time() - t0:.1f}s")
     if not good or missing > len(urls) * MAX_MISSING or len(good) < MIN_FRAMES:
         raise CaptureFailed(f"{missing} of {len(urls)} frames wouldn't download")
     first, size = clean_frame(good[0])
-    cleaned = [first]
-    for d in good[1:]:
+    cleaned, pos = [first], [kept[0]]
+    for i, d in zip(kept[1:], good[1:]):
         try:
             cleaned.append(clean_frame(d, size)[0])
+            pos.append(i)
         except Exception:
             pass
+    # The top frame's new number (or the nearest kept frame if it failed)
+    new_top = min(range(len(pos)), key=lambda j: abs(pos[j] - top_pos))
     if len(cleaned) < max(MIN_FRAMES, len(urls) * (1 - MAX_MISSING)):
         raise CaptureFailed("too many frames couldn't be read as images")
     folder = uuid.uuid4().hex
@@ -550,7 +671,7 @@ def store_frames(sb_url, key, urls, facts):
         raise CaptureFailed(f"frame upload failed ({next(e for e in errs if e)})")
     facts.append(f"stored {len(cleaned)} frame(s), {size[0]}×{size[1]}, "
                  f"{sum(len(c) for c in cleaned) // 1024} KB total")
-    return folder, len(cleaned)
+    return folder, len(cleaned), new_top
 
 
 def _safe_upload(sb_url, key, path, data):
@@ -581,10 +702,13 @@ def capture(sb_url, key, viewer_url, hint=None):
                 else "no frame pattern found in the viewer page"
             res = {"ok": False, "spin": None, "video": video, "facts": facts, "note": reason}
         else:
-            facts.append(f"frames: {len(fs.urls)} via {fs.source}, pattern {fs.pattern}")
-            folder, n = store_frames(sb_url, key, fs.urls, facts)
-            res = {"ok": True, "spin": {"id": folder, "n": n}, "video": video, "facts": facts,
-                   "note": f"360 captured: {n} frames (found {len(fs.urls)}; {fs.source}; pattern {fs.pattern})"}
+            facts.append(f"method: {fs.method} — {len(fs.urls)} frames via {fs.source}, pattern {fs.pattern}")
+            folder, n, top = store_frames(sb_url, key, fs.urls, facts, fs.top)
+            res = {"ok": True, "spin": {"id": folder, "n": n, "top": top}, "video": video, "facts": facts,
+                   "method": fs.method, "still": fs.still,
+                   "note": f"360 captured via {fs.method}: {n} frames"
+                           + (f" (thinned evenly from {len(fs.urls)})" if n < len(fs.urls) else "")
+                           + f", top frame {top}; pattern {fs.pattern}"}
     except CaptureFailed as e:
         facts = locals().get("facts") or []
         res = {"ok": False, "spin": None, "video": "", "facts": facts + [str(e)], "note": str(e)}

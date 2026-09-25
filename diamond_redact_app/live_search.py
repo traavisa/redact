@@ -1262,6 +1262,8 @@ def _diagnostics(d, live_stats=None):
                         + f"\n\nVideo links: {v.get('set', 0)} of {md['stones']} stone(s) — {v.get('files', 0)} direct "
                         f"video file(s), {v.get('pages', 0)} viewer page(s)"
                         + (f", e.g. `{_code(v['example'])}`" if v.get("example") else "")
+                        + "\n\nCertificate lookup by ID (fallback for other stones and pasted viewer links): "
+                        + (f"`{_code(md['cert_lookup'])}`" if md.get("cert_lookup") else "none in the schema")
                         + "\n\nValues returned:\n\n" + "\n".join(got))
 
 

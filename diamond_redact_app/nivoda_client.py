@@ -259,6 +259,8 @@ class Client:
                 return {f["name"]: f for f in t["fields"]
                         if _named(f["type"]).get("kind") in ("SCALAR", "ENUM") and not _is_list(f["type"])}
             media_sel, media_desc = _media_selection(dt, types)
+            cert_media_sel, cert_media_desc = _cert_media_selection(ct, types)
+            cert_lookup = _cert_lookup_field(root, ct.get("name") or _named(cf["type"]).get("name"))
             cs, ds = scalars(ct), scalars(dt)
             cert_extra = [f for f in FANCY_FIELDS + AS_GROWN_FIELDS if f in cs]
             for where, fs in (("diamond", ds), ("certificate", cs)):
@@ -273,11 +275,43 @@ class Client:
             cert_extra = []
         docs = {k: sanitise(v) for k, v in docs.items()}
         try:
-            media = {"sel": media_sel, "keys": _sel_keys(media_sel), "desc": [sanitise(d) for d in media_desc]}
+            media = {"sel": media_sel, "keys": _sel_keys(media_sel), "desc": [sanitise(d) for d in media_desc],
+                     "cert_sel": cert_media_sel, "cert_keys": _sel_keys(cert_media_sel),
+                     "cert_desc": [sanitise(d) for d in cert_media_desc], "cert_lookup": cert_lookup}
         except NameError:
-            media = {"sel": "", "keys": [], "desc": []}
+            media = {"sel": "", "keys": [], "desc": [], "cert_sel": "", "cert_keys": [], "cert_desc": [],
+                     "cert_lookup": None}
         return {"verified": True, "filters": filters, "cert_extra": cert_extra,
                 "count_query": count_query, "lg_flag": lg_flag, "docs": docs, "media": media}
+
+    # ── certificate lookup (360 capture fallback) ────────────────────────────
+    def certificate_media(self, cert_id):
+        """Media fields for one certificate by its ID. Returns (hint dict or None, reason)."""
+        if not re.fullmatch(r"[A-Za-z0-9-]{8,64}", str(cert_id or "")):
+            return None, "no certificate ID in the viewer link"
+        sch = self.schema()
+        media = sch.get("media") or {}
+        lk = media.get("cert_lookup")
+        if not sch.get("verified"):
+            return None, "schema not confirmed, so no certificate lookup"
+        if not lk:
+            return None, "the API has no certificate-by-ID query"
+        if not media.get("cert_sel"):
+            return None, "the API's certificate has no 360 fields"
+        if not re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*!?", lk["type"]):
+            return None, "unexpected lookup argument type"
+        q = (f"query ($v: {lk['type']}) {{ c: {lk['field']}({lk['arg']}: $v) {{ id {media['cert_sel']} }} }}")
+        try:
+            data = self._post(q, {"v": str(cert_id)}, token=self._token())
+        except _AuthError:
+            return None, "certificate lookup: sign-in refused"
+        except SourceError as e:
+            return None, f"certificate lookup failed ({sanitise(e)})"
+        c = (data or {}).get("c")
+        if not c:
+            return None, "certificate lookup: no certificate with that ID"
+        cm = {k: c.get(k) for k in media.get("cert_keys") or [] if c.get(k) not in (None, "", [], {})}
+        return ({"certificate": cm} if cm else None), ("ok" if cm else "certificate has no 360 data")
 
     # ── search ───────────────────────────────────────────────────────────────
     def search(self, query_input, max_stones=500):
@@ -292,9 +326,11 @@ class Client:
         cert_sel = " ".join(CERT_FIELDS + extra + ([lg[1]] if lg and lg[0] == "certificate" else []))
         dia_sel = "id video image availability" + (f" {lg[1]}" if lg and lg[0] == "diamond" else "")
         media = sch.get("media") or {}
-        media_on = bool(media.get("sel")) and not Client._media_off.get(self.url)
+        media_on = bool(media.get("sel") or media.get("cert_sel")) and not Client._media_off.get(self.url)
+        plain = (dia_sel, cert_sel)
         if media_on:
-            dia_sel += " " + media["sel"]
+            dia_sel += (" " + media["sel"]) if media.get("sel") else ""
+            cert_sel += (" " + media["cert_sel"]) if media.get("cert_sel") else ""
         qlit = gql_literal(query_input)
         out, offset, fetched = [], 0, 0
         flags = {"natural": 0, "lab-grown": 0, "unknown": 0} if lg else None
@@ -314,7 +350,7 @@ class Client:
                 # The extra media fields were refused: search again exactly as before without them
                 Client._media_off[self.url] = True
                 media_on = False
-                dia_sel = dia_sel.replace(" " + media["sel"], "")
+                dia_sel, cert_sel = plain
                 self._err("media fields refused; searched without them")
                 continue
             res = data.get("diamonds_by_query") or {}
@@ -331,7 +367,8 @@ class Client:
                     d = i.get("diamond") or {}
                     v = (d if lg[0] == "diamond" else (d.get("certificate") or {})).get(lg[1])
                     flags["lab-grown" if v is True else "natural" if v is False else "unknown"] += 1
-            out += [s for s in (whitelist(i, media.get("keys") if media_on else None) for i in items) if s]
+            out += [s for s in (whitelist(i, media.get("keys") if media_on else None,
+                                          media.get("cert_keys") if media_on else None) for i in items) if s]
             offset += len(items)
             # total_count is not used to stop paging: only a short page (or the cap) ends it.
             if len(items) < limit:
@@ -426,7 +463,7 @@ def _num(v):
         return None
 
 
-def whitelist(item, media_keys=None):
+def whitelist(item, media_keys=None, cert_media_keys=None):
     """Keep ONLY allowed fields. Anything else in the response is dropped here.
     `media_keys`: extra media fields (introspection-confirmed) kept under s["media"] for
     360 capture on save. They never reach a saved quote."""
@@ -463,11 +500,62 @@ def whitelist(item, media_keys=None):
     for k in FANCY_FIELDS + AS_GROWN_FIELDS:
         if k in c:
             s[k] = c.get(k)
-    if media_keys:
-        m = {k: d.get(k) for k in media_keys if d.get(k) not in (None, "", [], {})}
-        if m:
-            s["media"] = m
+    m = {k: d.get(k) for k in (media_keys or []) if d.get(k) not in (None, "", [], {})}
+    cm = {k: c.get(k) for k in (cert_media_keys or []) if c.get(k) not in (None, "", [], {})}
+    if cm:
+        m["certificate"] = cm
+    if m:
+        s["media"] = m
     return s
+
+
+# ── Certificate media: 360 frames (v360 / product_videos) and the still image ────
+CERT_MEDIA_WANTED = {"image": None, "v360": ["top_index", "frame_count", "url"],
+                     "product_videos": ["url", "type", "frame_count", "top_index"]}
+
+
+def _cert_media_selection(ct, types):
+    """Selection for the certificate's media fields, using only what the live schema has."""
+    fields = {f["name"]: f for f in ct.get("fields") or [] if not _needs_args(f)}
+    sel, desc = [], []
+    for name, subs in CERT_MEDIA_WANTED.items():
+        f = fields.get(name)
+        if not f:
+            continue
+        n = _named(f["type"])
+        if subs is None:
+            if n.get("kind") in ("SCALAR", "ENUM"):
+                sel.append(name)
+                desc.append(f"certificate.{name}: {_type_str(f['type'])}")
+            continue
+        if n.get("kind") != "OBJECT":
+            continue
+        have = {g["name"]: g for g in (types.get(n.get("name"), {}).get("fields") or [])
+                if _named(g["type"]).get("kind") in ("SCALAR", "ENUM") and not _needs_args(g)}
+        use = [x for x in subs if x in have]
+        if "url" in use and "frame_count" in use:
+            sel.append(name + " { " + " ".join(use) + " }")
+            desc.append(f"certificate.{name} ({_type_str(f['type'])}) {{ " +
+                        ", ".join(f"{x}: {_type_str(have[x]['type'])}" for x in use) + " }")
+    return " ".join(sel), desc
+
+
+def _cert_lookup_field(root, cert_type_name):
+    """A root query that returns one certificate by its ID (e.g. certificate_by_cert_id(cert_id: ID!)).
+    Returns {"field", "arg", "type"} or None."""
+    best = None
+    for f in root.get("fields") or []:
+        if _named(f["type"]).get("name") != cert_type_name or _is_list(f["type"]):
+            continue
+        req = [a for a in f.get("args") or [] if (a.get("type") or {}).get("kind") == "NON_NULL"]
+        if len(req) != 1 or _named(req[0]["type"]).get("name") not in ("ID", "String"):
+            continue
+        cand = {"field": f["name"], "arg": req[0]["name"], "type": _type_str(req[0]["type"])}
+        if f["name"] == "certificate_by_cert_id":
+            return cand
+        if best is None and "id" in req[0]["name"].lower():
+            best = cand
+    return best
 
 
 # ── Media fields (360 frames, video files, extra images) ────────────────────────
@@ -531,14 +619,20 @@ def _shape(v):
 def media_report(stones, media, verified):
     """What the stone data holds for media, for the diagnostics (sanitised)."""
     n = len(stones)
-    rep = {"schema_verified": bool(verified), "fields": list((media or {}).get("desc") or []), "stones": n}
+    lk = (media or {}).get("cert_lookup")
+    rep = {"schema_verified": bool(verified), "stones": n,
+           "fields": list((media or {}).get("desc") or []) + list((media or {}).get("cert_desc") or []),
+           "cert_lookup": f"{lk['field']}({lk['arg']}: {lk['type']})" if lk else None}
     vids = [s.get("video") for s in stones if s.get("video")]
     files = [v for v in vids if re.search(r"\.(mp4|webm|mov)(\?|$)", v, re.I)]
     rep["video"] = {"set": len(vids), "files": len(files), "pages": len(vids) - len(files),
                     "example": _shape(vids[0]) if vids else None}
     seen = {}
     for s in stones:
-        for k, v in (s.get("media") or {}).items():
+        m = dict(s.get("media") or {})
+        for k, v in (m.pop("certificate", None) or {}).items():
+            m["certificate." + k] = v
+        for k, v in m.items():
             e = seen.setdefault(k, {"count": 0, "example": _shape(v)})
             e["count"] += 1
     rep["extra"] = seen

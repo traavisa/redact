@@ -3,7 +3,7 @@
  * Frames live at https://quote.alldiamondeverything.com/media/<32-hex id>/000.jpg, 001.jpg, …
  * (captured and cleaned by the app). Nothing here loads from anywhere else.
  *
- *   Spin360.mount(el, { id, n })      one spinner in `el`
+ *   Spin360.mount(el, { id, n, top })  one spinner in `el`; `top` is the frame it starts on
  *   Spin360.mountAll(root)            every [data-spin-id][data-spin-n] inside `root`
  *
  * Drag / swipe to rotate (vertical swipes still scroll the page), arrow keys when focused,
@@ -15,6 +15,7 @@
   var MEDIA_BASE = 'https://quote.alldiamondeverything.com/media/';
   var ID_RE = /^[a-f0-9]{32}$/;
   var TURN_SECONDS = 10;       // auto-rotate: one full turn
+  var TOP_PAUSE = 1.4;         // auto-rotate rests this long on the top frame after each turn
   var DRAG_TURN = 1.25;        // a drag across 1.25× the spinner's width = one full turn
   var PARALLEL = 6;
 
@@ -65,10 +66,11 @@
     return out;
   }
 
-  function Spinner(el, id, n) {
-    this.el = el; this.id = id; this.n = n;
+  function Spinner(el, id, n, top) {
+    this.el = el; this.id = id; this.n = n; this.top = top;
+    this.turnStart = top; this.restUntil = 0;
     this.imgs = new Array(n); this.loaded = 0; this.failed = 0;
-    this.pos = 0; this.vel = 0; this.auto = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+    this.pos = top; this.vel = 0; this.auto = !matchMedia('(prefers-reduced-motion: reduce)').matches;
     this.touched = false; this.visible = true; this.started = false; this.drawn = -1;
     this.build();
   }
@@ -120,7 +122,8 @@
   Spinner.prototype.start = function () {
     if (this.started) return;
     this.started = true;
-    var self = this, queue = loadOrder(this.n), tried = new Uint8Array(this.n), active = 0;
+    // Load order starts at the top frame, so it's the first thing on screen
+    var self = this, queue = loadOrder(this.n).map(function (i) { return (i + self.top) % self.n; }), tried = new Uint8Array(this.n), active = 0;
     function next() {
       while (active < PARALLEL && queue.length) load(queue.shift());
     }
@@ -204,7 +207,13 @@
       self.raf = 0;
       if (!self.visible) return;                          // resumes when back on screen
       var ready = self.loaded + self.failed >= self.n;
-      if (self.auto && !self.touched && ready && self.loaded) self.pos += dt * self.n / TURN_SECONDS;
+      if (self.auto && !self.touched && ready && self.loaded && t >= self.restUntil) {
+        self.pos += dt * self.n / TURN_SECONDS;
+        if (self.pos >= self.turnStart + self.n) {          // back on the top frame: rest there a moment
+          self.pos = self.turnStart = self.turnStart + self.n;
+          self.restUntil = t + TOP_PAUSE * 1000;
+        }
+      }
       if (!self.dragging && Math.abs(self.vel) > 0.01) {  // a little inertia after a flick
         self.pos += self.vel * dt;
         self.vel *= Math.exp(-dt * 5);
@@ -273,13 +282,15 @@
     mount: function (el, spin) {
       if (!el || !spin || !valid(spin.id, Number(spin.n))) return null;
       injectCss();
-      return new Spinner(el, String(spin.id), Number(spin.n));
+      var n = Number(spin.n), top = Math.floor(Number(spin.top) || 0);
+      return new Spinner(el, String(spin.id), n, top >= 0 && top < n ? top : 0);
     },
     mountAll: function (root) {
       var els = (root || document).querySelectorAll('[data-spin-id][data-spin-n]'), out = [];
       for (var i = 0; i < els.length; i++) {
         if (els[i].__s360) continue;
-        var s = Spin360.mount(els[i], { id: els[i].getAttribute('data-spin-id'), n: Number(els[i].getAttribute('data-spin-n')) });
+        var s = Spin360.mount(els[i], { id: els[i].getAttribute('data-spin-id'), n: Number(els[i].getAttribute('data-spin-n')),
+          top: Number(els[i].getAttribute('data-spin-top') || 0) });
         if (s) { els[i].__s360 = s; out.push(s); }
       }
       return out;
@@ -287,7 +298,9 @@
     // HTML placeholder for a page's own markup; mountAll() fills it in
     html: function (spin) {
       if (!Spin360.valid(spin)) return '';
-      return '<div class="s360-host" data-spin-id="' + spin.id + '" data-spin-n="' + Number(spin.n) + '"></div>';
+      var top = Math.floor(Number(spin.top) || 0);
+      return '<div class="s360-host" data-spin-id="' + spin.id + '" data-spin-n="' + Number(spin.n) +
+        '" data-spin-top="' + (top >= 0 && top < spin.n ? top : 0) + '"></div>';
     },
   };
   window.Spin360 = Spin360;

@@ -11,7 +11,7 @@ const SAFE_STONE_FIELDS = [
 const MEDIA_BASE = 'https://quote.alldiamondeverything.com/media/';
 const VIEWER_LINK_BASE = 'https://video.alldiamondeverything.com/v/';
 const LEGACY_VIEWER_BASE = 'https://video.alldiamondeverything.com/?u=';
-const MEDIA_FILE_RE = /^[a-f0-9]{32}\.(jpg|png|mp4|webm)$/;
+const MEDIA_FILE_RE = /^[a-f0-9]{32}(\.(jpg|png|mp4|webm)|\/\d{3}\.jpg)$/;   // files, or one captured 360 frame
 function safeVideo(u) {
   u = String(u || '');
   if (u.startsWith(MEDIA_BASE)) return MEDIA_FILE_RE.test(u.slice(MEDIA_BASE.length)) ? u : undefined;
@@ -23,7 +23,10 @@ function safeVideo(u) {
 function safeSpin(sp) {
   if (!sp || typeof sp !== 'object') return undefined;
   const id = String(sp.id || ''), n = Number(sp.n);
-  return /^[a-f0-9]{32}$/.test(id) && Number.isInteger(n) && n >= 2 && n <= 720 ? { id, n } : undefined;
+  // Under 24 frames isn't a real 360 (early bad captures of a page's shared images): not shown
+  if (!/^[a-f0-9]{32}$/.test(id) || !Number.isInteger(n) || n < 24 || n > 720) return undefined;
+  const top = Number(sp.top);
+  return { id, n, top: Number.isInteger(top) && top >= 0 && top < n ? top : 0 };
 }
 function safeImage(u) {
   u = String(u || '');
@@ -62,7 +65,16 @@ exports.handler = async function (event) {
     SAFE_STONE_FIELDS.forEach((k) => { if (s[k] !== undefined) out[k] = s[k]; });
     if ('video_url' in out) { const v = safeVideo(out.video_url); if (v) out.video_url = v; else delete out.video_url; }
     if ('image_url' in out) { const v = safeImage(out.image_url); if (v) out.image_url = v; else delete out.image_url; }
-    if ('spin' in out) { const v = safeSpin(out.spin); if (v) { out.spin = v; delete out.video_url; } else delete out.spin; }
+    if ('spin' in out) {
+      const v = safeSpin(out.spin);
+      if (v) { out.spin = v; delete out.video_url; }
+      else {
+        delete out.spin;
+        // A bad capture: fall back to our own viewer link kept with the stone, if any
+        const ref = s.media_ref && safeVideo(s.media_ref);
+        if (ref && !out.video_url) out.video_url = ref;
+      }
+    }
     const ct = certTypeOf(s);
     if (ct) out.cert_type = ct;
     return out;

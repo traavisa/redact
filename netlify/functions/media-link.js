@@ -24,13 +24,18 @@ exports.handler = async function (event) {
   let rows;
   try {
     // Before the spin columns exist (SQL update not run yet) only vendor_url can be read
-    rows = (await lookup('vendor_url,spin_id,spin_frames')) || (await lookup('vendor_url')) || [];
+    rows = (await lookup('vendor_url,spin_id,spin_frames,spin_top')) || (await lookup('vendor_url,spin_id,spin_frames'))
+      || (await lookup('vendor_url')) || [];
   } catch (e) { return json(502, { error: 'Unavailable' }); }
   const row = rows && rows[0];
   if (!row) return json(404, { error: 'Not found' });
   // Captured 360 frames: the viewer plays our own copies and never learns the vendor URL
   const id = String(row.spin_id || ''), n = Number(row.spin_frames);
-  if (/^[a-f0-9]{32}$/.test(id) && Number.isInteger(n) && n >= 2 && n <= 720) return json(200, { spin: { id, n } });
+  // Early bad captures (under 24 frames) aren't used; the viewer falls back to the page until redone
+  if (/^[a-f0-9]{32}$/.test(id) && Number.isInteger(n) && n >= 24 && n <= 720) {
+    const top = Number(row.spin_top);
+    return json(200, { spin: { id, n, top: Number.isInteger(top) && top >= 0 && top < n ? top : 0 } });
+  }
   const url = row.vendor_url;
   if (!url || !/^https?:\/\//i.test(url)) return json(404, { error: 'Not found' });
   return json(200, { url });

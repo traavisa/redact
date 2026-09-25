@@ -700,7 +700,7 @@ function render(s, certTypes, isExpired) {
 // or older ?u= links) open in the viewer frame. Nothing here ever points at a vendor.
 const MEDIA_BASE = 'https://quote.alldiamondeverything.com/media/';
 const VIEWER_LINK_BASE = 'https://video.alldiamondeverything.com/v/';
-const MEDIA_FILE_RE = /^[a-f0-9]{32}\.(jpg|png|mp4|webm)$/;
+const MEDIA_FILE_RE = /^[a-f0-9]{32}(\.(jpg|png|mp4|webm)|\/\d{3}\.jpg)$/;   // files, or one captured 360 frame (<folder>/NNN.jpg)
 function mediaFile(u) {
   u = String(u || '');
   if (!u.startsWith(MEDIA_BASE)) return '';
@@ -710,12 +710,12 @@ function mediaFile(u) {
 // Captured 360 frames (our own copies, played by spin360.js): { id: <32 hex>, n: <frames> }
 function spinOf(stone) {
   const sp = stone && stone.spin;
-  return sp && /^[a-f0-9]{32}$/.test(String(sp.id)) && Number.isInteger(Number(sp.n)) && sp.n >= 2 && sp.n <= 720
-    ? { id: String(sp.id), n: Number(sp.n) } : null;
+  return sp && /^[a-f0-9]{32}$/.test(String(sp.id)) && Number.isInteger(Number(sp.n)) && sp.n >= 24 && sp.n <= 720
+    ? { id: String(sp.id), n: Number(sp.n), top: Number.isInteger(sp.top) && sp.top >= 0 && sp.top < sp.n ? sp.top : 0 } : null;
 }
 function spinHtml(sp) {
   if (window.Spin360) return Spin360.html(sp);
-  return `<img class="media-img" src="${MEDIA_BASE + sp.id}/000.jpg" alt="">`;   // script didn't load: first frame
+  return `<img class="media-img" src="${MEDIA_BASE + sp.id}/${String(sp.top).padStart(3, '0')}.jpg" alt="">`;   // script didn't load: top frame
 }
 function mediaHtml(stone) {
   const sp = spinOf(stone);
@@ -1005,7 +1005,7 @@ function pcPayload() {
       // Only our own media addresses go into the customer link, never a vendor's.
       const vu = String(st.video_url || '');
       const vf = mediaFile(vu), imf = mediaFile(st.image_url), sp = spinOf(st);
-      if (sp) o.x = [sp.id, sp.n];
+      if (sp) o.x = [sp.id, sp.n, sp.top];
       else if (vf) o.m = vf;
       else if (vu.startsWith(VIEWER_LINK_BASE) && /^[a-z2-9]{8,32}$/.test(vu.slice(VIEWER_LINK_BASE.length))) o.w = vu.slice(VIEWER_LINK_BASE.length);
       else if (vu.startsWith(PC_VIEWER)) o.U = vu;            // older quotes: link passed on unchanged

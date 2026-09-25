@@ -556,6 +556,8 @@ def rehost_media(stones_payload, qid=None):
     for s, hint in zip(stones_payload, hints):
         if hint and not s.get("video_url"):
             s["video_url"] = spin_capture.video_file_from_hint(hint)   # a direct video file, if the API has one
+        if spin_capture.still_from_hint(hint):
+            s["image_url"] = spin_capture.still_from_hint(hint)        # the certificate's still is the main image
     items = [(s.get("video_url") or "", s.get("image_url") or "") for s in stones_payload]
     try:
         pairs = quote_media.process_stones(SUPABASE_URL, SUPABASE_KEY, items)
@@ -581,6 +583,23 @@ def rehost_media(stones_payload, qid=None):
     except Exception:
         pass
     return notes, jobs
+
+_LOOKUP_STATE = {}   # sign-in token cache for background certificate lookups
+
+def cert_lookup(cert_id):
+    """Certificate 360 fields by certificate ID from the search API (360 capture fallback for
+    stones without them and for pasted viewer links). Returns (hint or None, reason)."""
+    import nivoda_client
+    url, user, pw = (get_setting(k) for k in ("NIVODA_API_URL", "NIVODA_USERNAME", "NIVODA_PASSWORD"))
+    if not (url and user and pw):
+        return None, "search API not configured"
+    try:
+        return nivoda_client.Client(url, user, pw, _LOOKUP_STATE).certificate_media(cert_id)
+    except nivoda_client.SourceError as e:
+        return None, nivoda_client.sanitise(e)
+
+import spin_capture as _spin_capture
+_spin_capture.CERT_LOOKUP = cert_lookup
 
 def save_quote(client, stones_payload, expiry_days):
     """Writes one quote row to Supabase and returns its link, or None on failure.
@@ -1012,10 +1031,12 @@ with tab2:
     _up = spin_jobs.upgrade_status()
     _todo = spin_jobs.upgradable(qhistory)
     if _todo or _up["running"] or _up["results"]:
-        with st.expander(f"360 upgrade — {len(_todo)} stone(s) in recent quotes still use a viewer link"
+        with st.expander(f"360 upgrade — {len(_todo)} stone(s) in recent quotes need capture "
+                         "(still on a viewer link, or a bad earlier capture)"
                          if not _up["running"] else f"360 upgrade — running ({_up['done']}/{_up['total']})",
                          expanded=_up["running"]):
-            st.caption("Captures each stone's 360 viewer as our own frames and updates the saved quote, "
+            st.caption("Captures each stone's 360 viewer as our own frames and updates the saved quote "
+                       f"(captures under {spin_jobs.sc.MIN_FRAMES} frames are redone), "
                        "so the quote page shows our spinner instead of loading the viewer page. "
                        "Expired quotes are skipped. Runs in the background.")
             if _up["running"]:

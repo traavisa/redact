@@ -77,39 +77,73 @@ def vendor_url_for(sb_url, key, link):
     return ""
 
 
-def known_spin(sb_url, key, vendor_url):
-    """Frames already captured for this vendor URL (from any earlier quote), or None."""
+def _spin_row(row):
     try:
-        r = requests.get(f"{sb_url}/rest/v1/media_links", params={
-            "vendor_url": f"eq.{vendor_url}", "spin_id": "not.is.null", "select": "spin_id,spin_frames",
-            "limit": "1"}, headers=_h(key), timeout=10)
-        rows = r.json() if r.status_code == 200 else []
-        if rows and rows[0].get("spin_id") and int(rows[0].get("spin_frames") or 0) >= sc.MIN_FRAMES:
-            return {"id": rows[0]["spin_id"], "n": int(rows[0]["spin_frames"])}
-    except Exception:
-        pass
+        n = int(row.get("spin_frames") or 0)
+        top = int(row.get("spin_top") or 0)
+    except (TypeError, ValueError):
+        return None
+    if row.get("spin_id") and n >= sc.MIN_FRAMES:          # older bad captures (under the minimum) are ignored
+        return {"id": row["spin_id"], "n": n, "top": top if 0 <= top < n else 0}
     return None
+
+
+def known_spin(sb_url, key, vendor_url):
+    """Good frames already captured for this vendor URL (from any earlier quote), or None."""
+    for cols in ("spin_id,spin_frames,spin_top", "spin_id,spin_frames"):
+        try:
+            r = requests.get(f"{sb_url}/rest/v1/media_links", params={
+                "vendor_url": f"eq.{vendor_url}", "spin_id": "not.is.null", "select": cols},
+                headers=_h(key), timeout=10)
+            if r.status_code != 200:
+                continue
+            for row in r.json():
+                sp = _spin_row(row)
+                if sp:
+                    return sp
+            return None
+        except Exception:
+            return None
+    return None
+
+
+def vendor_url_for_spin(sb_url, key, spin_id):
+    """The viewer a stored capture came from (media_links row that holds it), or ''."""
+    try:
+        r = requests.get(f"{sb_url}/rest/v1/media_links", params={"spin_id": f"eq.{spin_id}", "select": "vendor_url",
+                                                                 "limit": "1"}, headers=_h(key), timeout=10)
+        rows = r.json() if r.status_code == 200 else []
+        return rows[0]["vendor_url"] if rows else ""
+    except Exception:
+        return ""
 
 
 def record_spin(sb_url, key, vendor_url, spin):
     """Stores the frames on every media_links row for this vendor URL (so its /v/ links
     show our spinner). Returns False if the table has no spin columns yet (SQL not run)."""
-    try:
-        r = requests.patch(f"{sb_url}/rest/v1/media_links", params={"vendor_url": f"eq.{vendor_url}"},
-                           headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=minimal"},
-                           json={"spin_id": spin["id"], "spin_frames": spin["n"]}, timeout=10)
-        return r.status_code in (200, 204)
-    except Exception:
-        return False
+    body = {"spin_id": spin["id"], "spin_frames": spin["n"], "spin_top": spin.get("top", 0)}
+    for attempt in (body, {k: v for k, v in body.items() if k != "spin_top"}):   # spin_top: newer SQL
+        try:
+            r = requests.patch(f"{sb_url}/rest/v1/media_links", params={"vendor_url": f"eq.{vendor_url}"},
+                               headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=minimal"},
+                               json=attempt, timeout=10)
+            if r.status_code in (200, 204):
+                return True
+        except Exception:
+            return False
+    return False
 
 
 def capture_one(sb_url, key, vendor_url, hint=None):
     """Capture with the database cache in front. Returns the spin_capture result dict,
-    plus 'mp4' = our hosted video URL when a direct video file was found and copied."""
+    plus 'mp4' = our hosted video URL when a direct video file was found and copied, and
+    'still' = our hosted copy of the certificate's still image when there is one."""
     spin = known_spin(sb_url, key, vendor_url)
     if spin:
-        return {"ok": True, "spin": spin, "note": f"360 frames reused from an earlier capture ({spin['n']} frames)",
-                "facts": ["frames already captured for this viewer"], "video": ""}
+        res = {"ok": True, "spin": spin, "note": f"360 frames reused from an earlier capture ({spin['n']} frames)",
+               "facts": ["frames already captured for this viewer"], "video": ""}
+        still = sc.still_from_hint(hint)
+        return _host_still(sb_url, key, res, still) if still else res
     # 1. A direct video file in the stone data beats frames
     mp4 = sc.video_file_from_hint(hint)
     if mp4:
@@ -117,7 +151,7 @@ def capture_one(sb_url, key, vendor_url, hint=None):
         if v["how"] == "hosted":
             return {"ok": True, "spin": None, "mp4": v["url"], "note": "direct video file found in the stone data — copied",
                     "facts": [f"video file {sc.mask(mp4)}"], "video": mp4}
-    res = sc.capture(sb_url, key, vendor_url, hint)
+    res = dict(sc.capture(sb_url, key, vendor_url, hint))
     # 2. A direct video file referenced by the viewer page
     if res.get("video"):
         v = qm.process(sb_url, key, res["video"], "video")
@@ -127,20 +161,54 @@ def capture_one(sb_url, key, vendor_url, hint=None):
     if res["ok"]:
         if not record_spin(sb_url, key, vendor_url, res["spin"]):
             res["facts"] = res["facts"] + ["media_links has no spin columns yet (run the SQL update)"]
+        if res.get("still"):
+            res = _host_still(sb_url, key, res, res["still"])
+    if not str(res.get("still") or "").startswith(qm.MEDIA_BASE):
+        res.pop("still", None)                              # never keep a vendor address
+    return res
+
+
+def _host_still(sb_url, key, res, url):
+    """Re-hosts the certificate's still image (our /media/ copy goes in res['still'])."""
+    v = qm.process(sb_url, key, url, "image")
+    res = dict(res)
+    if v.get("how") == "hosted":
+        res["still"] = v["url"]
+        res["facts"] = list(res.get("facts") or []) + ["certificate still image copied"]
+    else:
+        res.pop("still", None)
+        res["facts"] = list(res.get("facts") or []) + [f"certificate still image not copied ({v.get('note') or 'unknown'})"]
     return res
 
 
 def apply(stone, res):
-    """Puts a successful result on a stone dict (in place). Returns True if changed."""
+    """Puts a successful result on a stone dict (in place). Returns True if changed.
+    The stone keeps our own /v/ link in media_ref (never served) so it can be redone later."""
     if res.get("mp4"):
         stone["video_url"] = res["mp4"]
         stone.pop("spin", None)
         return True
     if res.get("ok") and res.get("spin"):
-        stone["spin"] = {"id": res["spin"]["id"], "n": int(res["spin"]["n"])}
+        sp = res["spin"]
+        n = int(sp["n"])
+        top = int(sp.get("top") or 0)
+        prev = str(stone.get("video_url") or "")
+        if token_of(prev) or prev.startswith(LEGACY_VIEWER):
+            stone["media_ref"] = prev
+        stone["spin"] = {"id": sp["id"], "n": n, "top": top if 0 <= top < n else 0}
         stone["video_url"] = ""
+        still = str(res.get("still") or "")
+        if still.startswith(qm.MEDIA_BASE):
+            stone["image_url"] = still                      # the certificate's own still image
+        elif not stone.get("image_url") or _is_frame(stone.get("image_url")):
+            stone["image_url"] = f"{qm.MEDIA_BASE}{sp['id']}/{stone['spin']['top']:03d}.jpg"   # the top frame
         return True
     return False
+
+
+def _is_frame(u):
+    import re
+    return bool(re.fullmatch(re.escape(qm.MEDIA_BASE) + r"[a-f0-9]{32}/\d{3}\.jpg", str(u or "")))
 
 
 # ── Save-time flow ────────────────────────────────────────────────────────────
@@ -232,9 +300,10 @@ def _qlock(qid):
         return _quote_locks.setdefault(qid, threading.Lock())
 
 
-def patch_stone(sb_url, key, qid, index, link_saved, res):
+def patch_stone(sb_url, key, qid, index, link_saved, res, expect_spin=None):
     """Read-modify-write of one stone in a saved quote. Only changes the stone if it still
-    has the media we saved (so a manual edit isn't overwritten)."""
+    has the media we saved (so a manual edit isn't overwritten): the same video link, or,
+    when redoing a bad capture, the same frames folder."""
     with _qlock(qid):
         try:
             r = requests.get(f"{sb_url}/rest/v1/quotes", params={"id": f"eq.{qid}", "select": "stones", "limit": "1"},
@@ -243,7 +312,13 @@ def patch_stone(sb_url, key, qid, index, link_saved, res):
             if not rows:
                 return False
             stones = rows[0].get("stones") or []
-            if index >= len(stones) or (stones[index].get("video_url") or "") != (link_saved or ""):
+            if index >= len(stones):
+                return False
+            cur = stones[index]
+            if expect_spin:
+                if (cur.get("spin") or {}).get("id") != expect_spin:
+                    return False
+            elif (cur.get("video_url") or "") != (link_saved or ""):
                 return False
             if not apply(stones[index], res):
                 return False
@@ -256,8 +331,20 @@ def patch_stone(sb_url, key, qid, index, link_saved, res):
 
 
 # ── Re-processing existing quotes ─────────────────────────────────────────────
+def bad_spin(stone):
+    """A stored capture that isn't a real 360 (e.g. the 11 shared page images of an early build)."""
+    sp = stone.get("spin")
+    if not isinstance(sp, dict) or not sp.get("id"):
+        return False
+    try:
+        return int(sp.get("n") or 0) < sc.MIN_FRAMES
+    except (TypeError, ValueError):
+        return True
+
+
 def upgradable(quotes):
-    """[(quote_id, index, label, link)] for stones still on a viewer link, in unexpired quotes."""
+    """[(quote_id, index, label, link, bad_spin_id)] for stones in unexpired quotes that still
+    use a viewer link, or whose earlier capture is bad (under the frame minimum)."""
     now = datetime.datetime.now(datetime.UTC)
     out = []
     for q in quotes or []:
@@ -271,10 +358,12 @@ def upgradable(quotes):
             pass
         for i, s in enumerate(q.get("stones") or []):
             v = str(s.get("video_url") or "")
-            if s.get("spin") or not (token_of(v) or v.startswith(LEGACY_VIEWER)):
-                continue
             label = f"{q.get('client') or 'No client'} · ···{s.get('cert_last4') or i + 1}"
-            out.append((q["id"], i, label, v))
+            if bad_spin(s):
+                out.append((q["id"], i, label + f" (redo: bad {s['spin'].get('n')}-frame capture)",
+                            str(s.get("media_ref") or ""), s["spin"]["id"]))
+            elif not s.get("spin") and (token_of(v) or v.startswith(LEGACY_VIEWER)):
+                out.append((q["id"], i, label, v, None))
     return out
 
 
@@ -292,15 +381,17 @@ def start_upgrade(sb_url, key, quotes):
 
 def _upgrade(sb_url, key, items):
     def one(item):
-        qid, i, label, link = item
-        vendor = vendor_url_for(sb_url, key, link)
+        qid, i, label, link, bad = item
+        vendor = vendor_url_for(sb_url, key, link) if link else ""
+        if not vendor and bad:
+            vendor = vendor_url_for_spin(sb_url, key, bad)
         if not vendor:
-            res = {"ok": False, "note": "viewer link not found in the database", "facts": []}
+            res = {"ok": False, "note": "original viewer link not found in the database", "facts": []}
         elif qm.to_embed(vendor) != vendor or "youtube" in vendor:
             res = {"ok": False, "note": "a YouTube video, not a 360 viewer — left as is", "facts": []}
         else:
             res = capture_one(sb_url, key, vendor)
-            if res.get("ok") and not patch_stone(sb_url, key, qid, i, link, res):
+            if res.get("ok") and not patch_stone(sb_url, key, qid, i, link, res, expect_spin=bad):
                 res = {**res, "ok": False, "note": res["note"] + " — but the quote couldn't be updated"}
         with _lock:
             UPGRADE["done"] += 1

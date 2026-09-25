@@ -306,7 +306,7 @@ const STORE_NAME = null;
 const VIEWER_BASE = 'https://video.alldiamondeverything.com/?u=';
 const VIEWER_LINK_BASE = 'https://video.alldiamondeverything.com/v/';
 const MEDIA_BASE = 'https://quote.alldiamondeverything.com/media/';
-const MEDIA_FILE_RE = /^[a-f0-9]{32}\.(jpg|png|mp4|webm)$/;
+const MEDIA_FILE_RE = /^[a-f0-9]{32}(\.(jpg|png|mp4|webm)|\/\d{3}\.jpg)$/;   // files, or one captured 360 frame (<folder>/NNN.jpg)
 const PDF_BASE = 'https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/certificates/';
 const MOBILE_PDF = window.matchMedia('(max-width: 680px)').matches;
 pdfjsLib.GlobalWorkerOptions.workerSrc =
@@ -376,12 +376,12 @@ function videoUrl(st) {
 // Captured 360 frames (our own copies, played by spin360.js): x = [<32 hex id>, <frames>]
 function spinOf(st) {
   const x = st.x;
-  return Array.isArray(x) && /^[a-f0-9]{32}$/.test(String(x[0])) && Number.isInteger(x[1]) && x[1] >= 2 && x[1] <= 720
-    ? { id: String(x[0]), n: x[1] } : null;
+  return Array.isArray(x) && /^[a-f0-9]{32}$/.test(String(x[0])) && Number.isInteger(x[1]) && x[1] >= 24 && x[1] <= 720
+    ? { id: String(x[0]), n: x[1], top: Number.isInteger(x[2]) && x[2] >= 0 && x[2] < x[1] ? x[2] : 0 } : null;
 }
 function mediaHtml(st) {
   const sp = spinOf(st);
-  if (sp) return window.Spin360 ? Spin360.html(sp) : `<img src="${MEDIA_BASE + sp.id}/000.jpg" alt="">`;
+  if (sp) return window.Spin360 ? Spin360.html(sp) : `<img src="${MEDIA_BASE + sp.id}/${String(sp.top).padStart(3, '0')}.jpg" alt="">`;
   const m = mediaFile(st.m), im = mediaFile(st.i);
   const img = /\.(jpg|png)$/.test(im) ? MEDIA_BASE + im : '';
   if (/\.(mp4|webm)$/.test(m)) {
