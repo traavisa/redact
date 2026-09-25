@@ -1,0 +1,19 @@
+# Render Blueprint for the Streamlit app (diamond_redact_app). The Netlify site is unaffected.
+services:
+  - type: web
+    name: diamond-tools
+    runtime: python
+    plan: starter
+    region: oregon
+    rootDir: diamond_redact_app
+    branch: main
+    autoDeploy: true
+    buildCommand: pip install -r requirements.txt
+    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0 --server.headless true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.8
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: APP_PASSWORD
+        sync: false

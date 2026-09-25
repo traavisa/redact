@@ -4,6 +4,9 @@ import zipfile
 import base64
 import datetime
 import random
+import os
+import hmac
+import time
 import requests
 from pathlib import Path
 from PIL import Image
@@ -68,14 +71,66 @@ CLIENT_ORDER = ["Pure Carbon Group", "Nash Jewellers", "NFR", "Cavalier", "Foe &
 VIEWER_BASE   = "https://video.alldiamondeverything.com/?u="
 QUOTE_BASE    = "https://quote.alldiamondeverything.com"
 SUPABASE_URL  = "https://srlbevzrkovruyerixdi.supabase.co"
-SUPABASE_ANON = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNybGJldnpya292cnV5ZXJpeGRpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3Nzg4NTk0NjQsImV4cCI6MjA5NDQzNTQ2NH0.wB8eSR-MClr9CLwj8V998aJbCNAVlw2wK9PppB_DnIA"
-# Server-side key for the database (Streamlit Cloud → App settings → Secrets:
-#   SUPABASE_SERVICE_KEY = "…service_role key from Supabase → Project Settings → API…"
-# It never reaches a browser. Falls back to the public key until the secret is added.
-try:
-    SUPABASE_KEY = st.secrets.get("SUPABASE_SERVICE_KEY", "") or SUPABASE_ANON
-except Exception:
-    SUPABASE_KEY = SUPABASE_ANON
+# ── Settings: environment variable first (Render), then st.secrets (Streamlit Cloud) ──
+def get_setting(name):
+    val = os.environ.get(name, "").strip()
+    if val:
+        return val
+    try:
+        return str(st.secrets.get(name, "") or "").strip()
+    except Exception:
+        # No secrets file (e.g. on Render) — st.secrets raises instead of returning empty
+        return ""
+
+APP_PASSWORD = get_setting("APP_PASSWORD")
+# Server-side database key (service_role key from Supabase → Project Settings → API).
+# It never reaches a browser. There is no fallback: the database only accepts this key.
+SUPABASE_KEY = get_setting("SUPABASE_SERVICE_KEY")
+
+# ── Password screen ───────────────────────────────────────────────────────────
+LOGIN_CSS = """
+<style>
+.stApp { background: #0e0e0e !important; }
+.stApp, .stApp p, .stApp label, .stApp h1, .stApp h2, .stApp h3 { color: #e8e8e8 !important; }
+.block-container { max-width: 380px !important; padding-top: 12vh !important; }
+header[data-testid="stHeader"] { background: transparent !important; }
+.stTextInput input { background: #1a1a1a !important; color: #f2f2f2 !important; border: 1px solid #333 !important; }
+div[data-testid="stForm"] { border: 1px solid #222 !important; border-radius: 12px !important; background: #141414 !important; }
+div[data-testid="stFormSubmitButton"] button { width: 100%; background: #c9a84c !important; border-color: #c9a84c !important; color: #111 !important; font-weight: 600 !important; }
+.login-title { font-size: 1.25rem; font-weight: 600; text-align: center; margin-bottom: 4px; color: #f2f2f2; }
+.login-sub { font-size: 0.72rem; letter-spacing: 0.09em; text-transform: uppercase; text-align: center; opacity: 0.45; margin-bottom: 18px; color: #f2f2f2; }
+</style>
+"""
+
+def require_login():
+    if not APP_PASSWORD:
+        st.markdown(LOGIN_CSS, unsafe_allow_html=True)
+        st.markdown('<div class="login-title">Diamond Tools</div>', unsafe_allow_html=True)
+        st.error("Locked: password not configured. Add APP_PASSWORD to the app's environment "
+                 "variables (Render) or Secrets (Streamlit Cloud).")
+        st.stop()
+    if st.session_state.get("authed"):
+        return
+    st.markdown(LOGIN_CSS, unsafe_allow_html=True)
+    st.markdown('<div class="login-title">Diamond Tools</div>'
+                '<div class="login-sub">Pure Carbon Group</div>', unsafe_allow_html=True)
+    with st.form("login", clear_on_submit=True):
+        pw = st.text_input("Password", type="password")
+        submitted = st.form_submit_button("Log in")
+    if submitted:
+        if hmac.compare_digest(pw.encode("utf-8"), APP_PASSWORD.encode("utf-8")):
+            st.session_state.authed = True
+            st.rerun()
+        time.sleep(1)  # slow down guessing
+        st.error("Incorrect password.")
+    st.stop()
+
+require_login()
+
+if not SUPABASE_KEY:
+    st.error("Database key missing: add SUPABASE_SERVICE_KEY to the app's environment variables (Render) "
+             "or Secrets (Streamlit Cloud). The app can't load or save anything without it.")
+    st.stop()
 
 
 # ── Cert zone definitions ─────────────────────────────────────────────────────
@@ -660,7 +715,9 @@ for k,v in [("cert_type","IGI"),("sel_logo","Pure Carbon Group"),("upkey",0),
     if k not in st.session_state: st.session_state[k]=v
 
 # ── Header ────────────────────────────────────────────────────────────────────
-st.markdown(f"""
+_head_col, _logout_col = st.columns([6, 1])
+with _head_col:
+    st.markdown(f"""
 <div class="pcg-header">
   <img class="pcg-logo" src="data:image/png;base64,{CLIENT_Pure_Carbon_Group_B64}"/>
   <div>
@@ -668,10 +725,12 @@ st.markdown(f"""
     <div class="pcg-sub">Pure Carbon Group</div>
   </div>
 </div>""", unsafe_allow_html=True)
-
-if SUPABASE_KEY == SUPABASE_ANON:
-    st.warning("Database key not set: add SUPABASE_SERVICE_KEY in Streamlit → App settings → Secrets. "
-               "Until then the app uses the public key, and once the database is locked it can't save or load quotes.")
+with _logout_col:
+    st.markdown('<style>.st-key-logout button { min-height: 0 !important; padding: 3px 10px !important; margin-top: 6px; }'
+                '.st-key-logout button p { font-size: 12px !important; }</style>', unsafe_allow_html=True)
+    if st.button("Log out", type="primary", key="logout"):
+        st.session_state.authed = False
+        st.rerun()
 
 tab2, tab1 = st.tabs(["  \U0001f517  Create quote  ", "  \U0001f48e  Redact certificate  "])
 
