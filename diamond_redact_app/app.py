@@ -732,9 +732,9 @@ with _logout_col:
         st.session_state.authed = False
         st.rerun()
 
-# Single page: Create quote. (The separate "Redact certificate" tab was retired;
+# Tabs: Create quote, Live Search. (The separate "Redact certificate" tab was retired;
 # the quote flow still redacts each certificate automatically.)
-tab2 = st.container()
+tab2, tab_ls = st.tabs(["Create quote", "Live Search"])
 
 # ═══════════════════════════════════════════════════
 # TAB 2 — CREATE QUOTE
@@ -1010,3 +1010,15 @@ with tab2:
                         render_quote_row(q)
     else:
         st.caption("No quotes created yet.")
+
+# ═══════════════════════════════════════════════════
+# TAB — LIVE SEARCH
+# ═══════════════════════════════════════════════════
+with tab_ls:
+    import live_search
+    live_search.render({
+        "get_setting": get_setting,
+        "save_quote": save_quote,
+        "add_history": add_history,
+        "client_selector": client_selector,
+    })
