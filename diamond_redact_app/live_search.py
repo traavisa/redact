@@ -1161,6 +1161,7 @@ def _build_diag(cd, q, plan, retry, schema, error, res, stats, sample_stone, rat
         "schema_docs": dict(schema.get("docs") or {}),
         "labgrown_flag_field": ".".join(schema["lg_flag"]) if schema.get("lg_flag") else None,
         "labgrown_flags": cd.get("labgrown_flags"),
+        "media": cd.get("media"),
     }
 
 
@@ -1248,6 +1249,20 @@ def _diagnostics(d, live_stats=None):
         else:
             lines.append("- No lab-grown flag field in the stone data to cross-check the type filter.")
         st.markdown("**6. What the schema says about price / totals / type:**\n\n" + "\n".join(lines))
+
+        md = d.get("media")
+        if md:
+            v = md.get("video") or {}
+            lines = [f"- `{_code(f)}`" for f in md.get("fields") or []] or [
+                "- none found" if md.get("schema_verified") else "- schema not confirmed, so no extra fields requested"]
+            got = [f"- `{_code(k)}`: set on {e['count']} of {md['stones']} stone(s), e.g. `{_code(e['example'])}`"
+                   for k, e in (md.get("extra") or {}).items()] or ["- no extra media values on these stones"]
+            st.markdown("**7. Media in the stone data** (for 360 capture; hosts masked):\n\n"
+                        "Media fields in the schema:\n\n" + "\n".join(lines)
+                        + f"\n\nVideo links: {v.get('set', 0)} of {md['stones']} stone(s) — {v.get('files', 0)} direct "
+                        f"video file(s), {v.get('pages', 0)} viewer page(s)"
+                        + (f", e.g. `{_code(v['example'])}`" if v.get("example") else "")
+                        + "\n\nValues returned:\n\n" + "\n".join(got))
 
 
 def _sort(rows, how, crit):
@@ -1533,6 +1548,7 @@ def _quote_payload(s, show_price):
         "price_type":    "stone",
         "cert_data":     {k: v for k, v in cert_data.items() if v},
         "ls_ref":        s["sid"],   # internal only; the share page's server strips unknown fields
+        "_media":        s.get("media") or None,   # 360/video fields for capture; removed before saving
     }
 
 

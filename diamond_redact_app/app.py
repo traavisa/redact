@@ -543,47 +543,87 @@ def bulk_parse(uploaded, kind_choice="Auto-detect"):
             "filename": uploaded.name}
 
 
-def rehost_media(stones_payload):
+def rehost_media(stones_payload, qid=None):
     """Replaces every stone's image/video link, in place, with our own /media/ copy, an
     opaque /v/ viewer link, or nothing (see quote_media.py). Vendor links are never saved.
-    Returns short notes for anything that couldn't be copied. Never raises."""
-    import quote_media
+    Stones whose video is a 360 viewer page are then captured as our own frames
+    (spin_capture.py) for up to spin_jobs.SAVE_BUDGET seconds; slower ones keep the /v/
+    link for now and are finished after saving. Returns (notes, jobs). Never raises."""
+    import quote_media, spin_jobs
     notes = []
+    import spin_capture
+    hints = [s.pop("_media", None) for s in stones_payload]      # search API media fields, never saved
+    for s, hint in zip(stones_payload, hints):
+        if hint and not s.get("video_url"):
+            s["video_url"] = spin_capture.video_file_from_hint(hint)   # a direct video file, if the API has one
     items = [(s.get("video_url") or "", s.get("image_url") or "") for s in stones_payload]
     try:
         pairs = quote_media.process_stones(SUPABASE_URL, SUPABASE_KEY, items)
     except Exception:
         pairs = [({"url": "", "note": "video couldn't be saved — left out" if v else ""},
                   {"url": "", "note": "image couldn't be saved — left out" if i else ""}) for v, i in items]
-    for n, (s, (vid, img)) in enumerate(zip(stones_payload, pairs), 1):
+    jobs = spin_jobs.SaveJobs(SUPABASE_URL, SUPABASE_KEY, qid or "")
+    for n, (s, (vid, img), hint) in enumerate(zip(stones_payload, pairs, hints), 1):
         s["video_url"] = vid["url"]
         if img["url"]:
             s["image_url"] = img["url"]
         else:
             s.pop("image_url", None)
         label = f"···{s['cert_last4']}" if s.get("cert_last4") else f"Diamond {n}"
-        notes += quote_media.notes_for(label, (vid, img))
-    return notes
+        src = vid.get("src") or ""
+        if vid.get("how") == "viewer" and src and "youtube" not in src and "too large" not in vid.get("note", ""):
+            jobs.start(n - 1, label, src, vid["url"], hint)   # its note comes from the capture below
+            notes += quote_media.notes_for(label, ({}, img))
+        else:
+            notes += quote_media.notes_for(label, (vid, img))
+    try:
+        notes += jobs.wait(stones_payload)
+    except Exception:
+        pass
+    return notes, jobs
 
 def save_quote(client, stones_payload, expiry_days):
     """Writes one quote row to Supabase and returns its link, or None on failure.
     Shared by the manual flow, the spreadsheet (bulk) flow and Live Search.
-    Media is re-hosted first; notes about media left out go to st.session_state.media_notes."""
-    st.session_state.media_notes = rehost_media(stones_payload)
+    Media is re-hosted first; notes about media go to st.session_state.media_notes and
+    360 capture progress to st.session_state.capture_qid (see show_media_notes)."""
     qid  = gen_id()
+    notes, jobs = rehost_media(stones_payload, qid)
+    st.session_state.media_notes = notes
+    st.session_state.capture_qid = qid if jobs.jobs else None
     exp  = (datetime.datetime.utcnow()+datetime.timedelta(days=expiry_days)).isoformat()+"Z"
     body = {"id":qid,"client":client,"stones":stones_payload,"expires_at":exp}
-    if not sb_insert("quotes", body):
+    ok = sb_insert("quotes", body)
+    jobs.finish(ok)
+    if not ok:
         return None
     load_quote_history.clear()
     return shorten(f"{QUOTE_BASE}/q/{qid}")
 
 def show_media_notes():
-    """Small note under a new quote link when some media couldn't be copied."""
+    """Small note under a new quote link: media handled differently, and what 360 capture
+    found for each stone (frame count and pattern, or why it failed)."""
     notes = st.session_state.get("media_notes") or []
     if notes:
         st.caption("Media note — the quote was saved; these items were handled differently:\n\n"
                    + "\n".join(f"- {n}" for n in notes))
+    qid = st.session_state.get("capture_qid")
+    if qid:
+        import spin_jobs
+        stat = spin_jobs.status(qid)
+        if stat:
+            with st.expander("360 capture status — details for each stone", expanded=False):
+                for label, v in stat.items():
+                    st.markdown(f"**{_md(label)}** ({v['at']} UTC): {_md(v['note'])}")
+                    if v.get("facts"):
+                        st.code("\n".join(v["facts"]), language=None)
+                if any("capturing" in v["note"] for v in stat.values()):
+                    st.caption("Still capturing — the saved quote updates itself when done.")
+                if st.button("Refresh capture status", key=f"cap_refresh_{qid}"):
+                    st.rerun()
+
+def _md(t):
+    return str(t).replace("*", "\\*").replace("_", "\\_").replace("<", "&lt;")
 
 def bulk_stone_payload(s, currency, price_type):
     """Spreadsheet stone → the same stone dict the manual flow stores.
@@ -966,6 +1006,38 @@ with tab2:
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     qhc1,qhc2 = st.columns([4,1])
     with qhc1: st.markdown('<div class="section-label" style="margin-bottom:0">Quote history</div>', unsafe_allow_html=True)
+
+    # ── Upgrade older quotes: 360 viewer links → our own captured frames ──────
+    import spin_jobs
+    _up = spin_jobs.upgrade_status()
+    _todo = spin_jobs.upgradable(qhistory)
+    if _todo or _up["running"] or _up["results"]:
+        with st.expander(f"360 upgrade — {len(_todo)} stone(s) in recent quotes still use a viewer link"
+                         if not _up["running"] else f"360 upgrade — running ({_up['done']}/{_up['total']})",
+                         expanded=_up["running"]):
+            st.caption("Captures each stone's 360 viewer as our own frames and updates the saved quote, "
+                       "so the quote page shows our spinner instead of loading the viewer page. "
+                       "Expired quotes are skipped. Runs in the background.")
+            if _up["running"]:
+                st.progress(_up["done"] / max(1, _up["total"]), text=f"{_up['done']} of {_up['total']} done")
+                if st.button("Refresh", key="up360_refresh"):
+                    st.rerun()
+            elif _todo and st.button(f"Capture 360 frames for {len(_todo)} stone(s)", key="up360_go",
+                                     use_container_width=True):
+                spin_jobs.start_upgrade(SUPABASE_URL, SUPABASE_KEY, qhistory)
+                st.rerun()
+            if _up["results"]:
+                ok = sum(r["ok"] for r in _up["results"])
+                st.markdown(f"**Last run** (started {_up['started']} UTC"
+                            + (f", finished {_up['finished']} UTC" if _up["finished"] else "")
+                            + f"): {ok} captured, {len(_up['results']) - ok} not captured")
+                for r in _up["results"]:
+                    st.markdown(f"- {'✅' if r['ok'] else '⚠️'} **{_md(r['label'])}**: {_md(r['note'])}")
+                    if r.get("facts"):
+                        st.code("\n".join(r["facts"]), language=None)
+                if not _up["running"] and st.session_state.get("up360_seen") != _up["finished"]:
+                    st.session_state.up360_seen = _up["finished"]      # reload history once per run
+                    load_quote_history.clear()
 
     def render_quote_row(q):
         exp_str = ""

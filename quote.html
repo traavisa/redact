@@ -8,6 +8,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="/spin360.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     html { scroll-behavior: smooth; }
@@ -690,6 +691,7 @@ function render(s, certTypes, isExpired) {
 
   document.getElementById('loading').classList.add('hidden');
   document.getElementById('page').style.display = 'block';
+  if (window.Spin360) Spin360.mountAll(stonesEl);
   renderMobilePdfs();
   pcSetup(s, certTypes, isExpired);
 }
@@ -705,7 +707,19 @@ function mediaFile(u) {
   const f = u.slice(MEDIA_BASE.length);
   return MEDIA_FILE_RE.test(f) ? f : '';
 }
+// Captured 360 frames (our own copies, played by spin360.js): { id: <32 hex>, n: <frames> }
+function spinOf(stone) {
+  const sp = stone && stone.spin;
+  return sp && /^[a-f0-9]{32}$/.test(String(sp.id)) && Number.isInteger(Number(sp.n)) && sp.n >= 2 && sp.n <= 720
+    ? { id: String(sp.id), n: Number(sp.n) } : null;
+}
+function spinHtml(sp) {
+  if (window.Spin360) return Spin360.html(sp);
+  return `<img class="media-img" src="${MEDIA_BASE + sp.id}/000.jpg" alt="">`;   // script didn't load: first frame
+}
 function mediaHtml(stone) {
+  const sp = spinOf(stone);
+  if (sp) return spinHtml(sp);
   const vf = mediaFile(stone.video_url), imf = mediaFile(stone.image_url);
   const poster = /\.(jpg|png)$/.test(imf) ? ` poster="${MEDIA_BASE + imf}"` : '';
   if (/\.(mp4|webm)$/.test(vf)) {
@@ -990,8 +1004,9 @@ function pcPayload() {
     if (inc.v) {
       // Only our own media addresses go into the customer link, never a vendor's.
       const vu = String(st.video_url || '');
-      const vf = mediaFile(vu), imf = mediaFile(st.image_url);
-      if (vf) o.m = vf;
+      const vf = mediaFile(vu), imf = mediaFile(st.image_url), sp = spinOf(st);
+      if (sp) o.x = [sp.id, sp.n];
+      else if (vf) o.m = vf;
       else if (vu.startsWith(VIEWER_LINK_BASE) && /^[a-z2-9]{8,32}$/.test(vu.slice(VIEWER_LINK_BASE.length))) o.w = vu.slice(VIEWER_LINK_BASE.length);
       else if (vu.startsWith(PC_VIEWER)) o.U = vu;            // older quotes: link passed on unchanged
       if (imf) o.i = imf;
@@ -1068,7 +1083,7 @@ function pcSetup(s, certTypes, isExpired) {
 
   // Parts that don't exist on any stone are greyed out
   const has = {
-    video: s.stones.some((st) => st.video_url || st.image_url),
+    video: s.stones.some((st) => st.video_url || st.image_url || spinOf(st)),
     cert: s.stones.some((st) => st.pdf_url),
     specs: s.stones.some((st) => st.cert_data && Object.values(st.cert_data).some(Boolean)),
   };

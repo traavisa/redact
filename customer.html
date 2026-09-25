@@ -10,6 +10,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+  <script src="/spin360.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
     html { scroll-behavior: smooth; }
@@ -372,7 +373,15 @@ function videoUrl(st) {
   return null;
 }
 // Re-hosted media: a video (with the image as its poster) or just an image
+// Captured 360 frames (our own copies, played by spin360.js): x = [<32 hex id>, <frames>]
+function spinOf(st) {
+  const x = st.x;
+  return Array.isArray(x) && /^[a-f0-9]{32}$/.test(String(x[0])) && Number.isInteger(x[1]) && x[1] >= 2 && x[1] <= 720
+    ? { id: String(x[0]), n: x[1] } : null;
+}
 function mediaHtml(st) {
+  const sp = spinOf(st);
+  if (sp) return window.Spin360 ? Spin360.html(sp) : `<img src="${MEDIA_BASE + sp.id}/000.jpg" alt="">`;
   const m = mediaFile(st.m), im = mediaFile(st.i);
   const img = /\.(jpg|png)$/.test(im) ? MEDIA_BASE + im : '';
   if (/\.(mp4|webm)$/.test(m)) {
@@ -561,6 +570,7 @@ function render(d, client) {
 
   document.getElementById('loading').classList.add('hidden');
   document.getElementById('page').style.display = 'block';
+  if (window.Spin360) Spin360.mountAll(document.getElementById('stones'));
   renderMobilePdfs();
 }
 

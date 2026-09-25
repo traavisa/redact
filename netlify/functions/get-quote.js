@@ -3,7 +3,7 @@
 // so the quotes table can stay locked to the public.
 const SAFE_STONE_FIELDS = [
   'cert_last4', 'cert_type', 'video_url', 'image_url', 'pdf_url',
-  'price', 'currency', 'price_type', 'cert_data',
+  'price', 'currency', 'price_type', 'cert_data', 'spin',
 ];
 
 // Media may only point at our own addresses: re-hosted files (/media/), opaque viewer
@@ -18,6 +18,12 @@ function safeVideo(u) {
   if (u.startsWith(VIEWER_LINK_BASE)) return /^[a-z2-9]{8,32}$/.test(u.slice(VIEWER_LINK_BASE.length)) ? u : undefined;
   if (u.startsWith(LEGACY_VIEWER_BASE)) return u;
   return undefined;
+}
+// Captured 360 frames: our own folder /media/<32 hex>/000.jpg … (n frames)
+function safeSpin(sp) {
+  if (!sp || typeof sp !== 'object') return undefined;
+  const id = String(sp.id || ''), n = Number(sp.n);
+  return /^[a-f0-9]{32}$/.test(id) && Number.isInteger(n) && n >= 2 && n <= 720 ? { id, n } : undefined;
 }
 function safeImage(u) {
   u = String(u || '');
@@ -56,6 +62,7 @@ exports.handler = async function (event) {
     SAFE_STONE_FIELDS.forEach((k) => { if (s[k] !== undefined) out[k] = s[k]; });
     if ('video_url' in out) { const v = safeVideo(out.video_url); if (v) out.video_url = v; else delete out.video_url; }
     if ('image_url' in out) { const v = safeImage(out.image_url); if (v) out.image_url = v; else delete out.image_url; }
+    if ('spin' in out) { const v = safeSpin(out.spin); if (v) { out.spin = v; delete out.video_url; } else delete out.spin; }
     const ct = certTypeOf(s);
     if (ct) out.cert_type = ct;
     return out;

@@ -14,15 +14,24 @@ exports.handler = async function (event) {
   if (!TOKEN_RE.test(t)) return json(400, { error: 'Bad request' });
 
   const KEY = process.env.SUPABASE_SERVICE_KEY;
-  let rows = [];
-  try {
+  const lookup = async (cols) => {
     const res = await fetch(
-      `${process.env.SUPABASE_URL}/rest/v1/media_links?token=eq.${t}&select=vendor_url&limit=1`,
+      `${process.env.SUPABASE_URL}/rest/v1/media_links?token=eq.${t}&select=${cols}&limit=1`,
       { headers: { apikey: KEY, Authorization: `Bearer ${KEY}` } }
     );
-    rows = res.ok ? await res.json() : [];
+    return res.ok ? await res.json() : null;
+  };
+  let rows;
+  try {
+    // Before the spin columns exist (SQL update not run yet) only vendor_url can be read
+    rows = (await lookup('vendor_url,spin_id,spin_frames')) || (await lookup('vendor_url')) || [];
   } catch (e) { return json(502, { error: 'Unavailable' }); }
-  const url = rows && rows[0] && rows[0].vendor_url;
+  const row = rows && rows[0];
+  if (!row) return json(404, { error: 'Not found' });
+  // Captured 360 frames: the viewer plays our own copies and never learns the vendor URL
+  const id = String(row.spin_id || ''), n = Number(row.spin_frames);
+  if (/^[a-f0-9]{32}$/.test(id) && Number.isInteger(n) && n >= 2 && n <= 720) return json(200, { spin: { id, n } });
+  const url = row.vendor_url;
   if (!url || !/^https?:\/\//i.test(url)) return json(404, { error: 'Not found' });
   return json(200, { url });
 };

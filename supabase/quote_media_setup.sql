@@ -22,3 +22,9 @@ create index if not exists media_links_vendor_url_idx on public.media_links (ven
 -- write anything. Only the service key (Render app, Netlify functions) bypasses RLS.
 alter table public.media_links enable row level security;
 revoke all on public.media_links from anon, authenticated;
+
+-- 3. Captured 360 frames (added later; safe to run again).
+--    Frames are stored in the quote-media bucket as <spin_id>/000.jpg, 001.jpg, …
+--    A /v/<token> link whose row has spin_id set opens our own spinner, never the vendor page.
+alter table public.media_links add column if not exists spin_id text check (spin_id ~ '^[a-f0-9]{32}$');
+alter table public.media_links add column if not exists spin_frames integer check (spin_frames between 2 and 720);

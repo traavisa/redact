@@ -179,6 +179,7 @@ class Client:
 
     # ── schema discovery (introspection) ─────────────────────────────────────
     _schema_cache = {}
+    _media_off = {}      # url -> True once the API refused the extra media fields
 
     def schema(self):
         """Returns what the live schema confirms, or a documented-only fallback."""
@@ -257,6 +258,7 @@ class Client:
             def scalars(t):
                 return {f["name"]: f for f in t["fields"]
                         if _named(f["type"]).get("kind") in ("SCALAR", "ENUM") and not _is_list(f["type"])}
+            media_sel, media_desc = _media_selection(dt, types)
             cs, ds = scalars(ct), scalars(dt)
             cert_extra = [f for f in FANCY_FIELDS + AS_GROWN_FIELDS if f in cs]
             for where, fs in (("diamond", ds), ("certificate", cs)):
@@ -270,8 +272,12 @@ class Client:
         except Exception:
             cert_extra = []
         docs = {k: sanitise(v) for k, v in docs.items()}
+        try:
+            media = {"sel": media_sel, "keys": _sel_keys(media_sel), "desc": [sanitise(d) for d in media_desc]}
+        except NameError:
+            media = {"sel": "", "keys": [], "desc": []}
         return {"verified": True, "filters": filters, "cert_extra": cert_extra,
-                "count_query": count_query, "lg_flag": lg_flag, "docs": docs}
+                "count_query": count_query, "lg_flag": lg_flag, "docs": docs, "media": media}
 
     # ── search ───────────────────────────────────────────────────────────────
     def search(self, query_input, max_stones=500):
@@ -285,6 +291,10 @@ class Client:
         lg = sch.get("lg_flag")
         cert_sel = " ".join(CERT_FIELDS + extra + ([lg[1]] if lg and lg[0] == "certificate" else []))
         dia_sel = "id video image availability" + (f" {lg[1]}" if lg and lg[0] == "diamond" else "")
+        media = sch.get("media") or {}
+        media_on = bool(media.get("sel")) and not Client._media_off.get(self.url)
+        if media_on:
+            dia_sel += " " + media["sel"]
         qlit = gql_literal(query_input)
         out, offset, fetched = [], 0, 0
         flags = {"natural": 0, "lab-grown": 0, "unknown": 0} if lg else None
@@ -296,7 +306,17 @@ class Client:
                  f", offset: {offset}, limit: {limit}, order: {{type: price, direction: ASC}}) {{ "
                  f"total_count items {{ id price diamond {{ {dia_sel} "
                  "certificate { " + cert_sel + " } } } }" + count_sel + " }")
-            data = self.call(q)
+            try:
+                data = self.call(q)
+            except SourceError as e:
+                if not (media_on and offset == 0 and "rejected" in str(e)):
+                    raise
+                # The extra media fields were refused: search again exactly as before without them
+                Client._media_off[self.url] = True
+                media_on = False
+                dia_sel = dia_sel.replace(" " + media["sel"], "")
+                self._err("media fields refused; searched without them")
+                continue
             res = data.get("diamonds_by_query") or {}
             if offset == 0:
                 self.diag["total_count"] = res.get("total_count")
@@ -311,12 +331,13 @@ class Client:
                     d = i.get("diamond") or {}
                     v = (d if lg[0] == "diamond" else (d.get("certificate") or {})).get(lg[1])
                     flags["lab-grown" if v is True else "natural" if v is False else "unknown"] += 1
-            out += [s for s in (whitelist(i) for i in items) if s]
+            out += [s for s in (whitelist(i, media.get("keys") if media_on else None) for i in items) if s]
             offset += len(items)
             # total_count is not used to stop paging: only a short page (or the cap) ends it.
             if len(items) < limit:
                 break
         self.diag["labgrown_flags"] = flags
+        self.diag["media"] = media_report(out, media if media_on else {}, sch.get("verified"))
         self.diag["cap_hit"] = fetched >= max_stones
         real = _int(self.diag["count_query_total"])
         if real is None:
@@ -405,8 +426,10 @@ def _num(v):
         return None
 
 
-def whitelist(item):
-    """Keep ONLY allowed fields. Anything else in the response is dropped here."""
+def whitelist(item, media_keys=None):
+    """Keep ONLY allowed fields. Anything else in the response is dropped here.
+    `media_keys`: extra media fields (introspection-confirmed) kept under s["media"] for
+    360 capture on save. They never reach a saved quote."""
     if not isinstance(item, dict):
         return None
     d = item.get("diamond") or {}
@@ -440,4 +463,83 @@ def whitelist(item):
     for k in FANCY_FIELDS + AS_GROWN_FIELDS:
         if k in c:
             s[k] = c.get(k)
+    if media_keys:
+        m = {k: d.get(k) for k in media_keys if d.get(k) not in (None, "", [], {})}
+        if m:
+            s["media"] = m
     return s
+
+
+# ── Media fields (360 frames, video files, extra images) ────────────────────────
+_MEDIA_WORDS = ("video", "image", "img", "v360", "360", "frame", "mp4", "media", "gallery", "photo",
+                "picture", "still", "spin", "asset", "view")
+
+
+def _needs_args(f):
+    return any((a.get("type") or {}).get("kind") == "NON_NULL" for a in (f.get("args") or []))
+
+
+def _media_selection(dt, types):
+    """Extra diamond fields that look like media, from the live schema. Returns
+    (selection string, descriptions). Objects get their scalar sub-fields."""
+    sel, desc = [], []
+    for f in dt.get("fields") or []:
+        name = f["name"]
+        if name in ("certificate",) or _needs_args(f) or not any(w in name.lower() for w in _MEDIA_WORDS):
+            continue
+        n = _named(f["type"])
+        if n.get("kind") in ("SCALAR", "ENUM"):
+            desc.append(f"{name}: {_type_str(f['type'])}" + (f" — {f['description']}" if f.get("description") else ""))
+            if name not in ("video", "image"):
+                sel.append(name)
+        elif n.get("kind") == "OBJECT":
+            sub = [g for g in (types.get(n.get("name"), {}).get("fields") or [])
+                   if _named(g["type"]).get("kind") in ("SCALAR", "ENUM") and not _needs_args(g)][:25]
+            if sub:
+                sel.append(name + " { " + " ".join(g["name"] for g in sub) + " }")
+                desc.append(f"{name} ({_type_str(f['type'])}) {{ " + ", ".join(
+                    f"{g['name']}: {_type_str(g['type'])}" for g in sub) + " }"
+                    + (f" — {f['description']}" if f.get("description") else ""))
+    return " ".join(sel), desc
+
+
+def _sel_keys(sel):
+    """Top-level field names of a selection string: 'a b { c d } e' -> ['a', 'b', 'e']."""
+    keys, depth = [], 0
+    for tok in re.findall(r"[{}]|[_A-Za-z][_0-9A-Za-z]*", sel or ""):
+        if tok == "{":
+            depth += 1
+        elif tok == "}":
+            depth -= 1
+        elif depth == 0:
+            keys.append(tok)
+    return keys
+
+
+def _shape(v):
+    """Value shape for diagnostics: hosts and long IDs masked."""
+    if isinstance(v, str) and re.match(r"https?://", v):
+        from spin_capture import mask
+        return mask(v)
+    if isinstance(v, dict):
+        return "{" + ", ".join(f"{k}: {_shape(x)}" for k, x in list(v.items())[:12]) + "}"
+    if isinstance(v, list):
+        return f"[{len(v)} item(s)" + (f", first {_shape(v[0])}" if v else "") + "]"
+    return sanitise(repr(v))[:40]
+
+
+def media_report(stones, media, verified):
+    """What the stone data holds for media, for the diagnostics (sanitised)."""
+    n = len(stones)
+    rep = {"schema_verified": bool(verified), "fields": list((media or {}).get("desc") or []), "stones": n}
+    vids = [s.get("video") for s in stones if s.get("video")]
+    files = [v for v in vids if re.search(r"\.(mp4|webm|mov)(\?|$)", v, re.I)]
+    rep["video"] = {"set": len(vids), "files": len(files), "pages": len(vids) - len(files),
+                    "example": _shape(vids[0]) if vids else None}
+    seen = {}
+    for s in stones:
+        for k, v in (s.get("media") or {}).items():
+            e = seen.setdefault(k, {"count": 0, "example": _shape(v)})
+            e["count"] += 1
+    rep["extra"] = seen
+    return rep

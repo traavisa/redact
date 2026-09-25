@@ -1,0 +1,603 @@
+"""360 capture: turns a stone's interactive 360 viewer page into our own numbered frames.
+
+The frames are downloaded here, re-encoded (no metadata, max FRAME_WIDTH px wide) and
+uploaded to the "quote-media" bucket as <random uuid>/000.jpg, 001.jpg, … so the quote
+and share pages can play them with our own spinner (spin360.js) from
+https://quote.alldiamondeverything.com/media/<uuid>/NNN.jpg. Nothing a client loads
+then comes from a vendor.
+
+Finding the frames, in order:
+  1. Stone data from the search API (a frame base URL + count, or a list of frame URLs),
+     when the live schema has such fields (passed in as `hint`).
+  2. Viewer formats registered with @viewer_format, matched on the viewer URL's shape.
+     Add a new format there when a new kind of viewer page turns up.
+  3. Generic analysis of the viewer page: its HTML, inline and same-site scripts, JSON
+     config and any nested viewer frame, looking for numbered frame URLs, URL templates
+     ("…/" + i + ".jpg", `${i}.jpg`, {frame}), frame counts and frame base URLs.
+     Candidate patterns are checked by downloading a frame before anything is used.
+A direct video file (MP4 / WebM) found on the way is reported so the caller can prefer it.
+
+Every step records a short diagnostic (hosts masked) so a failed capture says exactly why.
+Nothing identifying goes into file names: only the random folder and 000.jpg, 001.jpg, …
+"""
+import io
+import json
+import re
+import threading
+import time
+import uuid
+from concurrent.futures import ThreadPoolExecutor
+from html import unescape
+from urllib.parse import urljoin, urlparse
+
+import requests
+from PIL import Image, ImageOps
+
+import quote_media as qm
+
+MAX_FRAMES = 120             # more are evenly thinned out: 3° a frame is smooth, and far lighter on phones
+MIN_FRAMES = 8
+FRAME_WIDTH = 1000
+JPEG_QUALITY = 84
+DOWNLOAD_WORKERS = 8
+PROBE_WORKERS = 8
+MAX_MISSING = 0.10           # up to 10% of frames may fail to download; they're skipped
+MAX_PAGE_BYTES = 3 * 1024 * 1024
+MAX_SCRIPT_BYTES = 4 * 1024 * 1024
+MAX_SCRIPTS = 6
+MAX_COUNT_SEARCH = 1024
+IMG_EXT = ("jpg", "jpeg", "png", "webp")
+
+
+class CaptureFailed(Exception):
+    """Capture didn't work. str(e) is a short user-safe reason."""
+
+
+# ── Diagnostics: hosts and long IDs masked, supplier name removed ─────────────
+_LONG_ID = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9_-]{16,}(?![A-Za-z0-9])")
+_NAME = re.compile(r"nivoda\w*", re.I)
+
+
+def mask(u):
+    """'https://cdn.x.com/abc/5f3e…9a/still/{n}.jpg' -> '[host]/abc/<id>/still/{n}.jpg'."""
+    try:
+        p = urlparse(str(u))
+        path = p.path + (("?" + p.query) if p.query else "")
+        out = ("[host]" if p.netloc else "") + _LONG_ID.sub("<id>", path)
+    except Exception:
+        out = "?"
+    out = _NAME.sub("[source]", out)
+    return out if len(out) <= 90 else out[:87] + "…"
+
+
+def _clean_text(t):
+    return _NAME.sub("[source]", str(t))
+
+
+# ── HTTP ──────────────────────────────────────────────────────────────────────
+def _get_text(url, limit):
+    """GET a page or script. Returns (status, content_type, text). Raises CaptureFailed."""
+    if not qm._public_host(url):
+        raise CaptureFailed("viewer address isn't public")
+    try:
+        r = requests.get(url, stream=True, timeout=qm.TIMEOUT, allow_redirects=True,
+                         headers={"User-Agent": qm.UA, "Accept": "text/html,application/xhtml+xml,*/*"})
+    except requests.Timeout:
+        raise CaptureFailed("viewer page timed out")
+    except requests.RequestException:
+        raise CaptureFailed("couldn't connect to the viewer page")
+    with r:
+        buf = io.BytesIO()
+        try:
+            for chunk in r.iter_content(256 * 1024):
+                buf.write(chunk)
+                if buf.tell() > limit:
+                    break
+        except requests.RequestException:
+            pass
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        text = buf.getvalue().decode(r.encoding or "utf-8", errors="replace")
+        return r.status_code, ctype, text, r.url
+
+
+def _is_image(url):
+    """True if the URL serves an image (checked from the file's own first bytes)."""
+    try:
+        if not qm._public_host(url):
+            return False
+        with requests.get(url, stream=True, timeout=(8, 15), allow_redirects=True,
+                          headers={"User-Agent": qm.UA, "Accept": "image/*,*/*"}) as r:
+            if r.status_code >= 400:
+                return False
+            head = next(r.iter_content(32), b"")
+            return qm._sniff(head) == "image"
+    except Exception:
+        return False
+
+
+# ── Frame URL templates ───────────────────────────────────────────────────────
+class Template:
+    """A numbered frame URL: prefix + number (zero-padded to `pad`) + suffix."""
+
+    def __init__(self, prefix, suffix, pad=0, start=0):
+        self.prefix, self.suffix, self.pad, self.start = prefix, suffix, pad, start
+
+    def url(self, i):
+        return f"{self.prefix}{str(i).zfill(self.pad) if self.pad else i}{self.suffix}"
+
+    def show(self):
+        return mask(self.prefix + ("{n:0%d}" % self.pad if self.pad else "{n}") + self.suffix)
+
+    def key(self):
+        return (self.prefix, self.suffix, self.pad, self.start)
+
+
+class FrameSet:
+    def __init__(self, urls, pattern, source):
+        self.urls, self.pattern, self.source = urls, pattern, source
+
+
+def _count_frames(t, known=None):
+    """Number of frames from t.start on. Uses a known count when its last frame exists,
+    otherwise finds the last frame by doubling then halving (frames are consecutive)."""
+    if known and known >= MIN_FRAMES and _is_image(t.url(t.start + known - 1)):
+        if not _is_image(t.url(t.start + known)):
+            return known
+    lo, hi = 1, 2          # frame index offset lo exists; hi unknown
+    while hi <= MAX_COUNT_SEARCH and _is_image(t.url(t.start + hi - 1)):
+        lo, hi = hi, hi * 2
+    hi = min(hi, MAX_COUNT_SEARCH + 1)
+    while hi - lo > 1:      # lo frames exist, hi frames don't
+        mid = (lo + hi) // 2
+        if _is_image(t.url(t.start + mid - 1)):
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
+def _templates_from_base(base, ext_hint=None):
+    """Candidate templates for a frame folder / base URL."""
+    base = base.split("#")[0]
+    q = ""
+    if "?" in base:
+        base, q = base.split("?", 1)
+        q = "?" + q
+    exts = [ext_hint] if ext_hint else ["jpg", "png", "webp", "jpeg"]
+    joins = [base + "/", base] if not base.endswith("/") else [base]
+    out = []
+    for j in joins:
+        for ext in exts:
+            for pad in (0, 3, 2, 4):
+                for start in (0, 1):
+                    out.append(Template(j, f".{ext}{q}", pad, start))
+    return out
+
+
+def _first_working(templates):
+    """The first candidate template whose first frame is really an image."""
+    seen, uniq = set(), []
+    for t in templates:
+        if t.key() not in seen:
+            seen.add(t.key())
+            uniq.append(t)
+    uniq = uniq[:64]
+    with ThreadPoolExecutor(max_workers=PROBE_WORKERS) as ex:
+        ok = list(ex.map(lambda t: _is_image(t.url(t.start)), uniq))
+    for t, good in zip(uniq, ok):
+        if good:
+            return t
+    return None
+
+
+def _from_template(t, known, source, facts):
+    n = _count_frames(t, known)
+    facts.append(f"pattern {t.show()} → {n} frame(s) found")
+    if n < MIN_FRAMES:
+        return None
+    return FrameSet([t.url(t.start + i) for i in range(n)], t.show(), source)
+
+
+# ── 1. Stone data from the search API ─────────────────────────────────────────
+_COUNT_KEY = re.compile(r"(frame|image|img|still|pic)s?_?(count|total|num|number|cnt|len)|"
+                        r"(count|num|number|total|no)_?(of_?)?(frame|image|still)s?|^frames$|^n_?frames$", re.I)
+_BASE_KEY = re.compile(r"(base|renumbered|frame|still|image|img|folder|path|dir|prefix)s?_?(url|path|dir|folder|base)?$|"
+                       r"^url$|^link$|^src$", re.I)
+
+
+def _walk(obj, path=""):
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            yield from _walk(v, f"{path}.{k}" if path else str(k))
+    elif isinstance(obj, list):
+        for i, v in enumerate(obj):
+            yield from _walk(v, f"{path}[{i}]")
+    else:
+        yield path, obj
+
+
+def video_file_from_hint(hint):
+    """A direct MP4 / WebM URL in the stone data, if any."""
+    for _, v in _walk(hint or {}):
+        if isinstance(v, str) and re.match(r"https?://", v) and re.search(r"\.(mp4|webm)(\?|$)", v, re.I):
+            return v
+    return ""
+
+
+def _from_hint(hint, facts):
+    if not hint:
+        return None
+    flat = list(_walk(hint))
+    urls = [(p, v) for p, v in flat if isinstance(v, str) and re.match(r"https?://", v)]
+    # A list of frame image URLs
+    lists = {}
+    for p, v in urls:
+        if re.search(r"\.(jpe?g|png|webp)(\?|$)", v, re.I) and "[" in p:
+            lists.setdefault(p.rsplit("[", 1)[0], []).append(v)
+    for p, vs in lists.items():
+        if len(vs) >= MIN_FRAMES:
+            facts.append(f"stone data: {len(vs)} frame URLs in '{_clean_text(p)}'")
+            return FrameSet(vs, mask(vs[0]) + f" (+{len(vs) - 1} more)", "stone data (frame list)")
+    counts = [int(v) for p, v in flat if isinstance(v, (int, float, str)) and str(v).isdigit()
+              and _COUNT_KEY.search(p.rsplit(".", 1)[-1]) and MIN_FRAMES <= int(v) <= MAX_COUNT_SEARCH]
+    known = counts[0] if counts else None
+    bases = [(p, v) for p, v in urls if _BASE_KEY.search(p.rsplit(".", 1)[-1])
+             and not re.search(r"\.(mp4|webm|html?|js|css)(\?|$)", v, re.I)]
+    facts.append(f"stone data: {len(urls)} link(s), frame count {known or 'not given'}")
+    for p, v in bases:
+        tmpl = _template_from_numbered(v)
+        cands = [tmpl] if tmpl else []
+        if not re.search(r"\.(jpe?g|png|webp)(\?|$)", v, re.I):
+            cands += _templates_from_base(v)
+        t = _first_working(cands)
+        if t:
+            fs = _from_template(t, known, f"stone data ('{_clean_text(p)}')", facts)
+            if fs:
+                return fs
+        else:
+            facts.append(f"stone data '{_clean_text(p)}' ({mask(v)}): no frame pattern answered")
+    return None
+
+
+# ── 3. Generic viewer page analysis ───────────────────────────────────────────
+_NUMBERED = re.compile(r"((?:https?:)?//[^\s\"'<>()\\`]+?|/[^\s\"'<>()\\`]*?)(\d{1,4})(\.(?:jpe?g|png|webp))((?:\?[^\s\"'<>()\\`]*)?)", re.I)
+_CONCAT = re.compile(r"([\"'`])((?:https?:)?//[^\"'`\s]*|/[^\"'`\s]*|[^\"'`\s]*/)\1\s*\+\s*[\w$.\[\]()+\- ]{1,40}?\s*\+\s*"
+                     r"([\"'`])(\.(?:jpe?g|png|webp)[^\"'`\s]*)\3", re.I)
+_TPL_LITERAL = re.compile(r"`([^`\s]*?)\$\{[^}]{1,40}\}(\.(?:jpe?g|png|webp)[^`\s]*)`", re.I)
+_PLACEHOLDER = re.compile(r"((?:https?:)?//[^\s\"'<>`]+?)(\{\{?\s*(?:n|i|idx|index|frame|num|number|image)\s*\}?\}|%d|%0(\d)d|\{0\}|#{2,4})"
+                          r"(\.(?:jpe?g|png|webp)[^\s\"'<>`]*)", re.I)
+_COUNT_CFG = re.compile(r"[\"']?((?:frame|image|img|still)s?_?(?:count|total|num|number|cnt)|(?:total|num|number|no|count)_?(?:of_?)?"
+                        r"(?:frame|image|still)s?|frames|nframes|n_frames|amount)[\"']?\s*[:=]\s*[\"']?(\d{1,4})\b", re.I)
+_BASE_CFG = re.compile(r"[\"']?((?:base|renumbered|frames?|stills?|images?|img|folder|path|dir|prefix|media|asset)s?_?(?:url|path|dir|folder|base|root)?)"
+                       r"[\"']?\s*[:=]\s*[\"']((?:https?:)?//[^\"'\s]+|/[^\"'\s]+)[\"']", re.I)
+_VIDEO_FILE = re.compile(r"((?:https?:)?//[^\s\"'<>()\\`]+?\.(?:mp4|webm)(?:\?[^\s\"'<>()\\`]*)?)", re.I)
+_SCRIPT_SRC = re.compile(r"<script[^>]+src=[\"']([^\"']+)[\"']", re.I)
+_INLINE_SCRIPT = re.compile(r"<script(?![^>]+src=)[^>]*>(.*?)</script>", re.I | re.S)
+_IFRAME_SRC = re.compile(r"<iframe[^>]+src=[\"']([^\"']+)[\"']", re.I)
+_TITLE = re.compile(r"<title[^>]*>(.*?)</title>", re.I | re.S)
+_ENDPOINT = re.compile(r"[\"'`]((?:https?://[^\"'`\s]+)?/(?:api|v\d|graphql|json|data)[/?][^\"'`\s]{0,120})[\"'`]", re.I)
+
+
+def _norm(text):
+    """Un-escape JSON / JS so URLs are plain ('\\/' -> '/', '\\u002F' -> '/', '&amp;' -> '&')."""
+    t = text.replace("\\/", "/").replace("\\u002F", "/").replace("\\u002f", "/")
+    t = re.sub(r"\\u0026|\\x26", "&", t)
+    return unescape(t)
+
+
+def _site(host):
+    parts = (host or "").lower().split(".")
+    return ".".join(parts[-2:])
+
+
+def _template_from_numbered(u):
+    m = re.match(r"^(.*?)(\d{1,4})(\.(?:jpe?g|png|webp))((?:\?.*)?)$", u, re.I)
+    if not m:
+        return None
+    pad = len(m.group(2)) if m.group(2).startswith("0") and len(m.group(2)) > 1 else 0
+    return Template(m.group(1), m.group(3) + m.group(4), pad, 0)
+
+
+def _analyse(page_url, facts, depth=0):
+    """Returns dict(explicit=[(template, numbers)], templates=[Template], counts=[int],
+    bases=[url], videos=[url], endpoints=[str])."""
+    status, ctype, html, final = _get_text(page_url, MAX_PAGE_BYTES)
+    title = _TITLE.search(html)
+    facts.append(f"viewer page: HTTP {status}, {ctype or 'no type'}, {len(html) // 1024} KB"
+                 + (f", title '{_clean_text(title.group(1).strip()[:40])}'" if title else ""))
+    if status >= 400:
+        raise CaptureFailed(f"viewer page answered HTTP {status}")
+    host = urlparse(final).hostname
+    texts = [html] + _INLINE_SCRIPT.findall(html)
+    srcs = [urljoin(final, s) for s in _SCRIPT_SRC.findall(html)]
+    same = [s for s in srcs if _site(urlparse(s).hostname) == _site(host)]
+    fetched = 0
+    for s in same[:MAX_SCRIPTS]:
+        try:
+            st_, _, js, _ = _get_text(s, MAX_SCRIPT_BYTES)
+            if st_ < 400:
+                texts.append(js)
+                fetched += 1
+        except CaptureFailed:
+            pass
+    facts.append(f"scripts: {len(texts) - 1 - fetched} inline, {len(srcs)} linked "
+                 f"({len(same)} same-site, {fetched} read)")
+    res = {"explicit": [], "templates": [], "counts": [], "bases": [], "videos": [], "endpoints": []}
+    groups = {}
+    for raw in texts:
+        t = _norm(raw)
+        for m in _NUMBERED.finditer(t):
+            pre = urljoin(final, m.group(1))
+            num = m.group(2)
+            pad = len(num) if num.startswith("0") and len(num) > 1 else 0
+            groups.setdefault((pre, m.group(3) + m.group(4), pad), set()).add(int(num))
+        for m in _CONCAT.finditer(t):
+            res["templates"].append(Template(urljoin(final, m.group(2)), m.group(4)))
+        for m in _TPL_LITERAL.finditer(t):
+            if "${" not in m.group(1) and (m.group(1).startswith(("http", "//", "/"))):
+                res["templates"].append(Template(urljoin(final, m.group(1)), m.group(2)))
+        for m in _PLACEHOLDER.finditer(t):
+            pad = int(m.group(3)) if m.group(3) else (len(m.group(2)) if m.group(2).startswith("#") else 0)
+            res["templates"].append(Template(urljoin(final, m.group(1)), m.group(4), pad))
+        res["counts"] += [int(m.group(2)) for m in _COUNT_CFG.finditer(t)
+                          if MIN_FRAMES <= int(m.group(2)) <= MAX_COUNT_SEARCH]
+        res["bases"] += [urljoin(final, m.group(2)) for m in _BASE_CFG.finditer(t)
+                         if not re.search(r"\.(js|css|html?|json|mp4|webm|svg|ico|woff2?)(\?|$)", m.group(2), re.I)]
+        res["videos"] += [urljoin(final, v) for v in _VIDEO_FILE.findall(t)]
+        res["endpoints"] += _ENDPOINT.findall(t)
+    for (pre, suf, pad), nums in groups.items():
+        if len(nums) >= 2:
+            res["explicit"].append((Template(pre, suf, pad, min(nums)), sorted(nums)))
+    res["explicit"].sort(key=lambda x: -len(x[1]))
+    facts.append(f"found: {sum(len(n) for _, n in res['explicit'])} numbered image link(s) in "
+                 f"{len(res['explicit'])} group(s), {len(res['templates'])} URL template(s), "
+                 f"frame count(s) {sorted(set(res['counts']))[:5] or 'none'}, {len(set(res['bases']))} base URL(s), "
+                 f"{len(set(res['videos']))} video file(s)")
+    if res["endpoints"]:
+        eps = list(dict.fromkeys(mask(e) for e in res["endpoints"]))[:4]
+        facts.append("data endpoints in scripts: " + ", ".join(eps))
+    # A viewer nested in a frame: look inside it once
+    frames = [urljoin(final, s) for s in _IFRAME_SRC.findall(html) if not s.startswith(("about:", "data:", "javascript:"))]
+    if frames and depth == 0 and not (res["explicit"] or res["templates"] or res["bases"]):
+        facts.append(f"page holds {len(frames)} nested frame(s): reading the first")
+        try:
+            sub = _analyse(frames[0], facts, depth + 1)
+            for k in res:
+                res[k] += sub[k]
+        except CaptureFailed as e:
+            facts.append(f"nested frame: {e}")
+    return res
+
+
+def _from_page(url, facts, id_hint=None):
+    res = _analyse(url, facts)
+    known = max(res["counts"]) if res["counts"] else None
+    video = next(iter(dict.fromkeys(res["videos"])), "")
+    # a) Numbered links in the page. Prefer groups whose URL mentions the viewer's own ID.
+    explicit = res["explicit"]
+    if id_hint:
+        explicit = sorted(explicit, key=lambda x: (id_hint.lower() not in x[0].prefix.lower(), -len(x[1])))
+    for t, nums in explicit[:4]:
+        if len(nums) < MIN_FRAMES and not known:
+            continue
+        if _is_image(t.url(t.start)):
+            fs = _from_template(t, max(known or 0, len(nums)), "viewer page (numbered links)", facts)
+            if fs:
+                return fs, video
+    # b) URL templates in the scripts
+    cands = []
+    for t in res["templates"]:
+        for start in (0, 1):
+            for pad in ([t.pad] if t.pad else [0, 3, 2, 4]):
+                cands.append(Template(t.prefix, t.suffix, pad, start))
+    t = _first_working(cands) if cands else None
+    if t:
+        fs = _from_template(t, known, "viewer page (URL template)", facts)
+        if fs:
+            return fs, video
+    # c) Frame base URL from the config
+    bases = list(dict.fromkeys(res["bases"]))
+    if id_hint:
+        bases.sort(key=lambda b: id_hint.lower() not in b.lower())
+    for b in bases[:4]:
+        t = _first_working(_templates_from_base(b))
+        if t:
+            fs = _from_template(t, known, "viewer page (frame base URL)", facts)
+            if fs:
+                return fs, video
+    return None, video
+
+
+# ── 2. Known viewer formats ───────────────────────────────────────────────────
+FORMATS = []   # [(name, matcher(url) -> match or None, extractor(url, match, facts) -> (FrameSet|None, video))]
+
+
+def viewer_format(name, pattern):
+    """Registers an extractor for viewer URLs whose path matches `pattern` (a regex)."""
+    rx = re.compile(pattern, re.I)
+
+    def deco(fn):
+        FORMATS.append((name, lambda u: rx.search(urlparse(u).path), fn))
+        return fn
+    return deco
+
+
+@viewer_format("format A (/diamond/<id>/video/<w>/<h>)", r"^/diamond/([^/]+)/video/\d+/\d+/?$")
+def _format_a(url, m, facts):
+    """Viewer pages at /diamond/<id>/video/<w>/<h>?d_id=…&c_id=…. The page's own scripts
+    say where the frames are; links mentioning the diamond's IDs are preferred."""
+    q = dict(p.split("=", 1) for p in (urlparse(url).query or "").split("&") if "=" in p)
+    id_hint = q.get("d_id") or m.group(1)
+    return _from_page(url, facts, id_hint=id_hint)
+
+
+# ── Public API ────────────────────────────────────────────────────────────────
+def find_frames(viewer_url, hint=None):
+    """Returns (FrameSet or None, video_file_url or '', facts[list of str])."""
+    facts = []
+    try:
+        fs = _from_hint(hint, facts)
+        if fs:
+            return fs, "", facts
+        for name, match, fn in FORMATS:
+            m = match(viewer_url)
+            if m:
+                facts.append(f"viewer: {name}")
+                fs, video = fn(viewer_url, m, facts)
+                return fs, video, facts
+        facts.append("viewer: unknown format, generic page analysis")
+        fs, video = _from_page(viewer_url, facts)
+        return fs, video, facts
+    except CaptureFailed as e:
+        facts.append(str(e))
+        return None, "", facts
+
+
+def _pick(urls):
+    """At most MAX_FRAMES, evenly spaced around the turn."""
+    if len(urls) <= MAX_FRAMES:
+        return urls
+    step = len(urls) / MAX_FRAMES
+    return [urls[int(i * step)] for i in range(MAX_FRAMES)]
+
+
+def clean_frame(data, size=None):
+    """Re-encodes one frame from its pixels only (no EXIF/XMP/ICC), max FRAME_WIDTH wide.
+    `size` forces every frame to the first frame's size."""
+    with Image.open(io.BytesIO(data)) as im:
+        im.seek(0)
+        im = ImageOps.exif_transpose(im)
+        if im.mode in ("RGBA", "LA") or (im.mode == "P" and "transparency" in im.info):
+            rgba = im.convert("RGBA")
+            flat = Image.new("RGB", rgba.size, (255, 255, 255))
+            flat.paste(rgba, mask=rgba.split()[3])
+        else:
+            flat = im.convert("RGB")
+        if size is None:
+            w, h = flat.size
+            if w > FRAME_WIDTH:
+                size = (FRAME_WIDTH, max(1, round(h * FRAME_WIDTH / w)))
+            else:
+                size = (w, h)
+        if flat.size != size:
+            flat = flat.resize(size, Image.LANCZOS)
+        clean = Image.new("RGB", size)
+        clean.paste(flat)
+    out = io.BytesIO()
+    clean.save(out, "JPEG", quality=JPEG_QUALITY, optimize=True)
+    return out.getvalue(), size
+
+
+def _upload_frame(sb_url, key, path, data):
+    r = requests.post(f"{sb_url}/storage/v1/object/{qm.BUCKET}/{path}",
+                      headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "image/jpeg",
+                               "Cache-Control": "max-age=31536000", "x-upsert": "false"},
+                      data=data, timeout=(10, 60))
+    if r.status_code not in (200, 201):
+        raise RuntimeError(f"upload HTTP {r.status_code}")
+
+
+def _remove(sb_url, key, paths):
+    try:
+        requests.delete(f"{sb_url}/storage/v1/object/{qm.BUCKET}",
+                        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                        data=json.dumps({"prefixes": paths}), timeout=20)
+    except Exception:
+        pass
+
+
+def store_frames(sb_url, key, urls, facts):
+    """Downloads, cleans and uploads the frames. Returns (folder_id, count)."""
+    urls = _pick(urls)
+    if len(urls) < MIN_FRAMES:
+        raise CaptureFailed(f"only {len(urls)} frame(s)")
+
+    def get(u):
+        for attempt in range(2):
+            try:
+                data, kind = qm._download(u, "image")
+                if kind == "image":
+                    return data
+            except (qm.Broken, qm.NotAFile, qm.TooLarge):
+                return None
+            except Exception:
+                pass
+        return None
+
+    t0 = time.time()
+    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as ex:
+        raw = list(ex.map(get, urls))
+    good = [d for d in raw if d]
+    missing = len(urls) - len(good)
+    facts.append(f"downloaded {len(good)}/{len(urls)} frame(s) in {time.time() - t0:.1f}s")
+    if not good or missing > len(urls) * MAX_MISSING or len(good) < MIN_FRAMES:
+        raise CaptureFailed(f"{missing} of {len(urls)} frames wouldn't download")
+    first, size = clean_frame(good[0])
+    cleaned = [first]
+    for d in good[1:]:
+        try:
+            cleaned.append(clean_frame(d, size)[0])
+        except Exception:
+            pass
+    if len(cleaned) < max(MIN_FRAMES, len(urls) * (1 - MAX_MISSING)):
+        raise CaptureFailed("too many frames couldn't be read as images")
+    folder = uuid.uuid4().hex
+    paths = [f"{folder}/{i:03d}.jpg" for i in range(len(cleaned))]
+    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as ex:
+        errs = list(ex.map(lambda pd: _safe_upload(sb_url, key, *pd), zip(paths, cleaned)))
+    if any(errs):
+        _remove(sb_url, key, paths)
+        raise CaptureFailed(f"frame upload failed ({next(e for e in errs if e)})")
+    facts.append(f"stored {len(cleaned)} frame(s), {size[0]}×{size[1]}, "
+                 f"{sum(len(c) for c in cleaned) // 1024} KB total")
+    return folder, len(cleaned)
+
+
+def _safe_upload(sb_url, key, path, data):
+    try:
+        _upload_frame(sb_url, key, path, data)
+        return None
+    except Exception as e:
+        return str(e)[:60]
+
+
+_cache = {}                   # viewer URL -> result, so re-quoting a stone doesn't re-capture
+_cache_lock = threading.Lock()
+
+
+def capture(sb_url, key, viewer_url, hint=None):
+    """Captures one viewer. Returns dict(ok, spin={'id','n'} | None, video='' | direct video URL
+    found, note=<one-line diagnostic>, facts=[...]). Never raises."""
+    with _cache_lock:
+        if viewer_url in _cache:
+            return _cache[viewer_url]
+    t0 = time.time()
+    try:
+        fs, video, facts = find_frames(viewer_url, hint)
+        if fs is None:
+            # The last fact is the most specific reason (e.g. "viewer page answered HTTP 403")
+            last = facts[-1] if facts else ""
+            reason = last if not last.startswith(("found:", "scripts:", "viewer:", "viewer page:", "data endpoints", "pattern ", "page holds")) \
+                else "no frame pattern found in the viewer page"
+            res = {"ok": False, "spin": None, "video": video, "facts": facts, "note": reason}
+        else:
+            facts.append(f"frames: {len(fs.urls)} via {fs.source}, pattern {fs.pattern}")
+            folder, n = store_frames(sb_url, key, fs.urls, facts)
+            res = {"ok": True, "spin": {"id": folder, "n": n}, "video": video, "facts": facts,
+                   "note": f"360 captured: {n} frames (found {len(fs.urls)}; {fs.source}; pattern {fs.pattern})"}
+    except CaptureFailed as e:
+        facts = locals().get("facts") or []
+        res = {"ok": False, "spin": None, "video": "", "facts": facts + [str(e)], "note": str(e)}
+    except Exception as e:
+        facts = locals().get("facts") or []
+        res = {"ok": False, "spin": None, "video": "", "facts": facts + [type(e).__name__],
+               "note": f"capture error ({type(e).__name__})"}
+    res["seconds"] = round(time.time() - t0, 1)
+    res["note"] = _clean_text(res["note"])
+    res["facts"] = [_clean_text(f) for f in res["facts"]]
+    if res["ok"]:
+        with _cache_lock:
+            _cache[viewer_url] = res
+    print("[spin-capture] " + json.dumps({"ok": res["ok"], "note": res["note"], "facts": res["facts"],
+                                          "seconds": res["seconds"]}), flush=True)
+    return res

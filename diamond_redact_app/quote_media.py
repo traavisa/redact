@@ -293,7 +293,9 @@ def _process(sb_url, key, url, want):
     if want == "image":
         return {"url": "", "how": "dropped", "note": f"image {fallback_reason} — left out"}
     try:
-        return {"url": _viewer_link(sb_url, key, to_embed(url)), "how": "viewer",
+        # "src" is the vendor URL: kept in memory only (for 360 capture), never saved
+        return {"url": _viewer_link(sb_url, key, to_embed(url)), "how": "viewer", "src": to_embed(url),
+                "page": fallback_reason == "is a viewer page",
                 "note": f"video {fallback_reason} — using private viewer link"}
     except Exception:
         return {"url": "", "how": "dropped", "note": "video couldn't be saved — left out"}
