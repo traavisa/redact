@@ -474,7 +474,8 @@ def save_quote(client, stones_payload, expiry_days):
     if any(j is not None for j in cert_jobs):
         try:
             import cert_attach
-            cert_notes, cert_logs = cert_attach.attach_all(stones_payload, cert_jobs, get_logo_img("Pure Carbon Group"),
+            # QR code replaced by the selected client's logo, exactly as Create quote does
+            cert_notes, cert_logs = cert_attach.attach_all(stones_payload, cert_jobs, get_logo_img(client),
                                                            SUPABASE_URL, SUPABASE_KEY)
         except Exception as e:
             cert_notes = [f"Certificates not attached: unexpected problem ({type(e).__name__})"]

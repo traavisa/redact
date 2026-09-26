@@ -216,3 +216,38 @@ def test_dead_media_button(env):
     t = texts(at)
     assert "fields cleared: 2" in t and "ERRORS: 0" in t and PROMO in t
     assert sb.tables["quotes"][0]["stones"][0]["video_url"] == ""
+
+
+def _client_logo(name):
+    """The client's logo decoded exactly as app.get_logo_img does (from app.py's embedded list)."""
+    import base64
+    import io
+    from PIL import Image
+    src = open(APP).read()
+    var = re.search(r'^\s*"' + re.escape(name) + r'": (CLIENT_\w+),', src, re.M).group(1)
+    b64 = re.search(r"^" + var + r' = "([^"]+)"', src, re.M).group(1)
+    return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
+
+
+@pytest.mark.parametrize("client", ["Harlings", "Pure Carbon Group"])
+def test_certificate_uses_selected_client_logo(env, monkeypatch, client):
+    """Live Search certificates get the same QR logo as Create quote: the selected client's."""
+    seen = []
+    real = cert_attach.attach_all
+
+    def spy(stones, jobs, logo_img, *a, **kw):
+        seen.append(logo_img)
+        return real(stones, jobs, logo_img, *a, **kw)
+    monkeypatch.setattr(cert_attach, "attach_all", spy)
+    at = boot()
+    at.session_state["ls_client_sel"] = client
+    at.radio(key="ls_mode").set_value("Look up stones").run()
+    at.text_area(key="ls_lk_text").input("LG833689789").run()
+    at.button(key="ls_lk_go").click().run()
+    at.button(key="ls_add_quote").click().run()
+    assert not at.exception, at.exception
+    assert len(seen) == 1 and seen[0] is not None
+    want = _client_logo(client)
+    assert seen[0].size == want.size and seen[0].tobytes() == want.tobytes()
+    assert env[0].tables["quotes"][-1]["client"] == client
+    assert env[0].tables["quotes"][-1]["stones"][0]["pdf_url"].startswith(cert_attach.CERT_BASE)

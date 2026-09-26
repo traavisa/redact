@@ -35,8 +35,8 @@ def _text(pdf):
 
 
 def test_create_quote_redaction_unchanged():
-    """certs.redact_pdf is byte-for-byte the Create quote code it was moved from."""
-    old = subprocess.run(["git", "show", "origin/main:diamond_redact_app/app.py"], capture_output=True,
+    """certs.redact_pdf is byte-for-byte the Create quote code it was moved from (commit 90a4d32)."""
+    old = subprocess.run(["git", "show", "90a4d32:diamond_redact_app/app.py"], capture_output=True,
                          text=True, check=True).stdout
     zones_src = old[old.index("CERT_ZONES = {"):old.index("PADDING       = 1.5")]
     fn_src = old[old.index("def redact_pdf("):old.index("import re as _re")]
@@ -154,3 +154,11 @@ def test_attach_all_never_raises_and_sets_pdf_url():
     notes, logs = C.attach_all(stones, [{"url": "u1", "cert_no": "2141438167", "lab": "GIA"}], F.logo(), "sb", "k",
                                uploader=boom, fetch=fetch)
     assert "pdf_url" not in stones[0] and "unexpected problem" in notes[0]
+
+
+def test_client_without_logo_still_verified():
+    """Create quote inserts nothing when the client has no logo; the QR area is left blank."""
+    UP.clear()
+    log = C.process({"url": "u", "cert_no": "2141438167", "lab": "GIA"}, None, "sb", "k",
+                    uploader=uploader, fetch=lambda u: F.gia())
+    assert log["verification"] == "passed" and log["pdf_url"]

@@ -6,8 +6,9 @@ For each stone with a certificate file in the stone data:
   3. detect the lab/format (IGI, GIA, GIA Colour) from its text and check it against the
      layout the redaction zones were made for;
   4. redact with certs.redact_pdf (the same code as Create quote: all but the last 4 digits
-     of the report and inscription numbers masked, the QR code replaced by the Pure Carbon
-     Group logo, saved with garbage=4, deflate=True, clean=True), then strip metadata;
+     of the report and inscription numbers masked, the QR code replaced by the selected
+     client's logo — or left blank when the client has no logo — saved with garbage=4,
+     deflate=True, clean=True), then strip metadata;
   5. FAIL CLOSED: verify that the full report and inscription numbers appear nowhere (text
      layer, metadata, annotations, form fields, attachments, raw streams) and that the QR
      area shows only the logo. Any failure: not attached;
