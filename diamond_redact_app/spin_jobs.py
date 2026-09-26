@@ -886,3 +886,103 @@ def revert_bad(sb_url, key, include_all=False):
                "at": datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")}
     _log("spin-revert", summary)
     return {"rows": rows, "links": lrows, "summary": summary}
+
+
+# ── One-time clean-up: the viewer's promo clip that was re-hosted as stones' videos ──
+PROMO_FILE = "b4752b32efe5496f8f1a024122b7ea97.mp4"     # known copy; others are found by identical content
+
+
+def _list_bucket(sb_url, key):
+    """Every file name at the top of the quote-media bucket (videos/images; frame folders skipped)."""
+    out, off = [], 0
+    while True:
+        try:
+            r = requests.post(f"{sb_url}/storage/v1/object/list/{qm.BUCKET}",
+                              headers={**_h(key), "Content-Type": "application/json"},
+                              json={"prefix": "", "limit": 1000, "offset": off}, timeout=30)
+        except Exception as e:
+            raise RevertError(f"listing the quote-media bucket failed ({type(e).__name__})")
+        if r.status_code != 200:
+            raise RevertError(f"listing the quote-media bucket failed: HTTP {r.status_code} — " + KEY_HELP)
+        rows = r.json()
+        out += [x["name"] for x in rows if x.get("name") and x.get("id")]      # folders have no id
+        if len(rows) < 1000:
+            return out
+        off += 1000
+
+
+def find_promo(sb_url, key):
+    """Stones whose video is the promo clip (same content as PROMO_FILE), and every stored copy.
+    Read-only. Raises RevertError on any blocked, empty or unreadable read."""
+    kp = key_problem(key)
+    if kp:
+        raise RevertError(kp)
+    ref = _file_hash(sb_url, PROMO_FILE)
+    if ref is None:
+        raise RevertError(f"the known promo file {PROMO_FILE} isn't readable in the quote-media bucket (already "
+                          "deleted by an earlier clean-up, or storage is blocked), so copies can't be recognised — "
+                          "nothing was changed")
+    quotes = _read_all(sb_url, key, "quotes", "id,client,created_at,stones", "quotes", "created_at.desc")
+    if not quotes:
+        raise RevertError("the quotes table returned 0 rows — the key can't read it: " + KEY_HELP)
+    videos = [n for n in _list_bucket(sb_url, key) if n.lower().endswith((".mp4", ".webm"))]
+    used = {_media_name(s.get("video_url")) for q in quotes for s in (q.get("stones") or [])}
+    names = sorted(set(videos) | {n for n in used if n.endswith((".mp4", ".webm")) and "/" not in n})
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        hashes = dict(zip(names, ex.map(lambda n: _file_hash(sb_url, n), names)))
+    unreadable = [n for n in names if hashes.get(n) is None and n != PROMO_FILE]
+    promo = {n for n in names if hashes.get(n) == ref} | {PROMO_FILE}
+    stones = []
+    for q in quotes:
+        for i, s in enumerate(q.get("stones") or []):
+            if _media_name(s.get("video_url")) in promo:
+                stones.append({"quote": q["id"], "index": i, "client": q.get("client") or "",
+                               "last4": str(s.get("cert_last4") or ""), "file": _media_name(s.get("video_url"))})
+    return {"stones": stones, "files": sorted(promo), "unreadable": unreadable,
+            "videos_checked": len(names), "quotes_read": len(quotes)}
+
+
+def clear_promo(sb_url, key, found):
+    """Clears video_url on each stone in `found` (nothing else on the stone changes), then
+    deletes every promo copy from storage — only if all quote updates succeeded."""
+    by_q = {}
+    for x in found["stones"]:
+        by_q.setdefault(x["quote"], []).append(x)
+    results = []
+    for qid, items in by_q.items():
+        try:                                             # fresh copy of this quote, just before changing it
+            r = requests.get(f"{sb_url}/rest/v1/quotes", params={"id": f"eq.{qid}", "select": "id,stones"},
+                             headers=_h(key), timeout=20)
+            q = (r.json() or [None])[0] if r.status_code == 200 else None
+        except Exception:
+            q = None
+        if q is None:
+            results += [{**x, "result": "ERROR: quote not readable"} for x in items]
+            continue
+        stones = q.get("stones") or []
+        for x in items:
+            s = stones[x["index"]] if x["index"] < len(stones) else {}
+            if _media_name(s.get("video_url")) in found["files"]:
+                s["video_url"] = ""                      # the only change: the stone shows its image
+        try:
+            r = requests.patch(f"{sb_url}/rest/v1/quotes", params={"id": f"eq.{qid}"},
+                               headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=representation"},
+                               json={"stones": stones}, timeout=20)
+            res = "cleared" if r.status_code == 200 and r.json() else f"ERROR: not updated (HTTP {r.status_code})"
+        except Exception as e:
+            res = f"ERROR: not updated ({type(e).__name__})"
+        results += [{**x, "result": res} for x in items]
+    deleted, still = [], []
+    if all(r["result"] == "cleared" for r in results):
+        try:
+            requests.delete(f"{sb_url}/storage/v1/object/{qm.BUCKET}",
+                            headers={**_h(key), "Content-Type": "application/json"},
+                            data=json.dumps({"prefixes": found["files"]}), timeout=30)
+        except Exception:
+            pass
+        for n in found["files"]:                          # confirm each copy is really gone
+            (still if _file_hash(sb_url, n) is not None else deleted).append(n)
+    _log("promo-clear", {"stones": len(results), "errors": sum(not r["result"].startswith("cleared") for r in results),
+                         "deleted": deleted, "still_there": still})
+    return {"stones": results, "deleted": deleted, "still_there": still,
+            "files_kept_because_of_errors": [] if all(r["result"] == "cleared" for r in results) else found["files"]}

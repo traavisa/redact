@@ -620,6 +620,8 @@ def stone_lookup(stone):
         return None, nivoda_client.sanitise(e), ""
 
 _spin_jobs.STONE_LOOKUP = stone_lookup
+# The revert and 360 upgrade buttons stay disabled until switched back on here.
+REPAIR_BUTTONS_ENABLED = False
 
 def save_quote(client, stones_payload, expiry_days):
     """Writes one quote row to Supabase and returns its link, or None on failure.
@@ -1046,8 +1048,62 @@ with tab2:
     qhc1,qhc2 = st.columns([4,1])
     with qhc1: st.markdown('<div class="section-label" style="margin-bottom:0">Quote history</div>', unsafe_allow_html=True)
 
-    # ── One-time revert: bad captures → original viewer links ─────────────────
+    # ── One-time clean-up: the promo clip used as stones' videos ──────────────
     import spin_jobs
+    with st.expander("🧹 Remove the promo clip from quotes", expanded=bool(st.session_state.get("promo_found") or st.session_state.get("promo_done"))):
+        st.caption(f"Finds every stone whose video is the viewer's promo clip ({spin_jobs.PROMO_FILE} or any file with "
+                   "exactly the same content), clears that video so the stone shows its image only, then deletes the "
+                   "clip files from storage. Nothing else on the stone changes.")
+        if st.button("1. Find stones with the promo clip", key="promo_find", use_container_width=True):
+            st.session_state.pop("promo_done", None)
+            with st.spinner("Checking every quote and stored video…"):
+                try:
+                    st.session_state.promo_found = spin_jobs.find_promo(SUPABASE_URL, SUPABASE_KEY)
+                except spin_jobs.RevertError as e:
+                    st.session_state.promo_found = {"error": str(e)}
+            st.rerun()
+        _pf, _pd = st.session_state.get("promo_found"), st.session_state.get("promo_done")
+        if _pf and _pf.get("error"):
+            st.error("ERROR — nothing was changed: " + _pf["error"])
+        elif _pf and not _pd:
+            st.markdown(f"Checked {_pf['quotes_read']} quotes and {_pf['videos_checked']} stored videos: "
+                        f"**{len(_pf['stones'])} stone(s)** use the promo clip; **{len(_pf['files'])} copy/copies** "
+                        "of the clip in storage: " + ", ".join(f"`{f}`" for f in _pf["files"]))
+            if _pf["unreadable"]:
+                st.warning(f"{len(_pf['unreadable'])} stored video(s) couldn't be read, so couldn't be compared: "
+                           + ", ".join(_pf["unreadable"]))
+            import pandas as pd
+            if _pf["stones"]:
+                st.dataframe(pd.DataFrame([{"Quote": f"{QUOTE_BASE}/q/{x['quote']}", "Client": x["client"],
+                                            "Stone": "···" + x["last4"]} for x in _pf["stones"]]),
+                             hide_index=True, use_container_width=True)
+            if st.button(f"2. Clear the video on these {len(_pf['stones'])} stone(s) and delete the clip files",
+                         key="promo_clear", type="primary", use_container_width=True):
+                with st.spinner("Clearing…"):
+                    st.session_state.promo_done = spin_jobs.clear_promo(SUPABASE_URL, SUPABASE_KEY, _pf)
+                load_quote_history.clear()
+                st.rerun()
+        if _pd:
+            errs = [x for x in _pd["stones"] if x["result"] != "cleared"]
+            (st.error if errs or _pd["still_there"] or _pd["files_kept_because_of_errors"] else st.success)(
+                f"{len(_pd['stones']) - len(errs)} stone(s) cleared, {len(errs)} ERROR(S) · files deleted: "
+                f"{len(_pd['deleted'])}" + (f" · still in storage: {', '.join(_pd['still_there'])}" if _pd["still_there"] else "")
+                + (" · files NOT deleted because some quotes failed" if _pd["files_kept_because_of_errors"] else ""))
+            import csv, io as _io
+            buf = _io.StringIO()
+            w = csv.writer(buf)
+            w.writerow(["quote_link", "client", "stone_last4"])
+            for x in _pd["stones"]:
+                if x["result"] == "cleared":
+                    w.writerow([f"{QUOTE_BASE}/q/{x['quote']}", x["client"], x["last4"]])
+            if errs:
+                st.dataframe([{"Quote": f"{QUOTE_BASE}/q/{x['quote']}", "Stone": "···" + x["last4"], "Result": x["result"]}
+                              for x in errs], hide_index=True)
+            st.download_button("Download CSV of cleared stones", buf.getvalue(), file_name="promo_clip_cleared.csv",
+                               mime="text/csv", use_container_width=True)
+            st.code(buf.getvalue(), language=None)
+
+    # ── One-time revert: bad captures → original viewer links ─────────────────
     with st.expander("⚠️ Revert bad 360 captures → original viewer links", expanded=bool(st.session_state.get("spin_revert"))):
         st.caption(f"Checks EVERY quote and viewer link for media that isn't the stone's own: 360 captures with "
                    f"fewer than {spin_jobs.sc.MIN_FRAMES} frames or the same frames as a different viewer (e.g. "
@@ -1055,8 +1111,10 @@ with tab2:
                    "(a viewer's generic promo clip). Each affected stone gets its original viewer link back — the "
                    "table says which method found it. Generic images are removed. Nothing else is deleted.")
         _all = st.checkbox("Revert ALL 360 captures, not only bad ones", key="spin_revert_all")
+        if not REPAIR_BUTTONS_ENABLED:
+            st.caption("Disabled for now.")
         if st.button("Find and revert bad 360 captures" if not _all else "Revert ALL 360 captures",
-                     key="spin_revert_go", type="primary", use_container_width=True):
+                     key="spin_revert_go", type="primary", use_container_width=True, disabled=not REPAIR_BUTTONS_ENABLED):
             with st.spinner("Checking every quote and viewer link…"):
                 try:
                     st.session_state.spin_revert = spin_jobs.revert_bad(SUPABASE_URL, SUPABASE_KEY, include_all=_all)
@@ -1127,7 +1185,7 @@ with tab2:
             if not _aud:
                 st.caption("Tip: list affected stones first, so older quotes beyond the recent history are included.")
             if st.button(f"Capture 360 frames for {len(_todo)} stone(s)", key="up360_go",
-                         use_container_width=True, disabled=not _vok):
+                         use_container_width=True, disabled=not (_vok and REPAIR_BUTTONS_ENABLED)):
                 started, msg = spin_jobs.start_upgrade(SUPABASE_URL, SUPABASE_KEY, _aud["quotes"] if _aud else qhistory)
                 (st.success if started else st.error)(msg)
                 if started:
