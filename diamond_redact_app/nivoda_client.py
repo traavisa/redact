@@ -261,6 +261,9 @@ class Client:
             media_sel, media_desc = _media_selection(dt, types)
             cert_media_sel, cert_media_desc = _cert_media_selection(ct, types)
             cert_lookup = _cert_lookup_field(root, ct.get("name") or _named(cf["type"]).get("name"))
+            stone_lookup = _stone_lookup_field(root, dt.get("name"), it.get("name"))
+            cert_filter = next((n for n, sp in filters.items()
+                                if "cert" in n.lower() and sp.get("kind") == "list_str"), None)
             cs, ds = scalars(ct), scalars(dt)
             cert_extra = [f for f in FANCY_FIELDS + AS_GROWN_FIELDS if f in cs]
             for where, fs in (("diamond", ds), ("certificate", cs)):
@@ -277,10 +280,11 @@ class Client:
         try:
             media = {"sel": media_sel, "keys": _sel_keys(media_sel), "desc": [sanitise(d) for d in media_desc],
                      "cert_sel": cert_media_sel, "cert_keys": _sel_keys(cert_media_sel),
-                     "cert_desc": [sanitise(d) for d in cert_media_desc], "cert_lookup": cert_lookup}
+                     "cert_desc": [sanitise(d) for d in cert_media_desc], "cert_lookup": cert_lookup,
+                     "stone_lookup": stone_lookup, "cert_filter": cert_filter}
         except NameError:
             media = {"sel": "", "keys": [], "desc": [], "cert_sel": "", "cert_keys": [], "cert_desc": [],
-                     "cert_lookup": None}
+                     "cert_lookup": None, "stone_lookup": None, "cert_filter": None}
         return {"verified": True, "filters": filters, "cert_extra": cert_extra,
                 "count_query": count_query, "lg_flag": lg_flag, "docs": docs, "media": media}
 
@@ -312,6 +316,51 @@ class Client:
             return None, "certificate lookup: no certificate with that ID"
         cm = {k: c.get(k) for k in media.get("cert_keys") or [] if c.get(k) not in (None, "", [], {})}
         return ({"certificate": cm} if cm else None), ("ok" if cm else "certificate has no 360 data")
+
+    # ── one stone by its stock ID or certificate number (revert / recovery) ──
+    def stone_viewer(self, stock_id=None, cert_number=None):
+        """The stone's certificate ID and its own 360 viewer link (product_videos loupe360_url,
+        type 360). Returns (info dict or None, reason, method). info: cert_id, viewer_url."""
+        sch = self.schema()
+        media = sch.get("media") or {}
+        if not sch.get("verified"):
+            return None, "schema not confirmed", ""
+        sel = f"certificate {{ id certNumber {media.get('cert_sel') or ''} }}"
+        tries = []
+        lk = media.get("stone_lookup")
+        if stock_id and lk and re.fullmatch(r"[A-Za-z0-9-]{4,80}", str(stock_id)) \
+                and re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*!?", lk["type"]):
+            body = sel if lk["returns"] == "diamond" else f"diamond {{ id {sel} }}"
+            tries.append(("stock ID lookup", f"query ($v: {lk['type']}) {{ d: {lk['field']}({lk['arg']}: $v) {{ {body} }} }}",
+                          {"v": str(stock_id)}, lambda d: [((d or {}).get("d") or {}).get("diamond", (d or {}).get("d"))]))
+        cf = media.get("cert_filter")
+        if cert_number and cf and re.fullmatch(r"[A-Za-z0-9-]{4,40}", str(cert_number)):
+            q = ("query { d: diamonds_by_query(query: " + gql_literal({cf: [str(cert_number)]}) +
+                 f", offset: 0, limit: 5) {{ items {{ diamond {{ id {sel} }} }} }} }}")
+            tries.append(("certificate number search", q, None,
+                          lambda d: [i.get("diamond") for i in (((d or {}).get("d") or {}).get("items") or [])]))
+        if not tries:
+            return None, ("no stock ID / certificate number on the stone, or the API has no lookup for them"), ""
+        last = ""
+        for method, q, variables, pick in tries:
+            try:
+                data = self._post(q, variables, token=self._token())
+            except (SourceError, _AuthError) as e:
+                last = f"{method} failed ({sanitise(e) or 'sign-in refused'})"
+                continue
+            for dia in pick(data):
+                c = (dia or {}).get("certificate") or {}
+                if cert_number and method.startswith("certificate") and str(c.get("certNumber")) != str(cert_number):
+                    continue
+                viewer = ""
+                for v in (c.get("product_videos") or []):
+                    if isinstance(v, dict) and str(v.get("type") or "").lower() in ("360", "v360") and v.get("loupe360_url"):
+                        viewer = v["loupe360_url"]
+                        break
+                if c.get("id"):
+                    return {"cert_id": str(c["id"]), "viewer_url": viewer}, "ok", method
+            last = last or f"{method}: stone not found"
+        return None, last, ""
 
     # ── search ───────────────────────────────────────────────────────────────
     def search(self, query_input, max_stones=500):
@@ -511,7 +560,7 @@ def whitelist(item, media_keys=None, cert_media_keys=None):
 
 # ── Certificate media: 360 frames (v360 / product_videos) and the still image ────
 CERT_MEDIA_WANTED = {"image": None, "v360": ["top_index", "frame_count", "url"],
-                     "product_videos": ["url", "type", "frame_count", "top_index"]}
+                     "product_videos": ["url", "type", "frame_count", "top_index", "loupe360_url"]}
 
 
 def _cert_media_selection(ct, types):
@@ -538,6 +587,25 @@ def _cert_media_selection(ct, types):
             desc.append(f"certificate.{name} ({_type_str(f['type'])}) {{ " +
                         ", ".join(f"{x}: {_type_str(have[x]['type'])}" for x in use) + " }")
     return " ".join(sel), desc
+
+
+def _stone_lookup_field(root, diamond_type_name, item_type_name):
+    """A root query that returns one stone by its ID (e.g. get_diamond_by_id(diamond_id: ID!)),
+    returning the diamond type or the search item type. Returns {"field","arg","type","returns"}."""
+    best = None
+    for f in root.get("fields") or []:
+        rt = _named(f["type"]).get("name")
+        if _is_list(f["type"]) or rt not in (diamond_type_name, item_type_name):
+            continue
+        req = [a for a in f.get("args") or [] if (a.get("type") or {}).get("kind") == "NON_NULL"]
+        if len(req) != 1 or _named(req[0]["type"]).get("name") not in ("ID", "String"):
+            continue
+        cand = {"field": f["name"], "arg": req[0]["name"], "type": _type_str(req[0]["type"]),
+                "returns": "diamond" if rt == diamond_type_name else "item"}
+        score = ("diamond" in f["name"].lower()) + ("id" in f["name"].lower()) + ("id" in req[0]["name"].lower())
+        if best is None or score > best[0]:
+            best = (score, cand)
+    return best[1] if best else None
 
 
 def _cert_lookup_field(root, cert_type_name):

@@ -19,7 +19,8 @@ Finding the frames, in order:
      config and any nested viewer frame, looking for numbered frame URLs, URL templates
      ("…/" + i + ".jpg", `${i}.jpg`, {frame}), frame counts and frame base URLs.
      Candidate patterns are checked by downloading a frame before anything is used.
-A direct video file (MP4 / WebM) found on the way is reported so the caller can prefer it.
+Video files inside a viewer page are NEVER used (they are the viewer's own promo clip);
+a stone's video file is only taken from its own API fields (video_file_from_hint).
 
 Every step records a short diagnostic (hosts masked) so a failed capture says exactly why.
 Nothing identifying goes into file names: only the random folder and 000.jpg, 001.jpg, …
@@ -267,10 +268,20 @@ def _walk(obj, path=""):
 
 
 def video_file_from_hint(hint):
-    """A direct MP4 / WebM URL in the stone data, if any."""
-    for _, v in _walk(hint or {}):
-        if isinstance(v, str) and re.match(r"https?://", v) and re.search(r"\.(mp4|webm)(\?|$)", v, re.I):
-            return v
+    """A direct MP4 / WebM file of THIS stone from its own API fields: a product_videos entry
+    whose type is a video (not a 360 frame set) and whose URL is a video file. Nothing else
+    counts — in particular never a file found inside a viewer page (that is the viewer's own
+    promo clip, the same for every stone)."""
+    hint = hint or {}
+    c = hint.get("certificate") if isinstance(hint.get("certificate"), dict) else {}
+    for pv in (c.get("product_videos"), hint.get("product_videos")):
+        for v in (pv if isinstance(pv, list) else [pv] if isinstance(pv, dict) else []):
+            if not isinstance(v, dict):
+                continue
+            t = str(v.get("type") or "").strip().lower()
+            u = str(v.get("url") or "")
+            if t and t not in ("360", "v360") and re.match(r"https?://", u) and re.search(r"\.(mp4|webm)(\?|$)", u, re.I):
+                return u
     return ""
 
 
@@ -492,7 +503,10 @@ def _analyse(page_url, facts, depth=0):
 def _from_page(url, facts, id_hint=None):
     res = _analyse(url, facts)
     known = max(res["counts"]) if res["counts"] else None
-    video = next(iter(dict.fromkeys(res["videos"])), "")
+    if res["videos"]:
+        facts.append(f"{len(set(res['videos']))} video file(s) inside the viewer page — ignored (a viewer's own "
+                     "clip, not this stone's video)")
+    video = ""                         # never take a video file from a viewer page
     # a) Numbered links in the page. Prefer groups whose URL mentions the viewer's own ID.
     explicit = res["explicit"]
     if id_hint:
@@ -720,6 +734,7 @@ def capture(sb_url, key, viewer_url, hint=None):
     t0 = time.time()
     try:
         fs, video, facts = find_frames(viewer_url, hint)
+        video = ""                     # viewer pages never supply a video file
         if fs is None:
             # The last fact is the most specific reason (e.g. "viewer page answered HTTP 403")
             last = facts[-1] if facts else ""

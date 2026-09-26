@@ -606,6 +606,21 @@ import spin_jobs as _spin_jobs
 # Unset (default) = OFF: no capture on save, no 360 upgrade; quotes keep original viewer links.
 _spin_jobs.SPIN_ENABLED = get_setting("SPIN_ENABLED").strip().lower() == "true"
 
+def stone_lookup(stone):
+    """A quote stone's certificate ID and own viewer link from the search API, by its stored
+    stock ID (Live Search) or certificate number. Used by the revert to restore viewer links."""
+    import nivoda_client
+    url, user, pw = (get_setting(k) for k in ("NIVODA_API_URL", "NIVODA_USERNAME", "NIVODA_PASSWORD"))
+    if not (url and user and pw):
+        return None, "search API not configured", ""
+    try:
+        return nivoda_client.Client(url, user, pw, _LOOKUP_STATE).stone_viewer(
+            stock_id=stone.get("ls_ref"), cert_number=_spin_jobs.cert_number_of(stone))
+    except nivoda_client.SourceError as e:
+        return None, nivoda_client.sanitise(e), ""
+
+_spin_jobs.STONE_LOOKUP = stone_lookup
+
 def save_quote(client, stones_payload, expiry_days):
     """Writes one quote row to Supabase and returns its link, or None on failure.
     Shared by the manual flow, the spreadsheet (bulk) flow and Live Search.
@@ -1034,10 +1049,11 @@ with tab2:
     # ── One-time revert: bad captures → original viewer links ─────────────────
     import spin_jobs
     with st.expander("⚠️ Revert bad 360 captures → original viewer links", expanded=bool(st.session_state.get("spin_revert"))):
-        st.caption(f"Checks EVERY quote and viewer link. A capture is bad if it has fewer than {spin_jobs.sc.MIN_FRAMES} "
-                   "frames, its frames are the same as a capture of a different viewer (a site's shared images, e.g. "
-                   "bridal_image), or its frames can't be read. Each bad one is removed and the stone gets its "
-                   "original viewer link back. Nothing else is deleted.")
+        st.caption(f"Checks EVERY quote and viewer link for media that isn't the stone's own: 360 captures with "
+                   f"fewer than {spin_jobs.sc.MIN_FRAMES} frames or the same frames as a different viewer (e.g. "
+                   "bridal_image), and re-hosted videos or images that are the same file as a DIFFERENT stone's "
+                   "(a viewer's generic promo clip). Each affected stone gets its original viewer link back — the "
+                   "table says which method found it. Generic images are removed. Nothing else is deleted.")
         _all = st.checkbox("Revert ALL 360 captures, not only bad ones", key="spin_revert_all")
         if st.button("Find and revert bad 360 captures" if not _all else "Revert ALL 360 captures",
                      key="spin_revert_go", type="primary", use_container_width=True):
@@ -1054,9 +1070,11 @@ with tab2:
         elif _rv:
             sm = _rv["summary"]
             (st.error if sm["errors"] else st.success)(
-                f"Checked {sm['quotes_read']} quotes and {sm['links_read']} viewer links at {sm['at']} UTC: "
-                f"{sm['captures_found']} captures, {sm['bad_captures']} bad → {sm['stones_reverted']} stone(s) and "
-                f"{sm['links_reverted']} viewer link(s) reverted, {sm['errors']} ERROR(S)")
+                f"Checked {sm['quotes_read']} quotes, {sm['links_read']} viewer links and {sm['files_checked']} "
+                f"media files at {sm['at']} UTC: {sm['bad_captures']} bad 360 capture(s), {sm['generic_videos']} "
+                f"generic video file(s), {sm['generic_images']} generic image file(s) → {sm['stones_reverted']} "
+                f"stone fix(es) and {sm['links_reverted']} viewer link(s) reverted, {sm['errors']} ERROR(S)"
+                + (f" · {sm['files_unreadable']} file(s) couldn't be read (compared by name only)" if sm["files_unreadable"] else ""))
             import pandas as pd
             if _rv["rows"]:
                 st.markdown("**Quote stones**")

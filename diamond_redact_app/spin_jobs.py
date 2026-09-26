@@ -229,12 +229,8 @@ def capture_one(sb_url, key, vendor_url, hint=None):
             return {"ok": True, "spin": None, "mp4": v["url"], "note": "direct video file found in the stone data — copied",
                     "facts": [f"video file {sc.mask(mp4)}"], "video": mp4}
     res = dict(sc.capture(sb_url, key, vendor_url, hint))
-    # 2. A direct video file referenced by the viewer page
-    if res.get("video"):
-        v = qm.process(sb_url, key, res["video"], "video")
-        if v["how"] == "hosted":
-            return {**res, "ok": True, "spin": None, "mp4": v["url"],
-                    "note": "direct video file found in the viewer page — copied"}
+    # (No video file is ever taken from a viewer page: that was a viewer's own promo clip.)
+    res["video"] = ""
     if res["ok"]:
         if not record_spin(sb_url, key, vendor_url, res["spin"]):
             res["facts"] = res["facts"] + ["media_links has no spin columns yet (run the SQL update)"]
@@ -262,7 +258,11 @@ def apply(stone, res):
     """Puts a successful result on a stone dict (in place). Returns True if changed.
     The stone keeps our own /v/ link in media_ref (never served) so it can be redone later."""
     if res.get("mp4"):
+        prev = str(stone.get("video_url") or "")
+        if token_of(prev) or prev.startswith(LEGACY_VIEWER):
+            stone["media_ref"] = prev                  # the original viewer, kept (never served)
         stone["video_url"] = res["mp4"]
+        stone["video_source"] = "api"                  # from the stone's own API fields
         stone.pop("spin", None)
         return True
     if res.get("ok") and res.get("spin"):
@@ -614,21 +614,66 @@ def _read_all(sb_url, key, table, select, what, order=None):
         off += 1000
 
 
-def _frame_hash(sb_url, spin_id):
+def _file_hash(sb_url, path):
+    """sha1 of one stored file (streamed), or None if it can't be read."""
     import hashlib
     try:
-        r = requests.get(f"{sb_url}/storage/v1/object/public/{qm.BUCKET}/{spin_id}/000.jpg", timeout=20)
-        return hashlib.sha1(r.content).hexdigest() if r.status_code == 200 and r.content else None
+        with requests.get(f"{sb_url}/storage/v1/object/public/{qm.BUCKET}/{path}", stream=True, timeout=(10, 60)) as r:
+            if r.status_code != 200:
+                return None
+            h, size = hashlib.sha1(), 0
+            for chunk in r.iter_content(256 * 1024):
+                h.update(chunk)
+                size += len(chunk)
+            return h.hexdigest() if size else None
     except Exception:
         return None
 
 
+def _frame_hash(sb_url, spin_id):
+    return _file_hash(sb_url, f"{spin_id}/000.jpg")
+
+
+# Stone lookup in the search API for the revert (set by the app): stone dict ->
+# (info {"cert_id", "viewer_url"} or None, reason, method)
+STONE_LOOKUP = None
+
+
+def stone_identity(s):
+    """What makes two quote stones the same diamond: stock ID, else certificate number, else last 4."""
+    import re
+    if s.get("ls_ref"):
+        return "id:" + str(s["ls_ref"])
+    m = re.search(r"([A-Za-z0-9-]{5,})\s*$", str(s.get("orig_filename") or ""))
+    if m and any(ch.isdigit() for ch in m.group(1)):
+        return "cert:" + m.group(1)
+    return "last4:" + str(s.get("cert_last4") or "") if s.get("cert_last4") else ""
+
+
+def cert_number_of(s):
+    import re
+    m = re.search(r"([0-9][A-Za-z0-9-]{4,})\s*$", str(s.get("orig_filename") or ""))
+    return m.group(1) if m else ""
+
+
+def _media_name(u):
+    u = str(u or "")
+    return u[len(qm.MEDIA_BASE):] if u.startswith(qm.MEDIA_BASE) else ""
+
+
 def revert_bad(sb_url, key, include_all=False):
-    """Removes every captured-spin reference that is bad — fewer than MIN_FRAMES frames, or
-    images shared with a capture of a DIFFERENT viewer (a site's own images, e.g.
-    bridal_image*), or frames that can't be read — from every quote and media_links row,
-    whatever code made it, and restores the stone's original viewer link. include_all
-    reverts every capture. Returns {"rows": [...], "links": [...], "summary": {...}}.
+    """Finds, in EVERY quote and media_links row, media that isn't the stone's own and puts
+    the stone's original viewer link back:
+      - 360 captures with fewer than MIN_FRAMES frames, frames shared with a capture of a
+        different viewer (a site's own images, e.g. bridal_image*), or frames that can't be
+        read (include_all: every capture);
+      - re-hosted VIDEO files that are the same file (URL or content) as the video of a
+        different stone — a viewer's generic promo clip;
+      - re-hosted IMAGES that are the same file as a different stone's image (removed).
+    The original viewer comes from, in order: the stone's kept /v/ link (media_ref); the
+    media_links row of its capture; the media_links row whose viewer URL has the stone's
+    certificate ID (from the search API by stock ID / certificate number); a fresh /v/ link
+    for the stone's own viewer from the API. Every stone says which method worked.
     Raises RevertError on any blocked or empty read: never reports 0 by mistake."""
     kp = key_problem(key)
     if kp:
@@ -645,20 +690,19 @@ def revert_bad(sb_url, key, include_all=False):
                               "supabase/quote_media_setup.sql in the Supabase SQL Editor first")
         raise
     uses_links = any(token_of(s.get("video_url")) or token_of(s.get("media_ref")) or s.get("spin")
-                     for q in quotes for s in (q.get("stones") or []))
+                     or _media_name(s.get("video_url")) for q in quotes for s in (q.get("stones") or []))
     if not links and uses_links:
         raise RevertError("media_links returned 0 rows although quotes use viewer links — the key can't "
                           "read it: " + KEY_HELP)
-
     by_token = {l["token"]: l for l in links}
 
     def rows_for(spin_id):
         return [l for l in links if l.get("spin_id") == spin_id or spin_id in (l.get("old_spin_ids") or [])]
 
-    # Every capture, where it's used, and which viewer(s) it came from
+    # ── 1. 360 captures ──
     spins = {}
     for q in quotes:
-        for i, s in enumerate(q.get("stones") or []):
+        for s in q.get("stones") or []:
             sp = s.get("spin")
             if isinstance(sp, dict) and sp.get("id"):
                 e = spins.setdefault(sp["id"], {"n": sp.get("n"), "vendors": set()})
@@ -667,86 +711,154 @@ def revert_bad(sb_url, key, include_all=False):
                     e["vendors"].add(ref["vendor_url"])
     for l in links:
         if l.get("spin_id"):
-            e = spins.setdefault(l["spin_id"], {"n": l.get("spin_frames"), "vendors": set()})
-            e["vendors"].add(l["vendor_url"])
+            spins.setdefault(l["spin_id"], {"n": l.get("spin_frames"), "vendors": set()})["vendors"].add(l["vendor_url"])
     for sid, e in spins.items():
         for l in rows_for(sid):
             e["vendors"].add(l["vendor_url"])
-    # Same first frame as a capture of a different viewer = a site's shared images
-    with ThreadPoolExecutor(max_workers=8) as ex:
-        hashes = dict(zip(spins, ex.map(lambda sid: _frame_hash(sb_url, sid), list(spins))))
-    by_hash = {}
-    for sid, h in hashes.items():
-        if h:
-            by_hash.setdefault(h, set()).update(spins[sid]["vendors"] or {f"?{sid}"})
 
-    def why_bad(sid):
+    # ── 2. Re-hosted videos and images, by file ──
+    files = {}                                  # media file name -> {"kind", "stones": set(identity)}
+    for q in quotes:
+        for s in q.get("stones") or []:
+            ident = stone_identity(s) or f"q:{q['id']}"
+            for fld, kind in (("video_url", "video"), ("image_url", "image")):
+                name = _media_name(s.get(fld))
+                if name and "/" not in name:    # frames of a capture are handled above
+                    files.setdefault(name, {"kind": kind, "stones": set()})["stones"].add(ident)
+
+    paths = [f"{sid}/000.jpg" for sid in spins] + list(files)
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        hashes = dict(zip(paths, ex.map(lambda p: _file_hash(sb_url, p), paths)))
+
+    if paths and all(hashes.get(p) is None for p in paths):
+        raise RevertError(f"none of the {len(paths)} stored media files could be read from the quote-media bucket — "
+                          "check the bucket is public (supabase/quote_media_setup.sql section 1)")
+    by_hash = {}
+    for sid in spins:
+        h = hashes.get(f"{sid}/000.jpg")
+        if h:
+            by_hash.setdefault(("spin", h), set()).update(spins[sid]["vendors"] or {f"?{sid}"})
+    for name, f in files.items():
+        h = hashes.get(name) or f"name:{name}"
+        by_hash.setdefault((f["kind"], h), set()).update(f["stones"])
+
+    def spin_why(sid):
         e = spins.get(sid) or {}
         try:
             n = int(e.get("n") or 0)
         except (TypeError, ValueError):
             n = 0
         if n < sc.MIN_FRAMES:
-            return f"{n} frames (under {sc.MIN_FRAMES})"
-        if hashes.get(sid) is None:
-            return "frames can't be read"
-        if len(by_hash.get(hashes[sid], ())) >= 2:
-            return f"shared images (same frames as {len(by_hash[hashes[sid]]) - 1} other viewer(s))"
-        return "all captures reverted (option ticked)" if include_all else ""
+            return f"360 capture: {n} frames (under {sc.MIN_FRAMES})"
+        h = hashes.get(f"{sid}/000.jpg")
+        if h is None:
+            return "360 capture: frames can't be read"
+        if len(by_hash.get(("spin", h), ())) >= 2:
+            return f"360 capture: same frames as {len(by_hash[('spin', h)]) - 1} other viewer(s)"
+        return "360 capture (all captures option)" if include_all else ""
 
-    bad = {sid: why_bad(sid) for sid in spins}
-    bad = {sid: w for sid, w in bad.items() if w}
+    def file_why(name):
+        f = files[name]
+        h = hashes.get(name)
+        group = by_hash.get((f["kind"], h or f"name:{name}"), set())
+        if len(group) >= 2:
+            return (f"{f['kind']}: same file as {len(group) - 1} other stone(s) — generic "
+                    + ("promo clip" if f["kind"] == "video" else "picture") + ", not this stone's")
+        return ""
 
-    # Quotes: restore the original viewer link on each bad stone
-    rows = []
+    bad_spin_ids = {sid: w for sid, w in ((sid, spin_why(sid)) for sid in spins) if w}
+    bad_files = {n: w for n, w in ((n, file_why(n)) for n in files) if w}
+
+    # ── 3. Put each affected stone's own viewer back ──
+    lookups = {}
+
+    def original_viewer(s, sid=None):
+        """(link, method) for the stone's original viewer, or ("", reason)."""
+        ref = str(s.get("media_ref") or "")
+        if token_of(ref) or ref.startswith(LEGACY_VIEWER):
+            return ref, "kept /v/ link on the stone"
+        if sid:
+            c = [l for l in rows_for(sid) if l.get("token")]
+            if c:
+                return qm.VIEWER_LINK_BASE + c[0]["token"], "media_links (the capture's /v/ link)"
+        if STONE_LOOKUP is None:
+            return "", "no /v/ link on record, and the search API isn't configured for a lookup"
+        ident = stone_identity(s)
+        if ident not in lookups:
+            try:
+                lookups[ident] = STONE_LOOKUP(s)
+            except Exception as e:
+                lookups[ident] = (None, f"lookup error ({type(e).__name__})", "")
+        info, reason, method = lookups[ident]
+        if not info:
+            return "", f"no /v/ link on record; API lookup: {reason}"
+        cid = info["cert_id"].lower()
+        c = [l for l in links if cid and cid in str(l.get("vendor_url") or "").lower() and l.get("token")]
+        if c:
+            return qm.VIEWER_LINK_BASE + c[0]["token"], f"media_links (/v/ link made when first saved; found via {method})"
+        if info.get("viewer_url"):
+            try:
+                return qm._viewer_link(sb_url, key, info["viewer_url"]), f"fresh /v/ link for its own viewer (via {method})"
+            except Exception as e:
+                return "", f"couldn't create a /v/ link ({type(e).__name__})"
+        return "", f"API lookup ({method}) found the stone but no 360 viewer link"
+
+    rows, changed_quotes = [], {}
     for q in quotes:
         stones = q.get("stones") or []
-        changed = False
-        qrows = []
         for i, s in enumerate(stones):
-            sp = s.get("spin")
-            if not (isinstance(sp, dict) and sp.get("id") in bad):
-                continue
-            sid = sp["id"]
-            ref = str(s.get("media_ref") or "")
-            if not (token_of(ref) or ref.startswith(LEGACY_VIEWER)):
-                cands = [l for l in rows_for(sid) if l.get("token")]
-                ref = qm.VIEWER_LINK_BASE + cands[0]["token"] if cands else ""
-            row = {"Quote": q["id"], "Client": q.get("client") or "", "Stone": f"{i + 1} · ···{s.get('cert_last4') or ''}",
-                   "Capture": sid[:8], "Frames": sp.get("n"), "Why": bad[sid]}
-            if not ref:
-                row.update({"Restored to": "", "Result": "ERROR: no original viewer on record for this capture"})
-                qrows.append(row)
-                continue
-            vid = str(s.get("video_url") or "")
-            if not (vid.startswith(qm.MEDIA_BASE) and vid.endswith((".mp4", ".webm"))):
-                s["video_url"] = ref                               # the original viewer (our /v/ link)
-            s.pop("spin", None)
-            s["spin_reverted"] = sid                               # record only; never served
-            if str(s.get("image_url") or "").startswith(f"{qm.MEDIA_BASE}{sid}/"):
+            base = {"Quote": q["id"], "Client": q.get("client") or "", "Stone": f"{i + 1} · ···{s.get('cert_last4') or ''}"}
+            sp = s.get("spin") if isinstance(s.get("spin"), dict) else None
+            vname = _media_name(s.get("video_url"))
+            iname = _media_name(s.get("image_url"))
+            why = []
+            if sp and sp.get("id") in bad_spin_ids:
+                why.append(bad_spin_ids[sp["id"]])
+            if vname in bad_files:
+                why.append(bad_files[vname])
+            if why:
+                link, method = original_viewer(s, sp.get("id") if sp else None)
+                row = {**base, "Problem": "; ".join(why), "What": sp and sp.get("id", "")[:8] or vname[:12]}
+                if not link:
+                    row.update({"Restored to": "", "Method": method, "Result": "ERROR: " + method})
+                else:
+                    if sp and sp.get("id") in bad_spin_ids:
+                        s.pop("spin", None)
+                        s["spin_reverted"] = sp["id"]
+                        if iname.startswith(sp["id"] + "/"):
+                            s.pop("image_url", None)
+                    if vname in bad_files:
+                        s["video_reverted"] = vname           # record only; never served
+                    if vname in bad_files or not (vname.endswith((".mp4", ".webm"))):
+                        s["video_url"] = link
+                    s.pop("video_source", None)
+                    changed_quotes[q["id"]] = q
+                    row.update({"Restored to": link, "Method": method, "Result": "pending"})
+                rows.append(row)
+            if iname in bad_files:
                 s.pop("image_url", None)
-            changed = True
-            row.update({"Restored to": s["video_url"], "Result": "pending"})
-            qrows.append(row)
-        if changed:
-            try:
-                r = requests.patch(f"{sb_url}/rest/v1/quotes", params={"id": f"eq.{q['id']}"},
-                                   headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=representation"},
-                                   json={"stones": stones}, timeout=20)
-                ok = r.status_code == 200 and bool(r.json())
-                res = "reverted" if ok else f"ERROR: quote not updated (HTTP {r.status_code})"
-            except Exception as e:
-                res = f"ERROR: quote not updated ({type(e).__name__})"
-            for row in qrows:
-                if row["Result"] == "pending":
-                    row["Result"] = res
-        rows += qrows
+                s["image_reverted"] = iname
+                changed_quotes[q["id"]] = q
+                rows.append({**base, "Problem": bad_files[iname], "What": iname[:12], "Restored to": "(image removed)",
+                             "Method": "generic image removed", "Result": "pending"})
 
-    # media_links: clear bad captures so /v/ links open the original viewer (vendor_url kept)
+    for qid, q in changed_quotes.items():
+        try:
+            r = requests.patch(f"{sb_url}/rest/v1/quotes", params={"id": f"eq.{qid}"},
+                               headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=representation"},
+                               json={"stones": q["stones"]}, timeout=20)
+            res = "reverted" if r.status_code == 200 and r.json() else f"ERROR: quote not updated (HTTP {r.status_code})"
+        except Exception as e:
+            res = f"ERROR: quote not updated ({type(e).__name__})"
+        for row in rows:
+            if row["Quote"] == qid and row["Result"] == "pending":
+                row["Result"] = res
+
+    # ── 4. media_links: clear bad captures (vendor_url kept, id kept in old_spin_ids) ──
     lrows = []
     for l in links:
         sid = l.get("spin_id")
-        if not sid or sid not in bad:
+        if not sid or sid not in bad_spin_ids:
             continue
         olds = [x for x in (l.get("old_spin_ids") or []) if x]
         if sid not in olds:
@@ -756,14 +868,19 @@ def revert_bad(sb_url, key, include_all=False):
                                headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=representation"},
                                json={"spin_id": None, "spin_frames": None, "spin_top": None, "spin_version": None,
                                      "old_spin_ids": olds}, timeout=20)
-            ok = r.status_code == 200 and bool(r.json())
-            res = "reverted" if ok else f"ERROR: not updated (HTTP {r.status_code})"
+            res = "reverted" if r.status_code == 200 and r.json() else f"ERROR: not updated (HTTP {r.status_code})"
         except Exception as e:
             res = f"ERROR: not updated ({type(e).__name__})"
         lrows.append({"Viewer link": qm.VIEWER_LINK_BASE + l["token"], "Capture": sid[:8],
-                      "Frames": l.get("spin_frames"), "Why": bad[sid], "Result": res})
+                      "Frames": l.get("spin_frames"), "Problem": bad_spin_ids[sid], "Result": res})
+
+    unreadable = [n for n in files if hashes.get(n) is None]
     summary = {"quotes_read": len(quotes), "links_read": len(links), "captures_found": len(spins),
-               "bad_captures": len(bad), "stones_reverted": sum(r["Result"] == "reverted" for r in rows),
+               "files_checked": len(files), "files_unreadable": len(unreadable),
+               "bad_captures": len(bad_spin_ids),
+               "generic_videos": sum(1 for n in bad_files if files[n]["kind"] == "video"),
+               "generic_images": sum(1 for n in bad_files if files[n]["kind"] == "image"),
+               "stones_reverted": sum(r["Result"] == "reverted" for r in rows),
                "links_reverted": sum(r["Result"] == "reverted" for r in lrows),
                "errors": sum(r["Result"].startswith("ERROR") for r in rows + lrows),
                "at": datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")}
