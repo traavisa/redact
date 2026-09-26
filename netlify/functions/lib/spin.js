@@ -6,6 +6,10 @@ const CAPTURE_VERSION = 3;     // keep equal to spin_capture.CAPTURE_VERSION
 const TRUSTED_VERSION = 2;
 const MIN_FRAMES = 24;
 const ID_RE = /^[a-f0-9]{32}$/;
+// KILL SWITCH. Captured 360 frames are shown only when the Netlify environment variable
+// SPIN_ENABLED is exactly "true". Unset (the default) = OFF: every page, /v/ link and
+// function ignores all captures and shows the stone's original viewer instead.
+const SPIN_ENABLED = String(process.env.SPIN_ENABLED || '').trim().toLowerCase() === 'true';
 
 function cleanSpin(id, n, top, v) {
   id = String(id || ''); n = Number(n); top = Number(top); v = Number(v);
@@ -14,14 +18,14 @@ function cleanSpin(id, n, top, v) {
 }
 // A spin saved on a quote stone: { id, n, top?, v? }
 function trustedSpin(sp) {
-  if (!sp || typeof sp !== 'object') return null;
+  if (!SPIN_ENABLED || !sp || typeof sp !== 'object') return null;
   const v = Number(sp.v);
   const newCode = (Number.isInteger(v) && v >= TRUSTED_VERSION) || (sp.top !== undefined && sp.top !== null);
   return newCode ? cleanSpin(sp.id, sp.n, sp.top, sp.v) : null;
 }
 // A media_links row: spin_id, spin_frames, spin_top?, spin_version?
 function trustedRow(row) {
-  if (!row || !row.spin_id) return null;
+  if (!SPIN_ENABLED || !row || !row.spin_id) return null;
   const v = Number(row.spin_version);
   const newCode = (Number.isInteger(v) && v >= TRUSTED_VERSION) || (row.spin_top !== undefined && row.spin_top !== null);
   return newCode ? cleanSpin(row.spin_id, row.spin_frames, row.spin_top, row.spin_version) : null;
@@ -45,4 +49,4 @@ async function rowForSpin(id) {
   if (!rows) rows = await mediaLinks(`spin_id=eq.${id}`, '&limit=1').catch(() => null);
   return rows && rows[0] ? rows[0] : null;
 }
-module.exports = { CAPTURE_VERSION, TRUSTED_VERSION, MIN_FRAMES, trustedSpin, trustedRow, mediaLinks, rowForSpin };
+module.exports = { SPIN_ENABLED, CAPTURE_VERSION, TRUSTED_VERSION, MIN_FRAMES, trustedSpin, trustedRow, mediaLinks, rowForSpin };

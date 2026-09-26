@@ -21,7 +21,8 @@ function safeVideo(u) {
 }
 // Captured 360 frames: our own folder /media/<32 hex>/000.jpg … (n frames). Only captures
 // the rule in lib/spin.js trusts are served; others fall back to the original viewer.
-const { trustedSpin, rowForSpin } = require('./lib/spin');
+const { trustedSpin, rowForSpin, SPIN_ENABLED } = require('./lib/spin');
+const FRAME_IMAGE_RE = /^[a-f0-9]{32}\/\d{3}\.jpg$/;
 const VIEWER_TOKEN_RE = /^[a-z2-9]{8,32}$/;
 function safeImage(u) {
   u = String(u || '');
@@ -60,6 +61,8 @@ exports.handler = async function (event) {
     SAFE_STONE_FIELDS.forEach((k) => { if (s[k] !== undefined) out[k] = s[k]; });
     if ('video_url' in out) { const v = safeVideo(out.video_url); if (v) out.video_url = v; else delete out.video_url; }
     if ('image_url' in out) { const v = safeImage(out.image_url); if (v) out.image_url = v; else delete out.image_url; }
+    // Kill switch off: no captured frame is ever served, not even as a still image
+    if (!SPIN_ENABLED && out.image_url && FRAME_IMAGE_RE.test(out.image_url.slice(MEDIA_BASE.length))) delete out.image_url;
     if ('spin' in out) {
       const v = trustedSpin(out.spin);
       if (v) { out.spin = v; delete out.video_url; }

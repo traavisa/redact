@@ -303,7 +303,7 @@ class SaveJobs:
         self.save_ok = False
 
     def start(self, index, label, vendor_url, link_saved, hint=None):
-        ok, why = version_check()
+        ok, why = version_check() if SPIN_ENABLED else (False, "360 capture is switched OFF (SPIN_ENABLED)")
         if not ok:                                      # keep the /v/ link; never capture with old code
             self.skipped.append(f"{label}: 360 capture skipped — {why}; saved with a private viewer link")
             _set_status(self.qid, label, "360 capture skipped: " + why)
@@ -453,6 +453,8 @@ def upgradable(quotes):
 def start_upgrade(sb_url, key, quotes):
     """Background re-processing of every upgradable stone. Returns (started, message).
     Refuses when this code is older than the site's current capture version."""
+    if not SPIN_ENABLED:
+        return False, "Refused: 360 capture is switched OFF (SPIN_ENABLED)"
     ok, why = version_check(force=True)
     if not ok:
         _log("spin-upgrade", {"refused": why})
@@ -559,3 +561,211 @@ def audit(sb_url, key, quotes=None):
             break
     return {"stones": rows, "links": links, "quotes_scanned": len(quotes), "quotes": quotes,
             "at": datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")}
+
+
+# ── Kill switch (Render env var SPIN_ENABLED; set by the app). Default OFF. ───
+SPIN_ENABLED = False
+
+
+# ── One-time revert: bad captures -> original viewer ─────────────────────────
+class RevertError(Exception):
+    """A read or write the revert depends on failed. str(e) says exactly what to fix."""
+
+
+KEY_HELP = ("set SUPABASE_SERVICE_KEY on Render (Environment) to the service_role key from "
+            "Supabase → Project Settings → API (not the anon key), then redeploy")
+
+
+def key_problem(key):
+    """A reason the key can't be the service key, or ''."""
+    if not key:
+        return "SUPABASE_SERVICE_KEY is empty — " + KEY_HELP
+    if key.startswith("sb_publishable_"):
+        return "SUPABASE_SERVICE_KEY is a publishable (public) key — " + KEY_HELP
+    if key.count(".") == 2:
+        try:
+            part = key.split(".")[1]
+            role = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))).get("role")
+            if role != "service_role":
+                return f"SUPABASE_SERVICE_KEY has role '{role}', not service_role — " + KEY_HELP
+        except Exception:
+            pass
+    return ""
+
+
+def _read_all(sb_url, key, table, select, what, order=None):
+    out, off = [], 0
+    while True:
+        params = {"select": select, "limit": "1000", "offset": str(off)}
+        if order:
+            params["order"] = order
+        try:
+            r = requests.get(f"{sb_url}/rest/v1/{table}", params=params, headers=_h(key), timeout=30)
+        except Exception as e:
+            raise RevertError(f"reading {what} failed ({type(e).__name__}) — check the connection to Supabase")
+        if r.status_code in (401, 403):
+            raise RevertError(f"reading {what} was refused (HTTP {r.status_code}) — " + KEY_HELP)
+        if r.status_code != 200:
+            raise RevertError(f"reading {what} failed: HTTP {r.status_code} {r.text[:160]}")
+        rows = r.json()
+        out += rows
+        if len(rows) < 1000:
+            return out
+        off += 1000
+
+
+def _frame_hash(sb_url, spin_id):
+    import hashlib
+    try:
+        r = requests.get(f"{sb_url}/storage/v1/object/public/{qm.BUCKET}/{spin_id}/000.jpg", timeout=20)
+        return hashlib.sha1(r.content).hexdigest() if r.status_code == 200 and r.content else None
+    except Exception:
+        return None
+
+
+def revert_bad(sb_url, key, include_all=False):
+    """Removes every captured-spin reference that is bad — fewer than MIN_FRAMES frames, or
+    images shared with a capture of a DIFFERENT viewer (a site's own images, e.g.
+    bridal_image*), or frames that can't be read — from every quote and media_links row,
+    whatever code made it, and restores the stone's original viewer link. include_all
+    reverts every capture. Returns {"rows": [...], "links": [...], "summary": {...}}.
+    Raises RevertError on any blocked or empty read: never reports 0 by mistake."""
+    kp = key_problem(key)
+    if kp:
+        raise RevertError(kp)
+    quotes = _read_all(sb_url, key, "quotes", "id,client,created_at,expires_at,stones", "quotes", "created_at.desc")
+    if not quotes:
+        raise RevertError("the quotes table returned 0 rows — the key can't read it: " + KEY_HELP)
+    try:
+        links = _read_all(sb_url, key, "media_links",
+                          "token,vendor_url,spin_id,spin_frames,spin_top,spin_version,old_spin_ids", "media_links")
+    except RevertError as e:
+        if "HTTP 400" in str(e):
+            raise RevertError("media_links is missing columns: run sections 3, 4 and 5 of "
+                              "supabase/quote_media_setup.sql in the Supabase SQL Editor first")
+        raise
+    uses_links = any(token_of(s.get("video_url")) or token_of(s.get("media_ref")) or s.get("spin")
+                     for q in quotes for s in (q.get("stones") or []))
+    if not links and uses_links:
+        raise RevertError("media_links returned 0 rows although quotes use viewer links — the key can't "
+                          "read it: " + KEY_HELP)
+
+    by_token = {l["token"]: l for l in links}
+
+    def rows_for(spin_id):
+        return [l for l in links if l.get("spin_id") == spin_id or spin_id in (l.get("old_spin_ids") or [])]
+
+    # Every capture, where it's used, and which viewer(s) it came from
+    spins = {}
+    for q in quotes:
+        for i, s in enumerate(q.get("stones") or []):
+            sp = s.get("spin")
+            if isinstance(sp, dict) and sp.get("id"):
+                e = spins.setdefault(sp["id"], {"n": sp.get("n"), "vendors": set()})
+                ref = by_token.get(token_of(s.get("media_ref")) or token_of(s.get("video_url")))
+                if ref:
+                    e["vendors"].add(ref["vendor_url"])
+    for l in links:
+        if l.get("spin_id"):
+            e = spins.setdefault(l["spin_id"], {"n": l.get("spin_frames"), "vendors": set()})
+            e["vendors"].add(l["vendor_url"])
+    for sid, e in spins.items():
+        for l in rows_for(sid):
+            e["vendors"].add(l["vendor_url"])
+    # Same first frame as a capture of a different viewer = a site's shared images
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        hashes = dict(zip(spins, ex.map(lambda sid: _frame_hash(sb_url, sid), list(spins))))
+    by_hash = {}
+    for sid, h in hashes.items():
+        if h:
+            by_hash.setdefault(h, set()).update(spins[sid]["vendors"] or {f"?{sid}"})
+
+    def why_bad(sid):
+        e = spins.get(sid) or {}
+        try:
+            n = int(e.get("n") or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n < sc.MIN_FRAMES:
+            return f"{n} frames (under {sc.MIN_FRAMES})"
+        if hashes.get(sid) is None:
+            return "frames can't be read"
+        if len(by_hash.get(hashes[sid], ())) >= 2:
+            return f"shared images (same frames as {len(by_hash[hashes[sid]]) - 1} other viewer(s))"
+        return "all captures reverted (option ticked)" if include_all else ""
+
+    bad = {sid: why_bad(sid) for sid in spins}
+    bad = {sid: w for sid, w in bad.items() if w}
+
+    # Quotes: restore the original viewer link on each bad stone
+    rows = []
+    for q in quotes:
+        stones = q.get("stones") or []
+        changed = False
+        qrows = []
+        for i, s in enumerate(stones):
+            sp = s.get("spin")
+            if not (isinstance(sp, dict) and sp.get("id") in bad):
+                continue
+            sid = sp["id"]
+            ref = str(s.get("media_ref") or "")
+            if not (token_of(ref) or ref.startswith(LEGACY_VIEWER)):
+                cands = [l for l in rows_for(sid) if l.get("token")]
+                ref = qm.VIEWER_LINK_BASE + cands[0]["token"] if cands else ""
+            row = {"Quote": q["id"], "Client": q.get("client") or "", "Stone": f"{i + 1} · ···{s.get('cert_last4') or ''}",
+                   "Capture": sid[:8], "Frames": sp.get("n"), "Why": bad[sid]}
+            if not ref:
+                row.update({"Restored to": "", "Result": "ERROR: no original viewer on record for this capture"})
+                qrows.append(row)
+                continue
+            vid = str(s.get("video_url") or "")
+            if not (vid.startswith(qm.MEDIA_BASE) and vid.endswith((".mp4", ".webm"))):
+                s["video_url"] = ref                               # the original viewer (our /v/ link)
+            s.pop("spin", None)
+            s["spin_reverted"] = sid                               # record only; never served
+            if str(s.get("image_url") or "").startswith(f"{qm.MEDIA_BASE}{sid}/"):
+                s.pop("image_url", None)
+            changed = True
+            row.update({"Restored to": s["video_url"], "Result": "pending"})
+            qrows.append(row)
+        if changed:
+            try:
+                r = requests.patch(f"{sb_url}/rest/v1/quotes", params={"id": f"eq.{q['id']}"},
+                                   headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=representation"},
+                                   json={"stones": stones}, timeout=20)
+                ok = r.status_code == 200 and bool(r.json())
+                res = "reverted" if ok else f"ERROR: quote not updated (HTTP {r.status_code})"
+            except Exception as e:
+                res = f"ERROR: quote not updated ({type(e).__name__})"
+            for row in qrows:
+                if row["Result"] == "pending":
+                    row["Result"] = res
+        rows += qrows
+
+    # media_links: clear bad captures so /v/ links open the original viewer (vendor_url kept)
+    lrows = []
+    for l in links:
+        sid = l.get("spin_id")
+        if not sid or sid not in bad:
+            continue
+        olds = [x for x in (l.get("old_spin_ids") or []) if x]
+        if sid not in olds:
+            olds.append(sid)
+        try:
+            r = requests.patch(f"{sb_url}/rest/v1/media_links", params={"token": f"eq.{l['token']}"},
+                               headers={**_h(key), "Content-Type": "application/json", "Prefer": "return=representation"},
+                               json={"spin_id": None, "spin_frames": None, "spin_top": None, "spin_version": None,
+                                     "old_spin_ids": olds}, timeout=20)
+            ok = r.status_code == 200 and bool(r.json())
+            res = "reverted" if ok else f"ERROR: not updated (HTTP {r.status_code})"
+        except Exception as e:
+            res = f"ERROR: not updated ({type(e).__name__})"
+        lrows.append({"Viewer link": qm.VIEWER_LINK_BASE + l["token"], "Capture": sid[:8],
+                      "Frames": l.get("spin_frames"), "Why": bad[sid], "Result": res})
+    summary = {"quotes_read": len(quotes), "links_read": len(links), "captures_found": len(spins),
+               "bad_captures": len(bad), "stones_reverted": sum(r["Result"] == "reverted" for r in rows),
+               "links_reverted": sum(r["Result"] == "reverted" for r in lrows),
+               "errors": sum(r["Result"].startswith("ERROR") for r in rows + lrows),
+               "at": datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")}
+    _log("spin-revert", summary)
+    return {"rows": rows, "links": lrows, "summary": summary}

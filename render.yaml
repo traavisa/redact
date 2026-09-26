@@ -17,3 +17,6 @@ services:
         sync: false
       - key: APP_PASSWORD
         sync: false
+      # 360 capture kill switch: only "true" turns capture on. Off by default.
+      - key: SPIN_ENABLED
+        value: "false"

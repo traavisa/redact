@@ -382,9 +382,12 @@ function spinOf(st) {
     && x[1] >= 24 && x[1] <= 720 && (x.length < 4 || (Number.isInteger(x[3]) && x[3] >= 2))
     ? { id: String(x[0]), n: x[1], top: Number.isInteger(x[2]) && x[2] >= 0 && x[2] < x[1] ? x[2] : 0 } : null;
 }
+// Every captured folder in a share link is checked by the server (spin-fallback), which
+// applies the kill switch and the trust rule: it answers with frames to show, or the
+// stone's original viewer. The page never plays frames on its own say-so.
 function untrustedSpinId(st) {
   const x = st.x;
-  return Array.isArray(x) && /^[a-f0-9]{32}$/.test(String(x[0])) && !spinOf(st) ? String(x[0]) : '';
+  return Array.isArray(x) && /^[a-f0-9]{32}$/.test(String(x[0])) ? String(x[0]) : '';
 }
 // For an untrusted capture, ask the server what to show: the stone's re-captured frames,
 // or its original viewer (as our own /v/ link). Filled in after the page renders.
@@ -397,7 +400,7 @@ async function resolveSpinFallbacks(root) {
     } catch (e) {}
     const img = el.dataset.img || '';
     if (d && d.spin && window.Spin360 && Spin360.valid(d.spin)) {
-      el.removeAttribute('data-fallback-id'); Spin360.mount(el, d.spin);
+      el.removeAttribute('data-fallback-id'); el.__s360 = Spin360.mount(el, d.spin);
     } else if (d && /^[a-z2-9]{8,32}$/.test(String(d.token || ''))) {
       el.outerHTML = `<iframe src="${VIEWER_LINK_BASE + d.token}?plain=1" allowfullscreen allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe>`;
     } else if (img) {
@@ -411,7 +414,7 @@ function mediaHtml(st) {
   const bad = untrustedSpinId(st);
   if (bad) {
     const im = mediaFile(st.i);
-    const img = /\.(jpg|png)$/.test(im) && !im.startsWith(bad + '/') ? MEDIA_BASE + im : '';
+    const img = /\.(jpg|png)$/.test(im) && !/^[a-f0-9]{32}\//.test(im) ? MEDIA_BASE + im : '';   // never a captured frame
     return `<div class="spin-pending" style="width:100%;height:100%;background:#000" data-fallback-id="${bad}" data-img="${esc(img)}"></div>`;
   }
   const sp = spinOf(st);

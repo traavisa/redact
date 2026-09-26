@@ -573,7 +573,8 @@ def rehost_media(stones_payload, qid=None):
             s.pop("image_url", None)
         label = f"···{s['cert_last4']}" if s.get("cert_last4") else f"Diamond {n}"
         src = vid.get("src") or ""
-        if vid.get("how") == "viewer" and src and "youtube" not in src and "too large" not in vid.get("note", ""):
+        if (spin_jobs.SPIN_ENABLED and vid.get("how") == "viewer" and src and "youtube" not in src
+                and "too large" not in vid.get("note", "")):
             jobs.start(n - 1, label, src, vid["url"], hint)   # its note comes from the capture below
             notes += quote_media.notes_for(label, ({}, img))
         else:
@@ -600,6 +601,10 @@ def cert_lookup(cert_id):
 
 import spin_capture as _spin_capture
 _spin_capture.CERT_LOOKUP = cert_lookup
+import spin_jobs as _spin_jobs
+# KILL SWITCH: 360 capture runs only when the Render env var SPIN_ENABLED is exactly "true".
+# Unset (default) = OFF: no capture on save, no 360 upgrade; quotes keep original viewer links.
+_spin_jobs.SPIN_ENABLED = get_setting("SPIN_ENABLED").strip().lower() == "true"
 
 def save_quote(client, stones_payload, expiry_days):
     """Writes one quote row to Supabase and returns its link, or None on failure.
@@ -1026,6 +1031,43 @@ with tab2:
     qhc1,qhc2 = st.columns([4,1])
     with qhc1: st.markdown('<div class="section-label" style="margin-bottom:0">Quote history</div>', unsafe_allow_html=True)
 
+    # ── One-time revert: bad captures → original viewer links ─────────────────
+    import spin_jobs
+    with st.expander("⚠️ Revert bad 360 captures → original viewer links", expanded=bool(st.session_state.get("spin_revert"))):
+        st.caption(f"Checks EVERY quote and viewer link. A capture is bad if it has fewer than {spin_jobs.sc.MIN_FRAMES} "
+                   "frames, its frames are the same as a capture of a different viewer (a site's shared images, e.g. "
+                   "bridal_image), or its frames can't be read. Each bad one is removed and the stone gets its "
+                   "original viewer link back. Nothing else is deleted.")
+        _all = st.checkbox("Revert ALL 360 captures, not only bad ones", key="spin_revert_all")
+        if st.button("Find and revert bad 360 captures" if not _all else "Revert ALL 360 captures",
+                     key="spin_revert_go", type="primary", use_container_width=True):
+            with st.spinner("Checking every quote and viewer link…"):
+                try:
+                    st.session_state.spin_revert = spin_jobs.revert_bad(SUPABASE_URL, SUPABASE_KEY, include_all=_all)
+                except spin_jobs.RevertError as e:
+                    st.session_state.spin_revert = {"error": str(e)}
+            load_quote_history.clear()
+            st.rerun()
+        _rv = st.session_state.get("spin_revert")
+        if _rv and _rv.get("error"):
+            st.error("ERROR — nothing was checked or changed: " + _rv["error"])
+        elif _rv:
+            sm = _rv["summary"]
+            (st.error if sm["errors"] else st.success)(
+                f"Checked {sm['quotes_read']} quotes and {sm['links_read']} viewer links at {sm['at']} UTC: "
+                f"{sm['captures_found']} captures, {sm['bad_captures']} bad → {sm['stones_reverted']} stone(s) and "
+                f"{sm['links_reverted']} viewer link(s) reverted, {sm['errors']} ERROR(S)")
+            import pandas as pd
+            if _rv["rows"]:
+                st.markdown("**Quote stones**")
+                st.dataframe(pd.DataFrame([{**r, "Quote": f"{QUOTE_BASE}/q/{r['Quote']}"} for r in _rv["rows"]]),
+                             hide_index=True, use_container_width=True)
+            if _rv["links"]:
+                st.markdown("**Viewer links (/v/)**")
+                st.dataframe(pd.DataFrame(_rv["links"]), hide_index=True, use_container_width=True)
+            if not _rv["rows"] and not _rv["links"]:
+                st.info("No bad captures found in the data that was read.")
+
     # ── Upgrade older quotes: 360 viewer links → our own captured frames ──────
     import spin_jobs
     _up = spin_jobs.upgrade_status()
@@ -1035,6 +1077,8 @@ with tab2:
               f"360 upgrade — {len(_todo)} stone(s) need capture (on a viewer link, or a bad earlier capture)")
     with st.expander(_label, expanded=_up["running"] or bool(_aud)):
         _vok, _vmsg = spin_jobs.version_check()
+        if not spin_jobs.SPIN_ENABLED:
+            _vok, _vmsg = False, "360 capture is switched OFF (Render env var SPIN_ENABLED is not \"true\"): no capture on save, no upgrade"
         st.markdown(("✅ " if _vok else "⛔ ") + f"**Capture code:** {_md(_vmsg)}")
         st.caption("Bad captures (first build, or under "
                    f"{spin_jobs.sc.MIN_FRAMES} frames, e.g. shared bridal_image pictures) are never shown: quote, "
