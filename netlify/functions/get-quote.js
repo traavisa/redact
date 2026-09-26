@@ -24,6 +24,16 @@ function safeVideo(u) {
 const { trustedSpin, rowForSpin, SPIN_ENABLED } = require('./lib/spin');
 const FRAME_IMAGE_RE = /^[a-f0-9]{32}\/\d{3}\.jpg$/;
 const VIEWER_TOKEN_RE = /^[a-z2-9]{8,32}$/;
+// Certificates: our own /certs/ copies (random names), or the older uploads in our own
+// storage. Anything else is dropped.
+const CERT_BASE = 'https://quote.alldiamondeverything.com/certs/';
+const LEGACY_CERT_BASE = 'https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/certificates/';
+function safePdf(u) {
+  u = String(u || '');
+  if (u.startsWith(CERT_BASE)) return /^[a-f0-9]{32}\.pdf$/.test(u.slice(CERT_BASE.length)) ? u : undefined;
+  if (u.startsWith(LEGACY_CERT_BASE)) return /^[A-Za-z0-9._-]+$/.test(u.slice(LEGACY_CERT_BASE.length)) ? u : undefined;
+  return undefined;
+}
 function safeImage(u) {
   u = String(u || '');
   return u.startsWith(MEDIA_BASE) && MEDIA_FILE_RE.test(u.slice(MEDIA_BASE.length)) ? u : undefined;
@@ -61,6 +71,7 @@ exports.handler = async function (event) {
     SAFE_STONE_FIELDS.forEach((k) => { if (s[k] !== undefined) out[k] = s[k]; });
     if ('video_url' in out) { const v = safeVideo(out.video_url); if (v) out.video_url = v; else delete out.video_url; }
     if ('image_url' in out) { const v = safeImage(out.image_url); if (v) out.image_url = v; else delete out.image_url; }
+    if ('pdf_url' in out) { const v = safePdf(out.pdf_url); if (v) out.pdf_url = v; else delete out.pdf_url; }
     // Kill switch off: no captured frame is ever served, not even as a still image
     if (!SPIN_ENABLED && out.image_url && FRAME_IMAGE_RE.test(out.image_url.slice(MEDIA_BASE.length))) delete out.image_url;
     if ('spin' in out) {

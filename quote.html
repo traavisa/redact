@@ -654,7 +654,7 @@ function render(s, certTypes, isExpired) {
         <div class="pdf-frame-wrap">
           <iframe class="pdf-frame" ${MOBILE_PDF ? 'data-src' : 'src'}="${stone.pdf_url}#toolbar=0&navpanes=0"></iframe>
           <div style="padding: 16px 24px 20px;">
-            <a class="btn btn-primary" href="${stone.pdf_url}" download="certificate-${stone.cert_last4}.pdf" style="max-width:260px;">
+            <a class="btn btn-primary" href="${stone.pdf_url}" download="${/^[0-9A-Za-z]{1,4}$/.test(String(stone.cert_last4 || '')) ? stone.cert_last4 : 'certificate'}.pdf" style="max-width:260px;">
               ↓ &nbsp;Download certificate
             </a>
           </div>
@@ -779,6 +779,7 @@ function togglePdf(toggleEl) {
 // is never put in the link; only a price the associate sets (or a markup result).
 const PC_VIEWER = 'https://video.alldiamondeverything.com/?u=';
 const PC_PDF = 'https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/certificates/';
+const PC_CERT = 'https://quote.alldiamondeverything.com/certs/';   // redacted Live Search certificates
 const PC_DAYS = 30;
 const PC = {
   s: null, certTypes: [], isExpired: false, mode: 'share', price: 'none',
@@ -1018,7 +1019,9 @@ function pcPayload() {
     if (inc.c && st.pdf_url) {
       const pu = String(st.pdf_url);
       const rest = pu.startsWith(PC_PDF) ? pu.slice(PC_PDF.length) : '';
-      if (/^[A-Za-z0-9._-]+$/.test(rest)) o.p = rest; else if (pu.startsWith(PC_PDF)) o.P = pu;
+      const cert = pu.startsWith(PC_CERT) ? pu.slice(PC_CERT.length) : '';
+      if (/^[a-f0-9]{32}\.pdf$/.test(cert)) o.q = cert;
+      else if (/^[A-Za-z0-9._-]+$/.test(rest)) o.p = rest; else if (pu.startsWith(PC_PDF)) o.P = pu;
     }
     const r = pcFinal(i);
     if (r) { o.r = Math.round(r * 100) / 100; if (pcCur(i) === 'USD') o.k = 'U'; }

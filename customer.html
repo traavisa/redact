@@ -308,6 +308,7 @@ const VIEWER_LINK_BASE = 'https://video.alldiamondeverything.com/v/';
 const MEDIA_BASE = 'https://quote.alldiamondeverything.com/media/';
 const MEDIA_FILE_RE = /^[a-f0-9]{32}(\.(jpg|png|mp4|webm)|\/\d{3}\.jpg)$/;   // files, or one captured 360 frame (<folder>/NNN.jpg)
 const PDF_BASE = 'https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/certificates/';
+const CERT_BASE = 'https://quote.alldiamondeverything.com/certs/';   // redacted Live Search certificates
 const MOBILE_PDF = window.matchMedia('(max-width: 680px)').matches;
 pdfjsLib.GlobalWorkerOptions.workerSrc =
   'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
@@ -431,6 +432,7 @@ function mediaHtml(st) {
   return '';
 }
 function pdfUrl(st) {
+  if (typeof st.q === 'string' && /^[a-f0-9]{32}\.pdf$/.test(st.q)) return CERT_BASE + st.q;
   if (typeof st.p === 'string' && /^[A-Za-z0-9._-]+$/.test(st.p)) return PDF_BASE + st.p;
   if (typeof st.P === 'string' && st.P.startsWith(PDF_BASE) && !/["'<>\s]/.test(st.P)) return st.P;
   return null;
@@ -570,7 +572,7 @@ function render(d, client) {
         <div class="pdf-frame-wrap">
           <iframe class="pdf-frame" ${MOBILE_PDF ? 'data-src' : 'src'}="${esc(pdf)}#toolbar=0&navpanes=0"></iframe>
           <div style="padding: 16px 24px 20px;">
-            <a class="btn btn-primary" href="${esc(pdf)}" download="certificate${last4 ? '-' + esc(last4) : ''}.pdf" style="max-width:260px;">
+            <a class="btn btn-primary" href="${esc(pdf)}" download="${last4 ? esc(last4) : 'certificate'}.pdf" style="max-width:260px;">
               ↓ &nbsp;Download certificate
             </a>
           </div>

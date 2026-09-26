@@ -42,6 +42,14 @@
   status = 200
   force = true
 
+# Redacted certificates (Live Search / direct lookup), served from our own domain.
+# Files live in the Supabase storage bucket "certificates" under random names.
+[[redirects]]
+  from = "/certs/*"
+  to = "https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/public/certificates/:splat"
+  status = 200
+  force = true
+
 # Opaque viewer links: /v/<token> opens the viewer, which looks the token up server-side.
 [[redirects]]
   from = "/v/*"

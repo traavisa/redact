@@ -2,10 +2,12 @@
 
 Internal module. Nothing in here is shown to users verbatim: every error raised is a
 SourceError with a neutral message, and results are reduced to an explicit whitelist
-of fields before they leave this module (no supplier name, location or stock number).
+of fields before they leave this module (no supplier name or location). Two internal-only
+fields are kept for the Live Search screen and never saved: the supplier's stock number
+("Stock #", for direct lookup) and the certificate file link (redacted on save).
 
 Verified against the source's published API examples:
-  - endpoint: POST <NIVODA_API_URL> (production .../api/diamonds)
+  - endpoint: POST <LS_API_URL> (production .../api/diamonds)
   - auth:     { authenticate { username_and_password(username, password) { token } } }
   - calls:    Authorization: Bearer <token>
   - search:   diamonds_by_query(query: {...}, offset, limit <= 50, order: {type: price, direction: ASC})
@@ -26,6 +28,20 @@ PAGE_LIMIT = 50            # documented maximum per request
 TOKEN_TTL = 4 * 3600       # re-authenticate well before the token is likely to expire
 SCHEMA_TTL = 6 * 3600
 TIMEOUT = 30
+
+
+# Settings. New neutral names first; the older names set on Render keep working.
+SETTING_NAMES = {"url": ("LS_API_URL", "NIVODA_API_URL"), "user": ("LS_USERNAME", "NIVODA_USERNAME"),
+                 "password": ("LS_PASSWORD", "NIVODA_PASSWORD"), "divisor": ("LS_PRICE_DIVISOR", "NIVODA_PRICE_DIVISOR")}
+
+
+def setting(get, what):
+    """First non-empty value among the names for `what` ("url", "user", "password", "divisor")."""
+    for name in SETTING_NAMES[what]:
+        v = get(name)
+        if v:
+            return v
+    return ""
 
 
 class SourceError(Exception):
@@ -264,6 +280,12 @@ class Client:
             stone_lookup = _stone_lookup_field(root, dt.get("name"), it.get("name"))
             cert_filter = next((n for n, sp in filters.items()
                                 if "cert" in n.lower() and sp.get("kind") == "list_str"), None)
+            stock_filter = next((n for n, sp in filters.items()
+                                 if "stock" in n.lower() and sp.get("kind") == "list_str"), None)
+            cert_files = _file_fields(ct, "certificate") + _file_fields(dt, "diamond")
+            stock_fields = [f["name"] for f in dt.get("fields") or [] if "stock" in f["name"].lower()
+                            and _named(f["type"]).get("name") in ("String", "ID", "Int") and not _is_list(f["type"])
+                            and not _needs_args(f)]
             cs, ds = scalars(ct), scalars(dt)
             cert_extra = [f for f in FANCY_FIELDS + AS_GROWN_FIELDS if f in cs]
             for where, fs in (("diamond", ds), ("certificate", cs)):
@@ -281,10 +303,12 @@ class Client:
             media = {"sel": media_sel, "keys": _sel_keys(media_sel), "desc": [sanitise(d) for d in media_desc],
                      "cert_sel": cert_media_sel, "cert_keys": _sel_keys(cert_media_sel),
                      "cert_desc": [sanitise(d) for d in cert_media_desc], "cert_lookup": cert_lookup,
-                     "stone_lookup": stone_lookup, "cert_filter": cert_filter}
+                     "stone_lookup": stone_lookup, "cert_filter": cert_filter, "stock_filter": stock_filter,
+                     "cert_files": cert_files, "stock_fields": stock_fields}
         except NameError:
             media = {"sel": "", "keys": [], "desc": [], "cert_sel": "", "cert_keys": [], "cert_desc": [],
-                     "cert_lookup": None, "stone_lookup": None, "cert_filter": None}
+                     "cert_lookup": None, "stone_lookup": None, "cert_filter": None, "stock_filter": None,
+                     "cert_files": [], "stock_fields": []}
         return {"verified": True, "filters": filters, "cert_extra": cert_extra,
                 "count_query": count_query, "lg_flag": lg_flag, "docs": docs, "media": media}
 
@@ -317,51 +341,6 @@ class Client:
         cm = {k: c.get(k) for k in media.get("cert_keys") or [] if c.get(k) not in (None, "", [], {})}
         return ({"certificate": cm} if cm else None), ("ok" if cm else "certificate has no 360 data")
 
-    # ── one stone by its stock ID or certificate number (revert / recovery) ──
-    def stone_viewer(self, stock_id=None, cert_number=None):
-        """The stone's certificate ID and its own 360 viewer link (product_videos loupe360_url,
-        type 360). Returns (info dict or None, reason, method). info: cert_id, viewer_url."""
-        sch = self.schema()
-        media = sch.get("media") or {}
-        if not sch.get("verified"):
-            return None, "schema not confirmed", ""
-        sel = f"certificate {{ id certNumber {media.get('cert_sel') or ''} }}"
-        tries = []
-        lk = media.get("stone_lookup")
-        if stock_id and lk and re.fullmatch(r"[A-Za-z0-9-]{4,80}", str(stock_id)) \
-                and re.fullmatch(r"[_A-Za-z][_0-9A-Za-z]*!?", lk["type"]):
-            body = sel if lk["returns"] == "diamond" else f"diamond {{ id {sel} }}"
-            tries.append(("stock ID lookup", f"query ($v: {lk['type']}) {{ d: {lk['field']}({lk['arg']}: $v) {{ {body} }} }}",
-                          {"v": str(stock_id)}, lambda d: [((d or {}).get("d") or {}).get("diamond", (d or {}).get("d"))]))
-        cf = media.get("cert_filter")
-        if cert_number and cf and re.fullmatch(r"[A-Za-z0-9-]{4,40}", str(cert_number)):
-            q = ("query { d: diamonds_by_query(query: " + gql_literal({cf: [str(cert_number)]}) +
-                 f", offset: 0, limit: 5) {{ items {{ diamond {{ id {sel} }} }} }} }}")
-            tries.append(("certificate number search", q, None,
-                          lambda d: [i.get("diamond") for i in (((d or {}).get("d") or {}).get("items") or [])]))
-        if not tries:
-            return None, ("no stock ID / certificate number on the stone, or the API has no lookup for them"), ""
-        last = ""
-        for method, q, variables, pick in tries:
-            try:
-                data = self._post(q, variables, token=self._token())
-            except (SourceError, _AuthError) as e:
-                last = f"{method} failed ({sanitise(e) or 'sign-in refused'})"
-                continue
-            for dia in pick(data):
-                c = (dia or {}).get("certificate") or {}
-                if cert_number and method.startswith("certificate") and str(c.get("certNumber")) != str(cert_number):
-                    continue
-                viewer = ""
-                for v in (c.get("product_videos") or []):
-                    if isinstance(v, dict) and str(v.get("type") or "").lower() in ("360", "v360") and v.get("loupe360_url"):
-                        viewer = v["loupe360_url"]
-                        break
-                if c.get("id"):
-                    return {"cert_id": str(c["id"]), "viewer_url": viewer}, "ok", method
-            last = last or f"{method}: stone not found"
-        return None, last, ""
-
     # ── search ───────────────────────────────────────────────────────────────
     def search(self, query_input, max_stones=500):
         """Fetches up to `max_stones` stones (cheapest first) for a server-side query dict,
@@ -375,11 +354,18 @@ class Client:
         cert_sel = " ".join(CERT_FIELDS + extra + ([lg[1]] if lg and lg[0] == "certificate" else []))
         dia_sel = "id video image availability" + (f" {lg[1]}" if lg and lg[0] == "diamond" else "")
         media = sch.get("media") or {}
-        media_on = bool(media.get("sel") or media.get("cert_sel")) and not Client._media_off.get(self.url)
+        files = [(w, n) for w, n, *_ in media.get("cert_files") or []]
+        stock = list(media.get("stock_fields") or [])
+        media_on = bool(media.get("sel") or media.get("cert_sel") or files or stock) \
+            and not Client._media_off.get(self.url)
         plain = (dia_sel, cert_sel)
         if media_on:
+            # Extra fields confirmed by introspection: media (360 capture), certificate file
+            # links and the stock number. If the API refuses them, search again without them.
             dia_sel += (" " + media["sel"]) if media.get("sel") else ""
             cert_sel += (" " + media["cert_sel"]) if media.get("cert_sel") else ""
+            dia_sel += "".join(f" {n}" for w, n in files if w == "diamond") + "".join(f" {n}" for n in stock)
+            cert_sel += "".join(f" {n}" for w, n in files if w == "certificate")
         qlit = gql_literal(query_input)
         out, offset, fetched = [], 0, 0
         flags = {"natural": 0, "lab-grown": 0, "unknown": 0} if lg else None
@@ -417,7 +403,9 @@ class Client:
                     v = (d if lg[0] == "diamond" else (d.get("certificate") or {})).get(lg[1])
                     flags["lab-grown" if v is True else "natural" if v is False else "unknown"] += 1
             out += [s for s in (whitelist(i, media.get("keys") if media_on else None,
-                                          media.get("cert_keys") if media_on else None) for i in items) if s]
+                                          media.get("cert_keys") if media_on else None,
+                                          files if media_on else None, stock if media_on else None)
+                                for i in items) if s]
             offset += len(items)
             # total_count is not used to stop paging: only a short page (or the cap) ends it.
             if len(items) < limit:
@@ -435,6 +423,62 @@ class Client:
                 real = fetched      # paged to the end: everything that matches was fetched
         self.diag["real_total"] = real
         return out, real
+
+
+    def count(self, query_input):
+        """The API's own count of stones matching a query (count query), or None."""
+        cq = self.schema().get("count_query")
+        if not cq:
+            return None
+        try:
+            data = self.call(f"query {{ n: {cq}(query: {gql_literal(query_input)}) }}")
+        except SourceError:
+            return None
+        return _int((data or {}).get("n"))
+
+    # ── direct lookup by certificate number / stock number ──────────────────
+    def lookup(self, cert_values, stock_values, batch=PAGE_LIMIT, per_call=200):
+        """Stones whose certificate number is one of `cert_values` or whose stock number is one
+        of `stock_values`, natural AND lab-grown, no other filters. Values are sent in batches
+        through the query filters introspection found. Returns (stones, report); report says
+        which lookups the API supports and what each call returned (counts only)."""
+        sch = self.schema()
+        media = sch.get("media") or {}
+        have = sch.get("filters") or {}
+        cf, sf = media.get("cert_filter"), media.get("stock_filter")
+        lg = "labgrown" if (have.get("labgrown") or {}).get("kind") == "bool" else None
+        if not (cf or sf):
+            raise SourceError("The stone search doesn't support looking stones up by number"
+                              + ("" if sch.get("verified") else " (its schema couldn't be read — try again shortly)") + ".")
+        rep = {"schema_verified": bool(sch.get("verified")), "cert_filter": cf, "stock_filter": sf,
+               "stock_fields": list(media.get("stock_fields") or []), "type_filter": lg, "calls": []}
+        out = {}
+        for field, values, what in ((cf, cert_values, "certificate"), (sf, stock_values, "stock")):
+            values = list(dict.fromkeys(v for v in values if v))
+            if not values:
+                continue
+            if not field:
+                rep["calls"].append({"by": what, "error": "the API has no filter for this lookup"})
+                continue
+            for k in range(0, len(values), batch):
+                chunk = values[k:k + batch]
+                for lab_grown in ((False, True) if lg else (None,)):
+                    q = {field: chunk}
+                    if lab_grown is not None:
+                        q[lg] = lab_grown
+                    call = {"by": what, "values": len(chunk),
+                            "type": "any" if lab_grown is None else ("lab-grown" if lab_grown else "natural")}
+                    try:
+                        stones, _ = self.search(q, per_call)
+                        call["returned"] = len(stones)
+                        for st_ in stones:
+                            out.setdefault(st_["sid"], st_)
+                    except SourceError as e:
+                        call["error"] = sanitise(e)
+                    rep["calls"].append(call)
+        if rep["calls"] and all(c.get("error") for c in rep["calls"]):
+            raise SourceError("The stone lookup failed. Try again shortly.")
+        return list(out.values()), rep
 
 
 # Filters assumed from the published examples when the schema can't be read.
@@ -512,10 +556,12 @@ def _num(v):
         return None
 
 
-def whitelist(item, media_keys=None, cert_media_keys=None):
+def whitelist(item, media_keys=None, cert_media_keys=None, file_fields=None, stock_fields=None):
     """Keep ONLY allowed fields. Anything else in the response is dropped here.
     `media_keys`: extra media fields (introspection-confirmed) kept under s["media"] for
-    360 capture on save. They never reach a saved quote."""
+    360 capture on save. They never reach a saved quote. `file_fields` [(where, name)]:
+    certificate file link -> s["cert_file"]; `stock_fields`: stock number -> s["stock_no"].
+    Both are internal only (never saved or shown to clients)."""
     if not isinstance(item, dict):
         return None
     d = item.get("diamond") or {}
@@ -555,7 +601,35 @@ def whitelist(item, media_keys=None, cert_media_keys=None):
         m["certificate"] = cm
     if m:
         s["media"] = m
+    for where, name in file_fields or []:
+        v = (c if where == "certificate" else d).get(name)
+        if isinstance(v, str) and v.strip().lower().startswith(("http://", "https://")):
+            s["cert_file"] = v.strip()
+            s["cert_file_field"] = f"{where}.{name}"
+            break
+    for name in stock_fields or []:
+        if d.get(name) not in (None, ""):
+            s["stock_no"] = str(d.get(name)).strip()
+            break
     return s
+
+
+# ── Certificate file fields (the certificate PDF, found by introspection) ──────
+_FILE_RE = re.compile(r"pdf|report_?(url|link|file)|cert\w*_?(url|link|file)|document|file_?url|^url$", re.I)
+
+
+def _file_fields(t, where):
+    """[(where, name, type, description)] for scalar fields that look like a certificate file link.
+    Fields with 'pdf' in their name come first."""
+    out = []
+    for f in t.get("fields") or []:
+        n = f["name"]
+        if where == "diamond" and not re.search(r"pdf|cert", n, re.I):
+            continue
+        if (_FILE_RE.search(n) and _named(f["type"]).get("kind") == "SCALAR" and not _is_list(f["type"])
+                and not _needs_args(f) and not any(w in n.lower() for w in ("image", "video", "v360", "360"))):
+            out.append((where, n, _type_str(f["type"]), sanitise(f.get("description") or "")))
+    return sorted(out, key=lambda x: "pdf" not in x[1].lower())
 
 
 # ── Certificate media: 360 frames (v360 / product_videos) and the still image ────

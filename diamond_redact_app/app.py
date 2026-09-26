@@ -133,43 +133,23 @@ if not SUPABASE_KEY:
 
 
 # ── Cert zone definitions ─────────────────────────────────────────────────────
+from certs import ZONES as _ZONES, redact_pdf, extract_cert_data   # shared with Live Search
+
 CERT_ZONES = {
     "IGI": {
         "short":"Lab Grown Diamond","logo_b64":IGI_B64,"ccls":"sel-igi","hbcls":"hb-igi",
-        "zones":{
-            "num_top_centre":   {"x0":360.8,"y0":34.1, "x1":420.9,"y1":43.6, "mask_ratio":0.55},
-            "num_left":         {"x0":181.8,"y0":150.1,"x1":232.5,"y1":158.1,"mask_ratio":0.55},
-            "num_left_insc":    {"x0":183.7,"y0":371.5,"x1":233.4,"y1":379.5,"mask_ratio":0.55},
-            "num_right_top":    {"x0":940.3,"y0":75.2, "x1":981.9,"y1":81.2, "mask_ratio":0.55},
-            "num_right_insc":   {"x0":933.0,"y0":355.9,"x1":981.9,"y1":361.9,"mask_ratio":0.55},
-            "num_vert_report":  {"x0":810.6,"y0":535.8,"x1":818.6,"y1":588.6,"mask_ratio":0.55,"vertical":True},
-            "num_vert_insc":    {"x0":919.5,"y0":509.4,"x1":927.4,"y1":540.1,"mask_ratio":0.55,"vertical":True},
-            "num_diamond_high": {"x0":630.0,"y0":150.0,"x1":710.0,"y1":168.0,"mask_ratio":0.55},
-            "num_diamond_low":  {"x0":622.0,"y0":308.0,"x1":700.0,"y1":326.0,"mask_ratio":0.55},
-            "qr":               {"x0":725.1,"y0":500.9,"x1":768.3,"y1":544.0},
-        }
+        "zones":_ZONES["IGI"],
     },
     "GIA": {
         "short":"Natural Diamond","logo_b64":GIA_B64,"ccls":"sel-gia","hbcls":"hb-gia",
-        "zones":{
-            "gia1":        {"x0":367.7,"y0":47.0, "x1":431.5,"y1":59.0, "mask_ratio":0.60},
-            "gia2":        {"x0":192.8,"y0":117.9,"x1":241.6,"y1":126.9,"mask_ratio":0.60},
-            "inscription": {"x0":95.1, "y0":339.4,"x1":143.0,"y1":348.4,"mask_ratio":0.60},
-            "qr":          {"x0":698.0,"y0":504.2,"x1":752.0,"y1":558.2},
-        }
+        "zones":_ZONES["GIA"],
     },
     "GIA Colour": {
         "short":"Coloured Diamond","logo_b64":GIA_B64,"ccls":"sel-giac","hbcls":"hb-giac",
-        "zones":{
-            "gia1":        {"x0":367.7,"y0":45.0, "x1":431.5,"y1":57.0, "mask_ratio":0.60},
-            "gia2":        {"x0":192.8,"y0":137.2,"x1":241.6,"y1":146.2,"mask_ratio":0.60},
-            "inscription": {"x0":95.1, "y0":446.9,"x1":143.0,"y1":455.9,"mask_ratio":0.60},
-            "qr":          {"x0":698.1,"y0":507.1,"x1":752.1,"y1":561.1},
-        }
+        "zones":_ZONES["GIA Colour"],
     },
 }
 
-PADDING       = 1.5
 
 # ── Supabase helpers ──────────────────────────────────────────────────────────
 def sb_get(table, filters=""):
@@ -255,133 +235,7 @@ def get_logo_img(name):
         return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
     return None
 
-def redact_pdf(file_bytes, cert_type, logo_img):
-    zones = CERT_ZONES[cert_type]["zones"]
-    doc = fitz.open(stream=file_bytes, filetype="pdf")
-    for page in doc:
-        for key, z in zones.items():
-            x0=z["x0"]-PADDING; y0=z["y0"]-PADDING
-            x1=z["x1"]+PADDING; y1=z["y1"]+PADDING
-            if key=="qr":
-                rect=fitz.Rect(x0,y0,x1,y1)
-                page.add_redact_annot(rect,fill=(1,1,1)); page.apply_redactions()
-                if logo_img:
-                    buf=io.BytesIO(); logo_img.save(buf,format="PNG"); buf.seek(0)
-                    page.insert_image(rect,stream=buf.read())
-            elif z.get("vertical"):
-                r=z.get("mask_ratio",0.55)
-                page.add_redact_annot(fitz.Rect(x0,y0,x1,y0+(y1-y0)*r),fill=(1,1,1))
-                page.apply_redactions()
-            else:
-                r=z.get("mask_ratio",0.60)
-                page.add_redact_annot(fitz.Rect(x0,y0,x0+(x1-x0)*r,y1),fill=(1,1,1))
-                page.apply_redactions()
-    out=io.BytesIO()
-    doc.save(out,garbage=4,deflate=True,clean=True)
-    doc.close(); out.seek(0)
-    return out.read()
-
 import re as _re
-
-def extract_cert_data_gia(text):
-    def find(pattern, default=""):
-        m = _re.search(pattern, text, _re.IGNORECASE)
-        return m.group(1).strip() if m else default
-
-    shape_full  = find(r"Shape and Cutting Style\s*\.+\s*(.+)")
-    shape       = _re.match(r"^(\w+)", shape_full).group(1) if shape_full else ""
-    cut         = find(r"Cut Grade\s*\.+\s*(\S+)")
-    carat       = find(r"Carat Weight\s*\.+\s*([\d.]+)")
-    color       = find(r"Color Grade\s*\.+\s*([A-Z])\b")
-    clarity     = find(r"Clarity Grade\s*\.+\s*(\S+)")
-    meas        = find(r"Measurements\s*\.+\s*([\d.]+ x [\d.]+ x [\d.]+)")
-    polish      = find(r"Polish\s*\.+\s*(\S+)")
-    symmetry    = find(r"Symmetry\s*\.+\s*(\S+)")
-    fluor       = find(r"Fluorescence\s*\.+\s*(\S+)")
-    ratio = ""
-    if meas:
-        parts = _re.findall(r"[\d.]+", meas)
-        if len(parts) >= 2:
-            try: ratio = f"{float(parts[0]) / float(parts[1]):.2f}"
-            except: pass
-    return dict(shape=shape, cut=cut, carat=carat, color=color, clarity=clarity,
-                measurements=meas, ratio=ratio, polish=polish, symmetry=symmetry,
-                fluorescence=fluor)
-
-
-def extract_cert_data_gia_colour(text):
-    def find(pattern, default=""):
-        m = _re.search(pattern, text, _re.IGNORECASE)
-        return m.group(1).strip() if m else default
-
-    shape_full       = find(r"Shape and Cutting Style\s*\.+\s*(.+)")
-    shape            = _re.match(r"^(\w+)", shape_full).group(1) if shape_full else ""
-    carat            = find(r"Carat Weight\s*\.+\s*([\d.]+)")
-    color            = find(r"Color Grade\s*\.+\s*(.+)")
-    color_origin     = find(r"Color Origin\s*\.+\s*(\S+)")
-    color_dist       = find(r"Color Distribution\s*\.+\s*(\S+)")
-    clarity          = find(r"Clarity Grade\s*\.+\s*(\S+)")
-    meas             = find(r"Measurements\s*\.+\s*([\d.]+ x [\d.]+ x [\d.]+)")
-    polish           = find(r"Polish\s*\.+\s*(\S+)")
-    symmetry         = find(r"Symmetry\s*\.+\s*(.+?)(?:\n|$)")
-    fluor            = find(r"Fluorescence\s*\.+\s*(\S+)")
-    ratio = ""
-    if meas:
-        parts = _re.findall(r"[\d.]+", meas)
-        if len(parts) >= 2:
-            try: ratio = f"{float(parts[0]) / float(parts[1]):.2f}"
-            except: pass
-    return dict(shape=shape, cut="", carat=carat, color=color,
-                color_origin=color_origin, color_distribution=color_dist,
-                clarity=clarity, measurements=meas, ratio=ratio,
-                polish=polish, symmetry=symmetry, fluorescence=fluor)
-
-
-def extract_cert_data_igi(text):
-    def find(pattern, default=""):
-        m = _re.search(pattern, text, _re.IGNORECASE)
-        return m.group(1).strip() if m else default
-
-    shape_full   = find(r"Shape and Cutting Style\n(.+)")
-    shape        = _re.match(r"^(\w+)", shape_full).group(1).title() if shape_full else ""
-    cut          = find(r"Cut Grade\n(\S+)")
-    carat        = find(r"Carat Weight\n([\d.]+)")
-    color        = find(r"Color Grade\n\s*([A-Z])\b")
-    clarity_raw  = find(r"Clarity Grade\n(\S+(?:\s+\d)?)")
-    clarity      = clarity_raw.replace(" ", "")
-    meas_raw     = find(r"Measurements\n([\d.]+ X [\d.]+ X [\d.]+)")
-    meas         = meas_raw.replace(" X ", " x ") if meas_raw else ""
-    polish       = find(r"Polish\n(\S+)").title()
-    symmetry     = find(r"Symmetry\n(\S+)").title()
-    fluor        = find(r"Fluorescence\n(\S+)").title()
-    ratio = ""
-    if meas:
-        parts = _re.findall(r"[\d.]+", meas)
-        if len(parts) >= 2:
-            try: ratio = f"{float(parts[0]) / float(parts[1]):.2f}"
-            except: pass
-    return dict(shape=shape, cut=cut, carat=carat, color=color, clarity=clarity,
-                measurements=meas, ratio=ratio, polish=polish, symmetry=symmetry,
-                fluorescence=fluor)
-
-
-def extract_cert_data(file_bytes, cert_type):
-    """Router — extracts grading data from GIA, GIA Colour, or IGI certificate PDFs."""
-    try:
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
-        text = doc[0].get_text()
-        doc.close()
-    except:
-        return {}
-
-    if cert_type == "IGI":
-        raw = extract_cert_data_igi(text)
-    elif cert_type == "GIA Colour":
-        raw = extract_cert_data_gia_colour(text)
-    else:
-        raw = extract_cert_data_gia(text)
-
-    return {k: v for k, v in raw.items() if v}
 
 # ── Bulk quote (spreadsheet upload) helpers ──────────────────────────────────
 # Whitelist of columns we read. Anything not listed here (Supplier, StockId,
@@ -590,47 +444,43 @@ _LOOKUP_STATE = {}   # sign-in token cache for background certificate lookups
 def cert_lookup(cert_id):
     """Certificate 360 fields by certificate ID from the search API (360 capture fallback for
     stones without them and for pasted viewer links). Returns (hint or None, reason)."""
-    import nivoda_client
-    url, user, pw = (get_setting(k) for k in ("NIVODA_API_URL", "NIVODA_USERNAME", "NIVODA_PASSWORD"))
+    import stone_source
+    url, user, pw = (stone_source.setting(get_setting, k) for k in ("url", "user", "password"))
     if not (url and user and pw):
         return None, "search API not configured"
     try:
-        return nivoda_client.Client(url, user, pw, _LOOKUP_STATE).certificate_media(cert_id)
-    except nivoda_client.SourceError as e:
-        return None, nivoda_client.sanitise(e)
+        return stone_source.Client(url, user, pw, _LOOKUP_STATE).certificate_media(cert_id)
+    except stone_source.SourceError as e:
+        return None, stone_source.sanitise(e)
 
 import spin_capture as _spin_capture
 _spin_capture.CERT_LOOKUP = cert_lookup
 import spin_jobs as _spin_jobs
 # KILL SWITCH: 360 capture runs only when the Render env var SPIN_ENABLED is exactly "true".
-# Unset (default) = OFF: no capture on save, no 360 upgrade; quotes keep original viewer links.
+# Unset (default) = OFF: no capture on save; quotes keep original viewer links.
 _spin_jobs.SPIN_ENABLED = get_setting("SPIN_ENABLED").strip().lower() == "true"
 
-def stone_lookup(stone):
-    """A quote stone's certificate ID and own viewer link from the search API, by its stored
-    stock ID (Live Search) or certificate number. Used by the revert to restore viewer links."""
-    import nivoda_client
-    url, user, pw = (get_setting(k) for k in ("NIVODA_API_URL", "NIVODA_USERNAME", "NIVODA_PASSWORD"))
-    if not (url and user and pw):
-        return None, "search API not configured", ""
-    try:
-        return nivoda_client.Client(url, user, pw, _LOOKUP_STATE).stone_viewer(
-            stock_id=stone.get("ls_ref"), cert_number=_spin_jobs.cert_number_of(stone))
-    except nivoda_client.SourceError as e:
-        return None, nivoda_client.sanitise(e), ""
-
-_spin_jobs.STONE_LOOKUP = stone_lookup
-# The revert and 360 upgrade buttons stay disabled until switched back on here.
-REPAIR_BUTTONS_ENABLED = False
 
 def save_quote(client, stones_payload, expiry_days):
     """Writes one quote row to Supabase and returns its link, or None on failure.
     Shared by the manual flow, the spreadsheet (bulk) flow and Live Search.
-    Media is re-hosted first; notes about media go to st.session_state.media_notes and
+    Certificates (Live Search) and media are handled first; notes go to st.session_state.media_notes and
     360 capture progress to st.session_state.capture_qid (see show_media_notes)."""
     qid  = gen_id()
+    # Live Search certificates (cert_attach.py): links are popped here, never saved. A stone
+    # gets a pdf_url only when its redaction was verified; anything else becomes a note.
+    cert_jobs = [s.pop("_cert", None) for s in stones_payload]
+    cert_notes, cert_logs = [], []
+    if any(j is not None for j in cert_jobs):
+        try:
+            import cert_attach
+            cert_notes, cert_logs = cert_attach.attach_all(stones_payload, cert_jobs, get_logo_img("Pure Carbon Group"),
+                                                           SUPABASE_URL, SUPABASE_KEY)
+        except Exception as e:
+            cert_notes = [f"Certificates not attached: unexpected problem ({type(e).__name__})"]
     notes, jobs = rehost_media(stones_payload, qid)
-    st.session_state.media_notes = notes
+    st.session_state.media_notes = notes + cert_notes
+    st.session_state.cert_log = cert_logs
     st.session_state.capture_qid = qid if jobs.jobs else None
     exp  = (datetime.datetime.utcnow()+datetime.timedelta(days=expiry_days)).isoformat()+"Z"
     body = {"id":qid,"client":client,"stones":stones_payload,"expires_at":exp}
@@ -1048,161 +898,47 @@ with tab2:
     qhc1,qhc2 = st.columns([4,1])
     with qhc1: st.markdown('<div class="section-label" style="margin-bottom:0">Quote history</div>', unsafe_allow_html=True)
 
-    # ── One-time clean-up: the promo clip used as stones' videos ──────────────
-    import spin_jobs
-    with st.expander("🧹 Remove the promo clip from quotes", expanded=bool(st.session_state.get("promo_found") or st.session_state.get("promo_done"))):
-        st.caption(f"Finds every stone whose video is the viewer's promo clip ({spin_jobs.PROMO_FILE} or any file with "
-                   "exactly the same content), clears that video so the stone shows its image only, then deletes the "
-                   "clip files from storage. Nothing else on the stone changes.")
-        if st.button("1. Find stones with the promo clip", key="promo_find", use_container_width=True):
-            st.session_state.pop("promo_done", None)
-            with st.spinner("Checking every quote and stored video…"):
+    # ── ONE-TIME FIX (remove after it has run): links to deleted /media/ files ──
+    import dead_media
+    _dm = st.session_state.get("dead_media")
+    with st.expander("🧹 One-time fix: clear links to deleted media files", expanded=bool(_dm)):
+        st.caption("Checks every stone in every quote. A video or image that points at a /media/ file that no "
+                   "longer exists in storage (e.g. the deleted promo clip) is cleared; nothing else changes.")
+        if st.button("Clear links to deleted media", key="dead_media_go", type="primary", use_container_width=True):
+            with st.spinner("Checking every quote and stored file…"):
                 try:
-                    st.session_state.promo_found = spin_jobs.find_promo(SUPABASE_URL, SUPABASE_KEY)
-                except spin_jobs.RevertError as e:
-                    st.session_state.promo_found = {"error": str(e)}
-            st.rerun()
-        _pf, _pd = st.session_state.get("promo_found"), st.session_state.get("promo_done")
-        if _pf and _pf.get("error"):
-            st.error("ERROR — nothing was changed: " + _pf["error"])
-        elif _pf and not _pd:
-            st.markdown(f"Checked {_pf['quotes_read']} quotes and {_pf['videos_checked']} stored videos: "
-                        f"**{len(_pf['stones'])} stone(s)** use the promo clip; **{len(_pf['files'])} copy/copies** "
-                        "of the clip in storage: " + ", ".join(f"`{f}`" for f in _pf["files"]))
-            if _pf["unreadable"]:
-                st.warning(f"{len(_pf['unreadable'])} stored video(s) couldn't be read, so couldn't be compared: "
-                           + ", ".join(_pf["unreadable"]))
-            import pandas as pd
-            if _pf["stones"]:
-                st.dataframe(pd.DataFrame([{"Quote": f"{QUOTE_BASE}/q/{x['quote']}", "Client": x["client"],
-                                            "Stone": "···" + x["last4"]} for x in _pf["stones"]]),
-                             hide_index=True, use_container_width=True)
-            if st.button(f"2. Clear the video on these {len(_pf['stones'])} stone(s) and delete the clip files",
-                         key="promo_clear", type="primary", use_container_width=True):
-                with st.spinner("Clearing…"):
-                    st.session_state.promo_done = spin_jobs.clear_promo(SUPABASE_URL, SUPABASE_KEY, _pf)
-                load_quote_history.clear()
-                st.rerun()
-        if _pd:
-            errs = [x for x in _pd["stones"] if x["result"] != "cleared"]
-            (st.error if errs or _pd["still_there"] or _pd["files_kept_because_of_errors"] else st.success)(
-                f"{len(_pd['stones']) - len(errs)} stone(s) cleared, {len(errs)} ERROR(S) · files deleted: "
-                f"{len(_pd['deleted'])}" + (f" · still in storage: {', '.join(_pd['still_there'])}" if _pd["still_there"] else "")
-                + (" · files NOT deleted because some quotes failed" if _pd["files_kept_because_of_errors"] else ""))
-            import csv, io as _io
-            buf = _io.StringIO()
-            w = csv.writer(buf)
-            w.writerow(["quote_link", "client", "stone_last4"])
-            for x in _pd["stones"]:
-                if x["result"] == "cleared":
-                    w.writerow([f"{QUOTE_BASE}/q/{x['quote']}", x["client"], x["last4"]])
-            if errs:
-                st.dataframe([{"Quote": f"{QUOTE_BASE}/q/{x['quote']}", "Stone": "···" + x["last4"], "Result": x["result"]}
-                              for x in errs], hide_index=True)
-            st.download_button("Download CSV of cleared stones", buf.getvalue(), file_name="promo_clip_cleared.csv",
-                               mime="text/csv", use_container_width=True)
-            st.code(buf.getvalue(), language=None)
-
-    # ── One-time revert: bad captures → original viewer links ─────────────────
-    with st.expander("⚠️ Revert bad 360 captures → original viewer links", expanded=bool(st.session_state.get("spin_revert"))):
-        st.caption(f"Checks EVERY quote and viewer link for media that isn't the stone's own: 360 captures with "
-                   f"fewer than {spin_jobs.sc.MIN_FRAMES} frames or the same frames as a different viewer (e.g. "
-                   "bridal_image), and re-hosted videos or images that are the same file as a DIFFERENT stone's "
-                   "(a viewer's generic promo clip). Each affected stone gets its original viewer link back — the "
-                   "table says which method found it. Generic images are removed. Nothing else is deleted.")
-        _all = st.checkbox("Revert ALL 360 captures, not only bad ones", key="spin_revert_all")
-        if not REPAIR_BUTTONS_ENABLED:
-            st.caption("Disabled for now.")
-        if st.button("Find and revert bad 360 captures" if not _all else "Revert ALL 360 captures",
-                     key="spin_revert_go", type="primary", use_container_width=True, disabled=not REPAIR_BUTTONS_ENABLED):
-            with st.spinner("Checking every quote and viewer link…"):
-                try:
-                    st.session_state.spin_revert = spin_jobs.revert_bad(SUPABASE_URL, SUPABASE_KEY, include_all=_all)
-                except spin_jobs.RevertError as e:
-                    st.session_state.spin_revert = {"error": str(e)}
+                    st.session_state.dead_media = dead_media.run(SUPABASE_URL, SUPABASE_KEY)
+                except dead_media.DeadMediaError as e:
+                    st.session_state.dead_media = {"error": str(e)}
             load_quote_history.clear()
             st.rerun()
-        _rv = st.session_state.get("spin_revert")
-        if _rv and _rv.get("error"):
-            st.error("ERROR — nothing was checked or changed: " + _rv["error"])
-        elif _rv:
-            sm = _rv["summary"]
-            (st.error if sm["errors"] else st.success)(
-                f"Checked {sm['quotes_read']} quotes, {sm['links_read']} viewer links and {sm['files_checked']} "
-                f"media files at {sm['at']} UTC: {sm['bad_captures']} bad 360 capture(s), {sm['generic_videos']} "
-                f"generic video file(s), {sm['generic_images']} generic image file(s) → {sm['stones_reverted']} "
-                f"stone fix(es) and {sm['links_reverted']} viewer link(s) reverted, {sm['errors']} ERROR(S)"
-                + (f" · {sm['files_unreadable']} file(s) couldn't be read (compared by name only)" if sm["files_unreadable"] else ""))
-            import pandas as pd
-            if _rv["rows"]:
-                st.markdown("**Quote stones**")
-                st.dataframe(pd.DataFrame([{**r, "Quote": f"{QUOTE_BASE}/q/{r['Quote']}"} for r in _rv["rows"]]),
+        if _dm and _dm.get("error"):
+            st.error("ERROR — nothing was changed: " + _dm["error"])
+        elif _dm:
+            (st.error if _dm["errors"] or _dm["unchecked"] else st.success)(
+                f"{_dm['at']} UTC · read {_dm['quotes_read']} quotes, {_dm['files_referenced']} referenced file(s), "
+                f"{_dm['files_listed']} file(s) in storage · deleted files still referenced: {len(_dm['dead_files'])} "
+                f"· fields cleared: {_dm['cleared']} · ERRORS: {_dm['errors']}"
+                + (f" · couldn't check {len(_dm['unchecked'])} file(s) (left as is)" if _dm["unchecked"] else ""))
+            if _dm["dead_files"]:
+                st.markdown("Deleted files: " + ", ".join(f"`{n}`" for n in _dm["dead_files"]))
+            if _dm["unchecked"]:
+                st.markdown("Couldn't check: " + ", ".join(f"`{n}` ({w})" for n, w in _dm["unchecked"].items()))
+            import csv, io as _io
+            _buf = _io.StringIO()
+            _w = csv.writer(_buf)
+            _w.writerow(["quote_link", "client", "stone", "last4", "field", "file", "result"])
+            for _r in _dm["rows"]:
+                _w.writerow([f"{QUOTE_BASE}/q/{_r['quote']}", _r["client"], _r["stone"], _r["last4"],
+                             _r["field"], _r["file"], _r["result"]])
+            if _dm["rows"]:
+                st.dataframe([{"Quote": _r["quote"], "Client": _r["client"], "Stone": f"{_r['stone']} · ···{_r['last4']}",
+                               "Field": _r["field"], "File": _r["file"], "Result": _r["result"]} for _r in _dm["rows"]],
                              hide_index=True, use_container_width=True)
-            if _rv["links"]:
-                st.markdown("**Viewer links (/v/)**")
-                st.dataframe(pd.DataFrame(_rv["links"]), hide_index=True, use_container_width=True)
-            if not _rv["rows"] and not _rv["links"]:
-                st.info("No bad captures found in the data that was read.")
-
-    # ── Upgrade older quotes: 360 viewer links → our own captured frames ──────
-    import spin_jobs
-    _up = spin_jobs.upgrade_status()
-    _aud = st.session_state.get("spin_audit")
-    _todo = spin_jobs.upgradable(_aud["quotes"] if _aud else qhistory)
-    _label = (f"360 upgrade — running ({_up['done']}/{_up['total']})" if _up["running"] else
-              f"360 upgrade — {len(_todo)} stone(s) need capture (on a viewer link, or a bad earlier capture)")
-    with st.expander(_label, expanded=_up["running"] or bool(_aud)):
-        _vok, _vmsg = spin_jobs.version_check()
-        if not spin_jobs.SPIN_ENABLED:
-            _vok, _vmsg = False, "360 capture is switched OFF (Render env var SPIN_ENABLED is not \"true\"): no capture on save, no upgrade"
-        st.markdown(("✅ " if _vok else "⛔ ") + f"**Capture code:** {_md(_vmsg)}")
-        st.caption("Bad captures (first build, or under "
-                   f"{spin_jobs.sc.MIN_FRAMES} frames, e.g. shared bridal_image pictures) are never shown: quote, "
-                   "share and viewer pages fall back to the stone's original viewer until it is re-captured.")
-        if st.button("List affected stones (all quotes)", key="up360_audit", use_container_width=True):
-            with st.spinner("Checking every quote…"):
-                st.session_state.spin_audit = spin_jobs.audit(SUPABASE_URL, SUPABASE_KEY)
-            st.rerun()
-        if _aud:
-            rows = _aud["stones"]
-            live = [r for r in rows if not r["expired"]]
-            st.markdown(f"**Affected stones** (checked {_aud['at']} UTC, {_aud['quotes_scanned']} quotes): "
-                        f"{len(rows)} stone(s) with a bad capture, {len(live)} in unexpired quotes · "
-                        f"/v/ links holding a bad capture: {_aud['links']['untrusted']} of {_aud['links']['total']} "
-                        "(all fall back to the original viewer)")
-            if rows:
-                import pandas as pd
-                st.dataframe(pd.DataFrame([{
-                    "Quote": f"{QUOTE_BASE}/q/{r['quote']}", "Client": r["client"], "Created": r["created"],
-                    "Expired": "yes" if r["expired"] else "", "Stone": f"{r['stone']} · ···{r['last4']}",
-                    "Frames": r["frames"], "Code": f"v{r['version']}", "Original viewer": r["original_viewer"],
-                    "Clients see now": r["shown_now"]} for r in rows]), hide_index=True, use_container_width=True)
-        if _up["running"]:
-            st.progress(_up["done"] / max(1, _up["total"]), text=f"{_up['done']} of {_up['total']} done")
-            if st.button("Refresh", key="up360_refresh"):
-                st.rerun()
-        elif _todo:
-            if not _aud:
-                st.caption("Tip: list affected stones first, so older quotes beyond the recent history are included.")
-            if st.button(f"Capture 360 frames for {len(_todo)} stone(s)", key="up360_go",
-                         use_container_width=True, disabled=not (_vok and REPAIR_BUTTONS_ENABLED)):
-                started, msg = spin_jobs.start_upgrade(SUPABASE_URL, SUPABASE_KEY, _aud["quotes"] if _aud else qhistory)
-                (st.success if started else st.error)(msg)
-                if started:
-                    st.session_state.pop("spin_audit", None)
-                    st.rerun()
-        if _up["results"]:
-            ok = sum(r["ok"] for r in _up["results"])
-            st.markdown(f"**Last run** (started {_up['started']} UTC"
-                        + (f", finished {_up['finished']} UTC" if _up["finished"] else "")
-                        + f", {_md(_up.get('code') or '')}): {ok} captured, {len(_up['results']) - ok} not captured")
-            for r in _up["results"]:
-                st.markdown(f"- {'✅' if r['ok'] else '⚠️'} **{_md(r['label'])}** (quote `{r['quote']}`): {_md(r['note'])}")
-                if r.get("facts"):
-                    st.code("\n".join(r["facts"]), language=None)
-            if not _up["running"] and st.session_state.get("up360_seen") != _up["finished"]:
-                st.session_state.up360_seen = _up["finished"]      # reload history once per run
-                load_quote_history.clear()
+                st.download_button("Download CSV of cleared fields", _buf.getvalue(), file_name="dead_media_cleared.csv",
+                                   mime="text/csv", use_container_width=True)
+            else:
+                st.info("No stone points at a deleted media file.")
 
     def render_quote_row(q):
         exp_str = ""

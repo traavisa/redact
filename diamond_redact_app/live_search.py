@@ -2,7 +2,10 @@
 
 Rules this module follows:
   - The source is never named in the UI, error text or saved data ("Live Search" only).
-  - Stones are whitelisted in nivoda_client.whitelist(); supplier fields are never requested.
+  - Stones are whitelisted in stone_source.whitelist(); supplier fields are never requested,
+    except the stock number ("Stock #", internal screen only, for direct lookup).
+  - Certificate file links (introspection) stay internal: the "Cert" link on this screen, and
+    on save a verified redacted copy on our own domain (cert_attach.py), or nothing and a note.
   - Search filters come only from the form, built by deterministic code. The AI can
     pre-fill the form ("Read request") but never runs or changes a search.
   - Saved quotes never carry the source's media URLs: save_quote() copies each image/video
@@ -16,7 +19,7 @@ import traceback
 
 import streamlit as st
 
-import nivoda_client as src
+import stone_source as src
 
 AI_MODEL = "claude-sonnet-5"
 MAX_SCAN = 500              # stones fetched per search (cheapest first), 10 pages of 50
@@ -141,6 +144,7 @@ DEFAULTS = {
     "ls_flo": [], "ls_labs": [], "ls_pr_min": None, "ls_pr_max": None, "ls_pr_basis": "My cost",
     "ls_ratio_min": None, "ls_ratio_max": None, "ls_depth_min": None, "ls_depth_max": None,
     "ls_table_min": None, "ls_table_max": None, "ls_as_grown": False,
+    "ls_hide_novid": True, "ls_hide_noimg": True,
 }
 FLEX_DEFAULTS = {"ls_fx_col": False, "ls_fx_cla": False, "ls_fx_ct": False, "ls_fx_ct_tol": "±0.05",
                  "ls_fx_budget": False, "ls_fx_lab": False, "ls_fx_flo": False}
@@ -410,6 +414,7 @@ def read_criteria():
         "ratio": (ss.ls_ratio_min, ss.ls_ratio_max), "depth": (ss.ls_depth_min, ss.ls_depth_max),
         "table": (ss.ls_table_min, ss.ls_table_max),
         "as_grown": bool(ss.ls_as_grown) and ss.ls_type == "Lab-grown",
+        "hide_vid": bool(ss.ls_hide_novid), "hide_img": bool(ss.ls_hide_noimg),
     }
 
 
@@ -432,7 +437,7 @@ def _widen(seq, lo, hi, by):
 
 
 # Query-input field names each criterion can use, in order of preference. A field is only
-# used when introspection shows a type the criterion can be sent as (see nivoda_client._filter_spec).
+# used when introspection shows a type the criterion can be sent as (see stone_source._filter_spec).
 FILTER_FIELDS = {
     "Type": ["labgrown"],
     "Shape": ["shapes", "shape"],
@@ -633,6 +638,19 @@ def server_query(c, fx, schema, rate, markup, divisor):
                 server(crit, f, _range_send(spec, lo or 0.0, hi or _OPEN_HI[crit]))
             else:
                 client(crit)
+    # Media filter (hide stones with no image / no video or 360)
+    mp = media_plan(schema, c.get("hide_vid"), c.get("hide_img"))
+    if c.get("hide_img"):
+        if mp["image"]:
+            server("Media: image", mp["image"], True, "hide stones with no image")
+        else:
+            client("Media: image", "no has-image filter in the schema")
+    if c.get("hide_vid"):
+        if mp["video"]:
+            plan.append(("Media: video/360", "server",
+                         " + ".join(f"{f}: true" for f in mp["video"]) + " — one search each, merged (cheapest first)"))
+        else:
+            client("Media: video/360", "no filter pair in the schema that means '360 or video'")
     # As-grown (lab-grown only)
     if c["as_grown"]:
         sent = False
@@ -824,6 +842,85 @@ def bucket(stones, c, fx, rate, markup, divisor, stats=None):
     return exact, flexed, adds
 
 
+# ── Media filter ──────────────────────────────────────────────────────────────
+# Boolean query filters that mean "has an image" / "has a 360" / "has a video", by name.
+MEDIA_FLAGS = {"image": ["has_image", "hasImage", "has_images", "with_image"],
+               "v360": ["has_v360", "hasV360", "has_360", "with_v360"],
+               "video": ["has_video", "hasVideo", "has_videos", "with_video"]}
+_MEDIA_URL_RE = re.compile(r"^https?://", re.I)
+
+
+def _media_value(v):
+    """True if a media field holds something usable (a link, or an object/list carrying one)."""
+    if isinstance(v, str):
+        return bool(_MEDIA_URL_RE.match(v.strip()))
+    if isinstance(v, dict):
+        return any(_media_value(x) for k, x in v.items() if "url" in str(k).lower())
+    if isinstance(v, list):
+        return any(_media_value(x) for x in v)
+    return False
+
+
+def has_video_360(s):
+    """A v360 frame set, a video file or a viewer URL."""
+    if _media_value(s.get("video") or ""):
+        return True
+    m = dict(s.get("media") or {})
+    m.update({"certificate." + k: v for k, v in (m.pop("certificate", None) or {}).items()})
+    return any(_media_value(v) for k, v in m.items()
+               if any(w in k.lower() for w in ("v360", "360", "video", "spin", "frame")))
+
+
+def has_image(s):
+    """An image URL (the stone's, or the certificate's still)."""
+    return _media_value(s.get("image") or "") or _media_value(((s.get("media") or {}).get("certificate") or {}).get("image") or "")
+
+
+def media_plan(schema, hide_vid, hide_img):
+    """Which media checks the API can do. image: a has-image flag name or None. video: a list
+    of flags whose searches together give exactly "has a 360 or a video" (one search per
+    flag, merged), or None (checked here after fetching)."""
+    have = schema.get("filters") or {}
+    pick = lambda names: next((n for n in names if (have.get(n) or {}).get("kind") == "bool"), None)
+    img = pick(MEDIA_FLAGS["image"]) if hide_img else None
+    vid = None
+    if hide_vid:
+        v360, video = pick(MEDIA_FLAGS["v360"]), pick(MEDIA_FLAGS["video"])
+        if v360 and video:
+            vid = [v360, video]
+    return {"image": img, "video": vid}
+
+
+def media_keep(stones, hide_vid, hide_img):
+    """(kept, removed) — removed counts stones hidden for no video/360 and for no image."""
+    kept, rv, ri = [], 0, 0
+    for s in stones:
+        if hide_vid and not has_video_360(s):
+            rv += 1
+            continue
+        if hide_img and not has_image(s):
+            ri += 1
+            continue
+        kept.append(s)
+    return kept, {"no_video_360": rv, "no_image": ri}
+
+
+def media_badges(s):
+    v, i = has_video_360(s), has_image(s)
+    if not v and not i:
+        return ["No media"]
+    return [] if v and i else ["No video/360"] if i else ["No image"]
+
+
+def availability_badge(s):
+    a = _key(s.get("availability"))
+    if not a or a in ("AVAILABLE", "INSTOCK", "YES", "TRUE"):
+        return ""
+    if "HOLD" in a or "MEMO" in a or "RESERV" in a:
+        return "On hold"
+    return "Unavailable" if any(w in a for w in ("NOT", "UNAVAIL", "SOLD", "NO")) else str(s["availability"]).replace("_", " ").title()
+
+
 # ── UI ────────────────────────────────────────────────────────────────────────
 CSS = """
 <style>
@@ -839,7 +936,7 @@ CSS = """
 .ls-pick { border-left: 3px solid #c9a84c; padding: 6px 10px; margin: 6px 0; font-size: 13px; }
 </style>
 """
-REQUIRED = ["NIVODA_API_URL", "NIVODA_USERNAME", "NIVODA_PASSWORD", "DEFAULT_USD_CAD"]
+MODES = ["Criteria search", "Look up stones"]
 
 
 def _esc(v):
@@ -911,7 +1008,9 @@ def render(deps):
 
 def _render(deps):
     get = deps["get_setting"]
-    missing = [k for k in REQUIRED if not get(k)]
+    url, user, pw = (src.setting(get, k) for k in ("url", "user", "password"))
+    missing = [n for n, v in (("LS_API_URL", url), ("LS_USERNAME", user), ("LS_PASSWORD", pw),
+                              ("DEFAULT_USD_CAD", get("DEFAULT_USD_CAD"))) if not v]
     rate_env = _f(get("DEFAULT_USD_CAD"))
     if "DEFAULT_USD_CAD" not in missing and not (rate_env and rate_env > 0):
         missing.append("DEFAULT_USD_CAD (must be a number, e.g. 1.37)")
@@ -922,12 +1021,17 @@ def _render(deps):
                 "`DEFAULT_MARKUP_PCT`.")
         return
     ai_key = get("ANTHROPIC_API_KEY")
-    divisor = _f(get("NIVODA_PRICE_DIVISOR"), 100.0) or 100.0
+    divisor = _f(src.setting(get, "divisor"), 100.0) or 100.0
     _init_state(_f(get("DEFAULT_MARKUP_PCT"), 0.0) or 0.0, rate_env)
     ss = st.session_state
     st.markdown(CSS, unsafe_allow_html=True)
     _amber_css()
-    client = src.Client(get("NIVODA_API_URL"), get("NIVODA_USERNAME"), get("NIVODA_PASSWORD"), ss)
+    client = src.Client(url, user, pw, ss)
+
+    mode = st.radio("Mode", MODES, horizontal=True, key="ls_mode", label_visibility="collapsed")
+    if mode == MODES[1]:
+        _lookup_mode(client, ai_key, divisor, deps)
+        return
 
     # ── A. Request parsing ────────────────────────────────────────────────
     st.markdown('<div class="section-label">Client request (optional)</div>', unsafe_allow_html=True)
@@ -1036,15 +1140,14 @@ def _render(deps):
             with b:
                 st.number_input(f"{label} max", min_value=0.0, step=step, format="%.2f", key=hi); _note(hi)
 
-    # ── C. Pricing ───────────────────────────────────────────────────────
     a, b = st.columns(2)
     with a:
-        st.number_input("Markup %", min_value=0.0, step=1.0, format="%.1f", key="ls_markup",
-                        help="Client price = cost × (1 + markup)")
+        st.checkbox("Hide stones with no video/360", key="ls_hide_novid")
     with b:
-        st.number_input("USD → CAD rate", min_value=0.01, step=0.01, format="%.4f", key="ls_rate",
-                        help="Live Search prices arrive in USD; they're converted to CAD with this rate.")
-    rate, markup = float(ss.ls_rate), float(ss.ls_markup)
+        st.checkbox("Hide stones with no image", key="ls_hide_noimg")
+
+    # ── C. Pricing ───────────────────────────────────────────────────────
+    rate, markup = _pricing_inputs()
 
     # ── D. Search ────────────────────────────────────────────────────────
     crit = read_criteria()
@@ -1052,12 +1155,32 @@ def _render(deps):
     auto = ss.pop("ls_autosearch", False)       # a flex offer button asks for a fresh search
     if st.button("🔍  Search", type="primary", use_container_width=True, key="ls_search") or auto:
         client.reset_diag()
-        q, plan, schema, error, retry = None, [], {}, None, None
+        q, plan, schema, error, retry, minfo = None, [], {}, None, None, None
         with st.spinner("Searching live stones…"):
             try:
                 schema = client.schema()
                 q, plan = server_query(crit, fx, schema, rate, markup, divisor)
-                stones, total = client.search(q, MAX_SCAN)
+                mp = media_plan(schema, crit["hide_vid"], crit["hide_img"])
+                union = {}
+
+                def fetch(query):
+                    """One search, or (video/360 filter server-side) one per flag, merged."""
+                    if not mp["video"]:
+                        return client.search(query, MAX_SCAN)
+                    merged, cap, per = {}, False, {}
+                    for f in mp["video"]:
+                        got, _ = client.search({**query, f: True}, MAX_SCAN)
+                        cap = cap or client.diag["cap_hit"]
+                        per[f] = len(got)
+                        for x in got:
+                            merged.setdefault(x["sid"], x)
+                    rows = sorted(merged.values(), key=lambda x: (x.get("price_raw") is None, x.get("price_raw") or 0))
+                    client.diag["cap_hit"] = cap or len(rows) > MAX_SCAN
+                    client.diag["real_total"] = None if client.diag["cap_hit"] else len(rows)
+                    union.update(per=per, merged=len(rows))
+                    return rows[:MAX_SCAN], client.diag["real_total"]
+
+                stones, total = fetch(q)
                 sent = q
                 pf = next((p[2].split(" ")[0] for p in plan if p[0] == "Price" and p[1] == "server"), None)
                 bounds = price_usd_bounds(crit, fx, rate, markup)
@@ -1070,8 +1193,9 @@ def _render(deps):
                                                ("pages", "raw_items", "total_count", "count_query_total")}}
                     client.diag.update(pages=0, raw_items=0, total_count=None, count_query_total=None)
                     sent = {k: v for k, v in q.items() if k != pf}
-                    stones, total = client.search(sent, MAX_SCAN)
-                ss.ls_results = {"q": q, "sent": sent, "stones": stones, "total": total,
+                    stones, total = fetch(sent)
+                minfo = _media_server_counts(client, mp, sent, total, union)
+                ss.ls_results = {"q": q, "vq": mp["video"], "sent": sent, "stones": stones, "total": total,
                                  "fetched": client.diag["raw_items"], "cap_hit": client.diag["cap_hit"],
                                  "server_crit": {p[0] for p in plan if p[1] == "server"} - (
                                      {"Price"} if retry else set()),
@@ -1083,36 +1207,90 @@ def _render(deps):
                 st.error(error)
         stats, sample = {}, None
         if ss.ls_results:
-            ex, fl, _ = bucket(ss.ls_results["stones"], crit, fx, rate, markup, divisor, stats)
+            shown, removed = media_keep(ss.ls_results["stones"], crit["hide_vid"], crit["hide_img"])
+            ex, fl, _ = bucket(shown, crit, fx, rate, markup, divisor, stats)
+            stats["media_removed"] = removed
             priced = [r for r in ex + fl if r["pv"]] or [
                 {**s, "devs": None} for s in ss.ls_results["stones"] if s.get("price_raw") is not None]
             if priced:
                 sample = min(priced, key=lambda r: r["price_raw"])
         ss.ls_diag = _build_diag(client.diag, q, plan, retry, schema, error, ss.ls_results, stats,
-                                 sample, rate, markup, divisor)
+                                 sample, rate, markup, divisor, minfo)
         _log_diag(ss.ls_diag)
 
     res = ss.get("ls_results")
     live_stats = None
     if res:
         try:
-            current_q = server_query(crit, fx, client.schema(), rate, markup, divisor)[0]
+            sch = client.schema()
+            current = (server_query(crit, fx, sch, rate, markup, divisor)[0],
+                       media_plan(sch, crit["hide_vid"], crit["hide_img"])["video"])
         except Exception:
-            current_q = res["q"]
-        if current_q != res["q"]:
+            current = (res["q"], res.get("vq"))
+        if current != (res["q"], res.get("vq")):
             st.warning("The criteria changed since the last search. Click **Search** to refresh the results.")
         else:
             live_stats = {}
-            exact, flexed, adds = bucket(res["stones"], crit, fx, rate, markup, divisor, live_stats)
+            # Media-hidden stones are removed first: they never count as "Outside your criteria".
+            shown, removed = media_keep(res["stones"], crit["hide_vid"], crit["hide_img"])
+            exact, flexed, adds = bucket(shown, crit, fx, rate, markup, divisor, live_stats)
+            live_stats["media_removed"] = removed
             _results(exact, flexed, adds, res, crit, fx, ai_key, deps)
     _diagnostics(ss.get("ls_diag"), live_stats)
+
+
+def _pricing_inputs():
+    a, b = st.columns(2)
+    with a:
+        st.number_input("Markup %", min_value=0.0, step=1.0, format="%.1f", key="ls_markup",
+                        help="Client price = cost × (1 + markup)")
+    with b:
+        st.number_input("USD → CAD rate", min_value=0.01, step=0.01, format="%.4f", key="ls_rate",
+                        help="Live Search prices arrive in USD; they're converted to CAD with this rate.")
+    return float(st.session_state.ls_rate), float(st.session_state.ls_markup)
+
+
+def _media_server_counts(client, mp, sent, total, union):
+    """How many stones the server-side media filters removed, from the API's own counts
+    (None = not counted)."""
+    info = {"image_flag": mp["image"], "video_flags": mp["video"], "server_removed": None,
+            "union": union or None}
+    if not (mp["image"] or mp["video"]):
+        return info
+    base = {k: v for k, v in sent.items() if k != mp["image"]}
+    try:
+        n_base = client.count(base)
+    except Exception:
+        n_base = None
+    info["count_without_media_filters"] = n_base
+    if isinstance(n_base, int) and isinstance(total, int):
+        info["server_removed"] = max(0, n_base - total)
+    return info
 
 
 # ── Search diagnostics ────────────────────────────────────────────────────────
 _GRADE_ABBR = {"Excellent": "EX", "Very Good": "VG", "Good": "G", "Fair": "F", "Poor": "P"}
 
 
-def _build_diag(cd, q, plan, retry, schema, error, res, stats, sample_stone, rate, markup, divisor):
+def _mask_numbers(text):
+    """Report / stock numbers (6+ digits) shortened to their last 4 digits."""
+    return re.sub(r"[A-Za-z]{0,3}\d{6,}", lambda m: "···" + m.group(0)[-4:], str(text or ""))
+
+
+def _cert_file_diag(schema, stones):
+    """Certificate file fields (introspection) and how many stones carry one. Hosts masked."""
+    media = schema.get("media") or {}
+    with_file = [x for x in stones or [] if x.get("cert_file")]
+    ex = with_file[0]["cert_file"] if with_file else None
+    return {"fields": [f"{w}.{n}: {t}" + (f" — {d}" if d else "") for w, n, t, d in media.get("cert_files") or []],
+            "stones": len(stones or []), "with_file": len(with_file),
+            "example": _mask_numbers(src._shape(ex)) if ex else None,
+            "pdf_like": sum(1 for x in with_file if re.search(r"\.pdf(\?|$)", x["cert_file"], re.I)),
+            "stock_fields": list(media.get("stock_fields") or []),
+            "cert_filter": media.get("cert_filter"), "stock_filter": media.get("stock_filter")}
+
+
+def _build_diag(cd, q, plan, retry, schema, error, res, stats, sample_stone, rate, markup, divisor, minfo=None):
     """Everything here is sanitised: no source name, hosts, credentials or supplier data."""
     sample = None
     if sample_stone:
@@ -1162,13 +1340,15 @@ def _build_diag(cd, q, plan, retry, schema, error, res, stats, sample_stone, rat
         "labgrown_flag_field": ".".join(schema["lg_flag"]) if schema.get("lg_flag") else None,
         "labgrown_flags": cd.get("labgrown_flags"),
         "media": cd.get("media"),
+        "media_filter": minfo,
+        "cert_files": _cert_file_diag(schema, res["stones"] if res else []),
     }
 
 
-def _log_diag(d):
+def _log_diag(d, tag="live-search"):
     """One line per search in the server log (Render)."""
     try:
-        print("[live-search] " + json.dumps(d, default=str, separators=(",", ":")), flush=True)
+        print(f"[{tag}] " + json.dumps(d, default=str, separators=(",", ":")), flush=True)
     except Exception:
         pass
 
@@ -1220,6 +1400,10 @@ def _diagnostics(d, live_stats=None):
         if stats:
             basis = "current form and flex settings" if live_stats is not None else "settings at search time"
             lines = [f"- {name}: removed {n}" for name, n in stats.get("removed", [])] or ["- nothing removed"]
+            mr = stats.get("media_removed") or {}
+            if mr:
+                lines = [f"- Media filter (checked first; never counted as outside your criteria): removed "
+                         f"{mr.get('no_video_360', 0)} with no video/360, {mr.get('no_image', 0)} with no image"] + lines
             st.markdown(f"**4. Client-side re-check** (in order; {basis}):\n\n" + "\n".join(lines)
                         + f"\n\nOutside criteria, needs a flex option that's off: {stats.get('needs_flex', 0)} · "
                         f"Exact: {stats.get('exact', 0)} · Outside your criteria (shown): {stats.get('flexed', 0)}")
@@ -1265,6 +1449,39 @@ def _diagnostics(d, live_stats=None):
                         + "\n\nCertificate lookup by ID (fallback for other stones and pasted viewer links): "
                         + (f"`{_code(md['cert_lookup'])}`" if md.get("cert_lookup") else "none in the schema")
                         + "\n\nValues returned:\n\n" + "\n".join(got))
+        _diag_extra(d)
+
+
+def _diag_extra(d):
+    """Sections 8-9: media filter and certificate files."""
+    mf = d.get("media_filter")
+    if mf is not None:
+        parts = []
+        parts.append("- Hide no image: " + (f"**server-side** (`{mf['image_flag']}: true`)" if mf.get("image_flag")
+                                              else "client-side (no has-image filter in the schema)"))
+        parts.append("- Hide no video/360: " + (
+            "**server-side** (" + " + ".join(f"`{f}: true`" for f in mf["video_flags"]) + ", one search each, merged)"
+            if mf.get("video_flags") else "client-side (no filter pair meaning '360 or video' in the schema)"))
+        sr = mf.get("server_removed")
+        if mf.get("image_flag") or mf.get("video_flags"):
+            parts.append("- Removed by the server-side media filters: " + (
+                f"{sr:,} (count without them {mf.get('count_without_media_filters'):,})" if isinstance(sr, int)
+                else "not counted (the API gave no usable count)"))
+        if mf.get("union"):
+            parts.append(f"- Per-flag searches: {mf['union'].get('per')}; merged: {mf['union'].get('merged')}")
+        parts.append("- Removed here (client-side re-check): see section 4")
+        st.markdown("**8. Media filter:**\n\n" + "\n".join(parts))
+    cf = d.get("cert_files")
+    if cf is not None:
+        fl = [f"- `{_code(f)}`" for f in cf.get("fields") or []] or ["- none found in the schema"]
+        st.markdown("**9. Certificate files** (internal only; redacted copies are made on save):\n\n"
+                    "Fields in the schema:\n\n" + "\n".join(fl)
+                    + f"\n\nStones with a certificate file: {cf['with_file']} of {cf['stones']} "
+                    f"({cf.get('pdf_like', 0)} ending in .pdf)"
+                    + (f", e.g. `{_code(cf['example'])}`" if cf.get("example") else "")
+                    + f"\n\nLookup filters: certificate number `{_code(cf.get('cert_filter'))}` · stock number "
+                    f"`{_code(cf.get('stock_filter'))}` · stock number field(s): "
+                    + (", ".join(f"`{_code(x)}`" for x in cf.get("stock_fields") or []) or "none"))
 
 
 def _sort(rows, how, crit):
@@ -1309,12 +1526,20 @@ def _card(s, section):
                     st.caption("No image")
             else:
                 st.caption("No image")
+            links = []
             if s.get("video"):
-                st.markdown(f'<a href="{_esc(s["video"])}" target="_blank" rel="noreferrer" '
-                            f'style="font-size:12px;">▶ Video</a>', unsafe_allow_html=True)
+                links.append(f'<a href="{_esc(s["video"])}" target="_blank" rel="noreferrer">▶ Video</a>')
+            if s.get("cert_file"):   # internal: view the original before approving
+                links.append(f'<a href="{_esc(s["cert_file"])}" target="_blank" rel="noreferrer">📄 Cert</a>')
+            if links:
+                st.markdown(f'<div style="font-size:12px;">{" · ".join(links)}</div>', unsafe_allow_html=True)
         with c2:
             ct = f"{s['carat']:.2f} ct " if s.get("carat") else ""
             badges = "".join(f'<span class="ls-badge">{_esc(b)}</span>' for _, b in s["devs"])
+            if availability_badge(s):
+                badges += f'<span class="ls-badge">{_esc(availability_badge(s))}</span>'
+            for b in s.get("xbadges") or []:
+                badges += f'<span class="ls-badge grey">{_esc(b)}</span>'
             if st.session_state.ls_as_grown and as_grown_status(s) is None:
                 badges += '<span class="ls-badge grey">As-grown not confirmed</span>'
             props = " · ".join(x for x in (
@@ -1326,7 +1551,8 @@ def _card(s, section):
                 f'{_esc(norm_clarity(s.get("clarity")) or s.get("clarity") or "—")}</div>'
                 f'<div class="ls-line">{_esc(grades)} · Fluor {_esc(fl)}</div>'
                 f'<div class="ls-line">{_esc(s.get("lab") or "—")} {_esc(s.get("cert_no"))}'
-                f'{" · " + _esc(meas) if meas else ""}</div>'
+                f'{" · " + _esc(meas) if meas else ""}'
+                f'{" · Stock # " + _esc(s["stock_no"]) if s.get("lookup") and s.get("stock_no") else ""}</div>'
                 f'<div class="ls-line">{_esc(props)}</div>{badges}', unsafe_allow_html=True)
         with c3:
             if pv:
@@ -1375,7 +1601,6 @@ def _flex_label(k, fx):
 
 
 def _results(exact, flexed, adds, res, crit, fx, ai_key, deps):
-    ss = st.session_state
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     fetched, total = res.get("fetched", len(res["stones"])), res.get("total")
     if res.get("cap_hit"):
@@ -1437,17 +1662,23 @@ def _results(exact, flexed, adds, res, crit, fx, ai_key, deps):
         _section(shown_fx, "fx", view)
 
     # ── Top picks (AI, from displayed stones only) ──────────────────────────
-    st.markdown('<hr class="divider">', unsafe_allow_html=True)
     refs = {}
     for prefix, rows, section in (("E", shown_ex, "exact"), ("O", shown_fx, "outside")):
         for i, s in enumerate(rows, 1):
             refs[f"{prefix}{i}"] = (s, section)
+    _top_picks(refs, exact + flexed, _criteria_text(crit, fx), ai_key)
+    _quote_box(exact + flexed, deps)
+
+
+def _top_picks(refs, all_rows, criteria_text, ai_key):
+    ss = st.session_state
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
     if st.button("✨  Suggest top picks", type="primary", key="ls_picks_btn",
                  disabled=not (ai_key and refs)):
         payload = [_ai_stone(ref, s, section) for ref, (s, section) in refs.items()]
         with st.spinner("Choosing top picks…"):
             try:
-                out = ai_top_picks(ai_key, _criteria_text(crit, fx), payload)
+                out = ai_top_picks(ai_key, criteria_text, payload)
                 picks = []
                 for p in (out.get("picks") or [])[:5]:
                     ref = str(p.get("ref", "")).strip()
@@ -1457,7 +1688,7 @@ def _results(exact, flexed, adds, res, crit, fx, ai_key, deps):
             except AIError as e:
                 st.error(str(e))
     if ss.get("ls_picks_ai"):
-        by_sid = {s["sid"]: s for s in exact + flexed}
+        by_sid = {s["sid"]: s for s in all_rows}
         for ref, sid, section, reason in ss.ls_picks_ai:
             s = by_sid.get(sid)
             if not s:
@@ -1468,8 +1699,6 @@ def _results(exact, flexed, adds, res, crit, fx, ai_key, deps):
             st.markdown(f'<div class="ls-pick">{tag}<b>{s.get("carat") or 0:.2f} ct {_esc(shape_group(s["shape"]))} '
                         f'{_esc(colour)} {_esc(norm_clarity(s.get("clarity")))}</b> · {_esc(s.get("lab"))}{_esc(price)}'
                         f'<br><span style="opacity:.8">{_esc(reason)}</span></div>', unsafe_allow_html=True)
-
-    _quote_box(exact + flexed, deps)
 
 
 def _ai_stone(ref, s, section):
@@ -1503,6 +1732,7 @@ def _section(rows, section, view):
         "Colour": _spec_bits(s)[0], "Clarity": norm_clarity(s.get("clarity")) or s.get("clarity"),
         "Cut": norm_grade(s.get("cut")), "Pol": norm_grade(s.get("polish")), "Sym": norm_grade(s.get("symmetry")),
         "Fluor": norm_fluor(s.get("flo")) or s.get("flo"), "Lab": s.get("lab"), "Cert": s.get("cert_no"),
+        "Cert file": s.get("cert_file") or None,
         "Measurements": _spec_bits(s)[3], "L/W": round(lw_ratio(s), 2) if lw_ratio(s) else None,
         "Depth %": s.get("depth_pct"), "Table %": s.get("table_pct"),
         "Cost CAD": round(s["pv"]["cost"]) if s["pv"] else None,
@@ -1510,13 +1740,16 @@ def _section(rows, section, view):
         "Client CAD": round(s["pv"]["client"]) if s["pv"] else None,
         "Client CAD/ct": round(s["pv"]["client_ct"]) if s["pv"] and s["pv"]["client_ct"] else None,
         "Differs": "; ".join(b for _, b in s["devs"]),
+        "Notes": "; ".join(x for x in [availability_badge(s)] + list(s.get("xbadges") or []) if x),
+        **({"Stock #": s.get("stock_no") or ""} if s.get("lookup") else {}),
     } for s in rows])
-    if section == "ex":
+    if section in ("ex", "lk"):
         df = df.drop(columns=["Differs"])
     edited = st.data_editor(
         df, hide_index=True, key=f"ls_tbl_{section}",
         disabled=[c for c in df.columns if c != "Add"],
         column_config={"Image": st.column_config.ImageColumn("Image"),
+                       "Cert file": st.column_config.LinkColumn("Cert file", display_text="Cert"),
                        "Add": st.column_config.CheckboxColumn("Add", help="Add to quote")})
     for s, add in zip(rows, list(edited["Add"])):
         (ss.ls_picked.add if add else ss.ls_picked.discard)(s["sid"])
@@ -1551,6 +1784,8 @@ def _quote_payload(s, show_price):
         "cert_data":     {k: v for k, v in cert_data.items() if v},
         "ls_ref":        s["sid"],   # internal only; the share page's server strips unknown fields
         "_media":        s.get("media") or None,   # 360/video fields for capture; removed before saving
+        # certificate file: redacted + verified on save (cert_attach.py); popped before saving
+        "_cert":         {"url": s.get("cert_file") or "", "cert_no": s.get("cert_no") or "", "lab": lab},
     }
 
 
@@ -1593,3 +1828,258 @@ def _quote_box(rows, deps):
         if ss.get("media_notes"):
             st.caption("Media note — the quote was saved; these items were handled differently:\n\n"
                        + "\n".join(f"- {m}" for m in ss.media_notes))
+        if ss.get("cert_log"):
+            with st.expander("Certificate log — one line per stone", expanded=False):
+                st.dataframe([{"Stone": c.get("stone"), "Source": c.get("source"), "Lab/format": c.get("lab_format"),
+                               "Redaction": c.get("redaction"), "Verification": c.get("verification"),
+                               "Attached": "yes" if c.get("pdf_url") else "no", "Note": c.get("note")}
+                              for c in ss.cert_log], hide_index=True, use_container_width=True)
+
+
+# ── Direct lookup by stone number ─────────────────────────────────────────────
+MAX_LOOKUP = 100
+_TOKEN_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?")
+_PREFIXED_RE = re.compile(r"([A-Z]{1,4})-?(\d{5,})")
+CERT_PREFIXES = ("LG",)          # tried in front of a plain number (IGI lab-grown numbers)
+
+
+def parse_numbers(text, cap=MAX_LOOKUP):
+    """Number-like tokens from a messy paste (emails, spreadsheets): runs of letters, digits
+    and inner hyphens, at least 5 characters with at least 4 digits. Duplicates (including
+    the same certificate number with and without its prefix) are removed, first one kept.
+    Returns (numbers, duplicates_removed, over_cap)."""
+    seen, out, total = set(), [], 0
+    for m in _TOKEN_RE.finditer(str(text or "")):
+        t = m.group(0)
+        if len(t) < 5 or sum(ch.isdigit() for ch in t) < 4:
+            continue
+        total += 1
+        k = canonical(t)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(t)
+    return out[:cap], total - len(out), max(0, len(out) - cap)
+
+
+def canonical(token):
+    t = _key(token)
+    m = _PREFIXED_RE.fullmatch(t)
+    return m.group(2) if m and m.group(1) in ("LG", "GIA", "IGI", "HRD", "AGS", "GCAL") else t
+
+
+def cert_variants(token):
+    """Certificate numbers to try for one input: as typed, and with / without a prefix."""
+    t = _key(token)
+    m = _PREFIXED_RE.fullmatch(t)
+    if m:
+        return list(dict.fromkeys([t, m.group(2)]))
+    if t.isdigit():
+        return [t] + [p + t for p in CERT_PREFIXES]
+    return [t]
+
+
+def _digits(v):
+    return re.sub(r"\D", "", str(v or ""))
+
+
+def match_how(token, s):
+    """How a stone matches one input number: 'certificate number', 'stock number' or ''."""
+    cn = _key(s.get("cert_no"))
+    if cn and (cn in cert_variants(token) or (len(_digits(cn)) >= 6 and _digits(cn) == _digits(canonical(token))
+                                              and _digits(canonical(token)) == canonical(token))):
+        return "certificate number"
+    if s.get("stock_no") and _key(s["stock_no"]) == _key(token):
+        return "stock number"
+    return ""
+
+
+def lookup_report(numbers, stones, rep, rate, markup, divisor):
+    """Per input number: status, matched stones (cheapest first) and how they matched."""
+    errs = {c["by"] for c in rep.get("calls") or [] if c.get("error")}
+    rows = []
+    for t in numbers:
+        hits = [(s, match_how(t, s)) for s in stones]
+        hits = [(s, h) for s, h in hits if h]
+        hits.sort(key=lambda x: (x[0].get("price_raw") is None, x[0].get("price_raw") or 0))
+        if len(hits) > 1:
+            status = "Multiple matches"
+        elif hits:
+            status = "Found"
+        elif errs:
+            status = "Couldn't check"
+        else:
+            status = "Not found"
+        rows.append({"input": t, "status": status, "sids": [s["sid"] for s, _ in hits],
+                     "how": sorted({h for _, h in hits}),
+                     "badges": [availability_badge(s) for s, _ in hits if availability_badge(s)]})
+    return rows
+
+
+def _mask(t):
+    d = str(t or "")
+    return "···" + d[-4:] if len(d) > 4 else d
+
+
+def _lookup_mode(client, ai_key, divisor, deps):
+    ss = st.session_state
+    st.markdown('<div class="section-label">Look up stones by number</div>', unsafe_allow_html=True)
+    text = st.text_area("IGI / GIA certificate numbers or Stock #s", key="ls_lk_text", height=140,
+                        placeholder="Paste numbers separated by new lines, commas, spaces or tabs — "
+                                    "straight from an email or spreadsheet is fine.")
+    numbers, dupes, over = parse_numbers(text)
+    if text.strip():
+        st.caption(f"{len(numbers)} number(s) to look up" + (f" · {dupes} duplicate(s) removed" if dupes else "")
+                   + (f" · **only the first {MAX_LOOKUP} are looked up** ({over} more left out)" if over else ""))
+    rate, markup = _pricing_inputs()
+    if st.button("🔎  Look up", type="primary", use_container_width=True, key="ls_lk_go", disabled=not numbers):
+        client.reset_diag()
+        certs_, stock = [], []
+        for t in numbers:
+            certs_ += cert_variants(t)
+            stock.append(t)
+        error, rep, stones = None, {}, []
+        with st.spinner(f"Looking up {len(numbers)} number(s)…"):
+            try:
+                stones, rep = client.lookup(list(dict.fromkeys(certs_)), list(dict.fromkeys(stock)))
+            except src.SourceError as e:
+                error = str(e)
+        rows = lookup_report(numbers, stones, rep, rate, markup, divisor) if not error else []
+        keep = {sid for r in rows for sid in r["sids"]}
+        ss.ls_lookup = None if error else {"numbers": numbers, "rows": rows,
+                                           "stones": [x for x in stones if x["sid"] in keep],
+                                           "over": over, "dupes": dupes}
+        _clear_picks()
+        for r in rows:                      # each number's cheapest listing is pre-selected
+            if r["sids"]:
+                ss.ls_picked.add(r["sids"][0])
+        ss.ls_picks_ai = None
+        ss.ls_lookup_diag = _lookup_diag(client.diag, rep, numbers, dupes, over, rows, error,
+                                         client.schema() if not error else {}, stones)
+        _log_diag(ss.ls_lookup_diag, "live-search-lookup")
+    if ss.get("ls_lookup_diag") and ss.ls_lookup_diag.get("user_error"):
+        st.error(ss.ls_lookup_diag["user_error"])
+    lk = ss.get("ls_lookup")
+    if lk:
+        _lookup_results(lk, rate, markup, divisor, ai_key, deps)
+    _lookup_diagnostics(ss.get("ls_lookup_diag"))
+
+
+def _lookup_results(lk, rate, markup, divisor, ai_key, deps):
+    by_sid = {}
+    for x in lk["stones"]:
+        by_sid[x["sid"]] = {**x, "pv": price_view(x, rate, markup, divisor), "devs": [], "lookup": True,
+                            "xbadges": media_badges(x)}
+    st.markdown('<hr class="divider">', unsafe_allow_html=True)
+    counts = {k: sum(r["status"] == k for r in lk["rows"]) for k in ("Found", "Multiple matches", "Not found",
+                                                                      "Couldn't check")}
+    st.markdown("**" + " · ".join(f"{k}: {v}" for k, v in counts.items() if v or k != "Couldn't check") + "**")
+    if lk.get("over"):
+        st.warning(f"Only the first {MAX_LOOKUP} numbers were looked up; {lk['over']} more were left out.")
+    if counts["Couldn't check"]:
+        st.error("Part of the lookup failed, so the numbers marked **Couldn't check** may exist. Try again.")
+    lines = []
+    for r in lk["rows"]:
+        stones = [by_sid[sid] for sid in r["sids"] if sid in by_sid]
+        extra = ""
+        if stones:
+            first = stones[0]
+            desc = (f"{first.get('carat') or 0:.2f} ct {shape_group(first['shape'])} {_spec_bits(first)[0]} "
+                    f"{norm_clarity(first.get('clarity'))} · {first.get('lab') or ''}")
+            extra = f" — {desc} · by {', '.join(r['how'])}"
+            if len(stones) > 1:
+                extra += f" · {len(stones)} listings, cheapest first (pre-selected)"
+            badges = sorted(set(r["badges"]))
+            if badges:
+                extra += " · " + ", ".join(f"**{b}**" for b in badges)
+        icon = {"Found": "✅", "Multiple matches": "🔁", "Not found": "❌", "Couldn't check": "⚠️"}[r["status"]]
+        lines.append(f"- {icon} `{_code(r['input'])}` — **{r['status']}**{extra}")
+    st.markdown("\n".join(lines))
+    missing = [r["input"] for r in lk["rows"] if r["status"] in ("Not found", "Couldn't check")]
+    if missing:
+        st.caption("Copy not-found list (use the copy button on the right of the box):")
+        st.code("\n".join(missing), language=None)
+
+    rows = list(by_sid.values())
+    if not rows:
+        return
+    a, b, c_ = st.columns([2.2, 1.4, 1.2])
+    with a:
+        sort = st.selectbox("Sort by", SORTS[:4], index=0, key="ls_sort_lk")
+    with b:
+        view = st.radio("View", ["Cards", "Table"], index=0, horizontal=True, key="ls_view")
+    with c_:
+        show_n = int(st.number_input("Show", min_value=5, max_value=300, value=100, step=5, key="ls_show_n_lk"))
+    groups = []                                    # listings grouped under their number
+    placed = set()
+    for r in lk["rows"]:
+        g = [by_sid[sid] for sid in r["sids"] if sid in by_sid and sid not in placed]
+        placed.update(x["sid"] for x in g)
+        if g:
+            groups.append((r, g))
+    if sort == SORTS[0]:
+        shown = [x for _, g in groups for x in g][:show_n]
+    else:
+        shown = _sort(rows, sort, {"ct_min": None, "ct_max": None})[:show_n]
+    st.markdown(f'<div class="section-label" style="margin-top:.8rem">Found stones · {len(rows)}'
+                f'{f" (showing {len(shown)})" if len(rows) > len(shown) else ""}</div>', unsafe_allow_html=True)
+    _section(shown, "lk", view)
+    refs = {f"E{i}": (x, "exact") for i, x in enumerate(shown, 1)}
+    _top_picks(refs, rows, f"Direct lookup of {len(lk['numbers'])} stone number(s); no criteria", ai_key)
+    _quote_box(rows, deps)
+
+
+def _lookup_diag(cd, rep, numbers, dupes, over, rows, error, schema, stones):
+    """Sanitised: numbers masked to their last 4 characters, no hosts or supplier data."""
+    return {
+        "time_utc": datetime.datetime.now(datetime.UTC).strftime("%Y-%m-%d %H:%M:%S"),
+        "sign_in": cd.get("sign_in"),
+        "api_errors": list(cd.get("api_errors") or []),
+        "user_error": error,
+        "numbers": len(numbers), "duplicates_removed": dupes, "over_cap": over,
+        "filters": {k: rep.get(k) for k in ("cert_filter", "stock_filter", "type_filter", "stock_fields",
+                                             "schema_verified")},
+        "calls": rep.get("calls") or [],
+        "api_returned": cd.get("raw_items", 0), "pages": cd.get("pages", 0),
+        "results": [{"input": _mask(r["input"]), "status": r["status"], "listings": len(r["sids"]),
+                     "by": r["how"]} for r in rows],
+        "counts": {k: sum(r["status"] == k for r in rows) for k in ("Found", "Multiple matches", "Not found",
+                                                                     "Couldn't check")},
+        "cert_files": _cert_file_diag(schema, stones) if schema else None,
+    }
+
+
+def _lookup_diagnostics(d):
+    if not d:
+        return
+    with st.expander("Search diagnostics", expanded=False):
+        st.caption(f"Last lookup: {d['time_utc']} UTC. The same details are written to the server log. "
+                   "Numbers are masked to their last 4 characters.")
+        ok = str(d["sign_in"]).startswith("ok")
+        st.markdown(f"**1. Sign-in:** {'✅' if ok else '❌'} {d['sign_in']}")
+        st.markdown("**Errors returned by the API:** " + (
+            "\n\n" + "\n".join(f"- `{_code(e)}`" for e in d["api_errors"]) if d["api_errors"] else "none"))
+        if d.get("user_error"):
+            st.markdown(f"**Shown to you:** {d['user_error']}")
+        f = d.get("filters") or {}
+        st.markdown(f"**2. Lookup filters** ({'schema confirmed' if f.get('schema_verified') else 'schema not confirmed'}): "
+                    f"certificate number `{_code(f.get('cert_filter'))}` · stock number `{_code(f.get('stock_filter'))}` · "
+                    f"both types via `{_code(f.get('type_filter'))}` (natural and lab-grown searched separately) · "
+                    f"stock number field(s): {', '.join(f'`{_code(x)}`' for x in f.get('stock_fields') or []) or 'none'}")
+        st.markdown(f"**3. Input:** {d['numbers']} number(s) · {d['duplicates_removed']} duplicate(s) removed"
+                    + (f" · {d['over_cap']} over the {MAX_LOOKUP} cap (left out)" if d.get("over_cap") else ""))
+        calls = d.get("calls") or []
+        st.markdown(f"**4. API calls:** {len(calls)} · {d['api_returned']} listing(s) returned in {d['pages']} page(s)\n\n"
+                    + "\n".join(f"- by {c.get('by')} ({c.get('type', '-')}): {c.get('values', 0)} value(s) → "
+                                + (f"ERROR `{_code(c['error'])}`" if c.get("error") else f"{c.get('returned', 0)} listing(s)")
+                                for c in calls))
+        st.markdown("**5. Results:** " + " · ".join(f"{k} {v}" for k, v in (d.get("counts") or {}).items()) + "\n\n"
+                    + "\n".join(f"- `{_code(r['input'])}`: {r['status']} ({r['listings']} listing(s)"
+                                + (f", by {', '.join(r['by'])}" if r["by"] else "") + ")" for r in d.get("results") or []))
+        cf = d.get("cert_files")
+        if cf:
+            st.markdown("**6. Certificate files:** fields "
+                        + (", ".join(f"`{_code(x)}`" for x in cf.get("fields") or []) or "none in the schema")
+                        + f" · {cf['with_file']} of {cf['stones']} listing(s) have one ({cf.get('pdf_like', 0)} ending in .pdf)"
+                        + (f", e.g. `{_code(cf['example'])}`" if cf.get("example") else ""))
+        st.caption("The media filter isn't applied to lookups: every found stone is shown, with a No media badge where relevant.")
