@@ -30,13 +30,15 @@ def _in(name, t):
     return {"name": name, "description": None, "type": t}
 
 
-def schema(media_flags=("has_image", "has_v360", "has_video"), stock_filter=True, cert_pdf=True):
+def schema(media_flags=("has_image", "has_v360", "has_video"), stock_filter=True, cert_pdf=True, v360=False):
     s = _scalar("String")
     cert_fields = [_f(n, s) for n in ("id", "lab", "shape", "certNumber", "cut", "clarity", "polish", "symmetry",
                                        "color", "floInt", "floCol")]
     cert_fields += [_f(n, _scalar("Float")) for n in ("carats", "width", "length", "depth", "depthPercentage", "table")]
     if cert_pdf:
         cert_fields.append(_f("pdfUrl", s))
+    if v360:                                  # the certificate's 360 fields
+        cert_fields.append(_f("v360", _obj("V360")))
     dia_fields = [_f("id", _scalar("ID")), _f("video", s), _f("image", s), _f("availability", s),
                   _f("supplierStockId", s), _f("certificate", _obj("Certificate"))]
     item_fields = [_f("id", _scalar("ID")), _f("price", _scalar("Int")), _f("diamond", _obj("Diamond"))]
@@ -56,12 +58,14 @@ def schema(media_flags=("has_image", "has_v360", "has_video"), stock_filter=True
              {"kind": "OBJECT", "name": "Diamond", "fields": dia_fields},
              {"kind": "OBJECT", "name": "Certificate", "fields": cert_fields},
              {"kind": "INPUT_OBJECT", "name": "DiamondQuery", "inputFields": q_in},
+             {"kind": "OBJECT", "name": "V360", "fields": [_f("url", s), _f("frame_count", _scalar("Int")),
+                                                          _f("top_index", _scalar("Int"))]},
              {"kind": "SCALAR", "name": "String"}, {"kind": "SCALAR", "name": "Boolean"}]
     return {"__schema": {"queryType": {"name": "Query"}, "types": types}}
 
 
 def stone(sid, cert, lab="IGI", price=100000, lg=True, stock=None, video=True, image=True, pdf=True,
-          availability="AVAILABLE", carat=1.01, color="G", clarity="VS1", shape="ROUND"):
+          availability="AVAILABLE", carat=1.01, color="G", clarity="VS1", shape="ROUND", v360=None):
     return {"id": f"item-{sid}", "price": price, "_lg": lg,
             "diamond": {"id": sid, "availability": availability,
                         "video": f"{HOST}/v360/{sid}/view.html" if video else None,
@@ -72,7 +76,8 @@ def stone(sid, cert, lab="IGI", price=100000, lg=True, stock=None, video=True, i
                                         "polish": "EX", "symmetry": "EX", "floInt": "NON", "floCol": None,
                                         "length": 6.5, "width": 6.48, "depth": 4.0, "depthPercentage": 61.5,
                                         "table": 57.0,
-                                        "pdfUrl": f"{HOST}/certs/{cert}.pdf" if pdf else None}}}
+                                        "pdfUrl": f"{HOST}/certs/{cert}.pdf" if pdf else None,
+                                        "v360": v360}}}
 
 
 class FakeAPI:

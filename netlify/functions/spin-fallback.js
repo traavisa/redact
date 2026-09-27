@@ -2,7 +2,7 @@
 // build), this returns what to show instead: the stone's re-captured frames if it has been
 // redone ({ spin }), else its original viewer as our own /v/ link ({ token }).
 // The folder id is random (128 bits) and only known to holders of the share link.
-const { trustedRow, rowForSpin } = require('./lib/spin');
+const { trustedRow, rowForSpin, SPIN_MODE } = require('./lib/spin');
 
 exports.handler = async function (event) {
   const json = (code, body) => ({
@@ -17,7 +17,9 @@ exports.handler = async function (event) {
   try { row = await rowForSpin(id); } catch (e) { return json(502, { error: 'Unavailable' }); }
   if (!row) return json(404, { error: 'Not found' });
   const spin = trustedRow(row);
-  if (spin) return json(200, { spin });
+  // In test mode only the exact capture in the link is shown (it can only come from a test
+  // client's quote); a different capture recorded for the same viewer is never substituted.
+  if (spin && (SPIN_MODE === 'on' || spin.id === id)) return json(200, { spin });
   if (/^[a-z2-9]{8,32}$/.test(String(row.token || ''))) return json(200, { token: row.token });
   return json(404, { error: 'Not found' });
 };

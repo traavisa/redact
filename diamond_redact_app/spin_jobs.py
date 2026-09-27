@@ -1,5 +1,11 @@
 """Runs 360 captures for quotes at save time (with a time limit). Dormant while the kill switch is off.
 
+Kill switch: the Render env var SPIN_ENABLED (see mode()):
+  - unset / anything else = OFF: no capture; quotes keep their private /v/ viewer links.
+  - "test" = capture ONLY when saving a quote for TEST_CLIENT ("Pure Carbon Group");
+    every other client's quote is saved exactly as with capture off.
+  - "true" = capture for every client.
+
 Save flow (see app.save_quote):
   - Each stone whose video is a viewer page already has an opaque /v/ link (quote_media).
   - start() begins capturing those stones in the background; wait() gives them up to
@@ -52,11 +58,27 @@ def token_of(link):
     return ""
 
 
+# ── Kill switch ────────────────────────────────────────────────────────────────
+TEST_CLIENT = "Pure Carbon Group"
+
+
+def mode(value):
+    """SPIN_ENABLED setting -> "on" ("true"), "test" ("test") or "off" (anything else)."""
+    v = str(value or "").strip().lower()
+    return "on" if v == "true" else "test" if v == "test" else "off"
+
+
+def capture_allowed(client):
+    """True when a quote saved for `client` may be captured under the current SPIN_MODE."""
+    if SPIN_MODE == "on":
+        return True
+    return SPIN_MODE == "test" and str(client or "").strip().casefold() == TEST_CLIENT.casefold()
+
+
 # ── Which captures can be shown ───────────────────────────────────────────────
-# Trusted = captured by capture code >= sc.TRUSTED_VERSION with at least MIN_FRAMES frames.
-# Captures by the first build (no version, no top frame; e.g. 11 shared bridal_image
-# pictures) are never shown or reused: the stone falls back to its original viewer link
-# until the 360 upgrade redoes it. The Netlify functions apply the same rule.
+# Trusted = captured by the current capture code (version >= sc.TRUSTED_VERSION: the
+# certificate's 360 API fields only) with at least MIN_FRAMES frames. Older captures are
+# never shown or reused. The Netlify functions (lib/spin.js) apply the same rule.
 def trusted_spin(sp):
     if not isinstance(sp, dict) or not sp.get("id"):
         return False
@@ -64,7 +86,7 @@ def trusted_spin(sp):
         n, v = int(sp.get("n") or 0), int(sp.get("v") or 0)
     except (TypeError, ValueError):
         return False
-    return n >= sc.MIN_FRAMES and (v >= sc.TRUSTED_VERSION or ("top" in sp and sp.get("top") is not None))
+    return n >= sc.MIN_FRAMES and v >= sc.TRUSTED_VERSION
 
 
 def _row_trusted(row):
@@ -72,7 +94,7 @@ def _row_trusted(row):
         n, v = int(row.get("spin_frames") or 0), int(row.get("spin_version") or 0)
     except (TypeError, ValueError):
         return False
-    return bool(row.get("spin_id")) and n >= sc.MIN_FRAMES and (v >= sc.TRUSTED_VERSION or row.get("spin_top") is not None)
+    return bool(row.get("spin_id")) and n >= sc.MIN_FRAMES and v >= sc.TRUSTED_VERSION
 
 
 def _spin_row(row):
@@ -87,7 +109,7 @@ def _spin_row(row):
             "v": int(row.get("spin_version") or sc.TRUSTED_VERSION)}
 
 
-_SPIN_COLS = ("spin_id,spin_frames,spin_top,spin_version", "spin_id,spin_frames,spin_top", "spin_id,spin_frames")
+_SPIN_COLS = ("spin_id,spin_frames,spin_top,spin_version",)      # without spin_version nothing is trusted
 
 
 def known_spin(sb_url, key, vendor_url):
@@ -171,25 +193,19 @@ def version_check(force=False):
 
 
 def capture_one(sb_url, key, vendor_url, hint=None):
-    """Capture with the database cache in front. Returns the spin_capture result dict,
-    plus 'mp4' = our hosted video URL when a direct video file was found and copied, and
-    'still' = our hosted copy of the certificate's still image when there is one."""
+    """Capture with the database cache in front (only captures by the current code are reused).
+    Returns the spin_capture result dict, plus 'still' = our hosted copy of the certificate's
+    still image when there is one. Frames come only from the certificate's 360 API fields."""
     spin = known_spin(sb_url, key, vendor_url)
     if spin:
         res = {"ok": True, "spin": spin, "note": f"360 frames reused from an earlier capture ({spin['n']} frames)",
-               "facts": ["frames already captured for this viewer"], "video": ""}
+               "facts": ["frames already captured for this viewer by the current capture code"], "video": "",
+               "log": {"method": "reused an earlier capture by the current code", "frames": spin["n"],
+                       "source_frames": None, "top_index": None, "top_frame": spin.get("top", 0)}}
         still = sc.still_from_hint(hint)
         return _host_still(sb_url, key, res, still) if still else res
-    # 1. A direct video file in the stone data beats frames
-    mp4 = sc.video_file_from_hint(hint)
-    if mp4:
-        v = qm.process(sb_url, key, mp4, "video")
-        if v["how"] == "hosted":
-            return {"ok": True, "spin": None, "mp4": v["url"], "note": "direct video file found in the stone data — copied",
-                    "facts": [f"video file {sc.mask(mp4)}"], "video": mp4}
     res = dict(sc.capture(sb_url, key, vendor_url, hint))
-    # (No video file is ever taken from a viewer page: that was a viewer's own promo clip.)
-    res["video"] = ""
+    res["video"] = ""                                   # never a video file
     if res["ok"]:
         if not record_spin(sb_url, key, vendor_url, res["spin"]):
             res["facts"] = res["facts"] + ["media_links has no spin columns yet (run the SQL update)"]
@@ -216,14 +232,6 @@ def _host_still(sb_url, key, res, url):
 def apply(stone, res):
     """Puts a successful result on a stone dict (in place). Returns True if changed.
     The stone keeps our own /v/ link in media_ref (never served) so it can be redone later."""
-    if res.get("mp4"):
-        prev = str(stone.get("video_url") or "")
-        if token_of(prev) or prev.startswith(LEGACY_VIEWER):
-            stone["media_ref"] = prev                  # the original viewer, kept (never served)
-        stone["video_url"] = res["mp4"]
-        stone["video_source"] = "api"                  # from the stone's own API fields
-        stone.pop("spin", None)
-        return True
     if res.get("ok") and res.get("spin"):
         sp = res["spin"]
         n = int(sp["n"])
@@ -254,15 +262,18 @@ def _is_frame(u):
 class SaveJobs:
     """Captures for one quote being saved."""
 
-    def __init__(self, sb_url, key, qid):
+    def __init__(self, sb_url, key, qid, client=""):
         self.sb_url, self.key, self.qid = sb_url, key, qid
+        self.allowed = capture_allowed(client)
         self.jobs = []                  # (index, label, link_saved, future)
         self.skipped = []
         self.saved = threading.Event()
         self.save_ok = False
 
     def start(self, index, label, vendor_url, link_saved, hint=None):
-        ok, why = version_check() if SPIN_ENABLED else (False, "360 capture is switched OFF (SPIN_ENABLED)")
+        if not self.allowed:                            # capture off for this quote: as if never asked
+            return
+        ok, why = version_check()
         if not ok:                                      # keep the /v/ link; never capture with old code
             self.skipped.append(f"{label}: 360 capture skipped — {why}; saved with a private viewer link")
             _set_status(self.qid, label, "360 capture skipped: " + why)
@@ -273,7 +284,7 @@ class SaveJobs:
 
     def wait(self, stones, budget=SAVE_BUDGET):
         """Waits up to `budget` seconds; applies finished captures to `stones` in place.
-        Returns notes, one per stone."""
+        Returns media notes for skipped and still-running captures (results are in status())."""
         notes = list(self.skipped)
         if not self.jobs:
             return notes
@@ -281,9 +292,8 @@ class SaveJobs:
         for i, label, _, fut in self.jobs:
             if fut.done():
                 res = _result(fut)
-                apply(stones[i], res)
-                notes.append(_note(label, res))
-                _set_status(self.qid, label, _note_text(res), res.get("facts"))
+                apply(stones[i], res)          # its result goes in the capture log, not the media note
+                _set_status(self.qid, label, _note_text(res), res.get("facts"), res.get("log"))
             else:
                 notes.append(f"{label}: 360 capture still running — saved with a private viewer link for now; "
                              "the quote updates itself when capture finishes (see Capture status)")
@@ -304,7 +314,7 @@ class SaveJobs:
                 ok = patch_stone(self.sb_url, self.key, self.qid, i, link_saved, res)
                 if not ok:
                     res = {**res, "note": res["note"] + " — but the saved quote couldn't be updated"}
-            _set_status(self.qid, label, _note_text(res), res.get("facts"))
+            _set_status(self.qid, label, _note_text(res), res.get("facts"), res.get("log"))
             _log("spin-save", {"quote": self.qid, "stone": label, "ok": res.get("ok"), "note": res.get("note")})
 
 
@@ -321,13 +331,9 @@ def _note_text(res):
     return f"360 capture failed: {res.get('note')} — using private viewer link"
 
 
-def _note(label, res):
-    return f"{label}: {_note_text(res)}"
-
-
-def _set_status(qid, label, note, facts=None):
+def _set_status(qid, label, note, facts=None, log=None):
     with _lock:
-        STATUS.setdefault(qid, {})[label] = {"note": note, "facts": list(facts or []),
+        STATUS.setdefault(qid, {})[label] = {"note": note, "facts": list(facts or []), "log": log,
                                              "at": datetime.datetime.now(datetime.UTC).strftime("%H:%M:%S")}
 
 
@@ -375,5 +381,5 @@ def patch_stone(sb_url, key, qid, index, link_saved, res, expect_spin=None):
             return False
 
 
-# ── Kill switch (Render env var SPIN_ENABLED; set by the app). Default OFF. ───
-SPIN_ENABLED = False
+# ── Kill switch (Render env var SPIN_ENABLED, read by the app via mode()). Default OFF. ──
+SPIN_MODE = "off"

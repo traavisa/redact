@@ -1219,7 +1219,6 @@ def _render(deps):
         _log_diag(ss.ls_diag)
 
     res = ss.get("ls_results")
-    live_stats = None
     if res:
         try:
             sch = client.schema()
@@ -1230,13 +1229,10 @@ def _render(deps):
         if current != (res["q"], res.get("vq")):
             st.warning("The criteria changed since the last search. Click **Search** to refresh the results.")
         else:
-            live_stats = {}
             # Media-hidden stones are removed first: they never count as "Outside your criteria".
-            shown, removed = media_keep(res["stones"], crit["hide_vid"], crit["hide_img"])
-            exact, flexed, adds = bucket(shown, crit, fx, rate, markup, divisor, live_stats)
-            live_stats["media_removed"] = removed
+            shown, _ = media_keep(res["stones"], crit["hide_vid"], crit["hide_img"])
+            exact, flexed, adds = bucket(shown, crit, fx, rate, markup, divisor)
             _results(exact, flexed, adds, res, crit, fx, ai_key, deps)
-    _diagnostics(ss.get("ls_diag"), live_stats)
 
 
 def _pricing_inputs():
@@ -1268,7 +1264,7 @@ def _media_server_counts(client, mp, sent, total, union):
     return info
 
 
-# ── Search diagnostics ────────────────────────────────────────────────────────
+# ── Search diagnostics: server log only ([live-search] / [live-search-lookup]) ──────
 _GRADE_ABBR = {"Excellent": "EX", "Very Good": "VG", "Good": "G", "Fair": "F", "Poor": "P"}
 
 
@@ -1355,133 +1351,6 @@ def _log_diag(d, tag="live-search"):
 
 def _code(v):
     return str(v).replace("`", "'")
-
-
-def _diagnostics(d, live_stats=None):
-    if not d:
-        return
-    with st.expander("Search diagnostics", expanded=False):
-        st.caption(f"Last search: {d['time_utc']} UTC. The same details are written to the server log.")
-        ok = str(d["sign_in"]).startswith("ok")
-        st.markdown(f"**1. Sign-in:** {'✅' if ok else '❌'} {d['sign_in']}")
-        if d["api_errors"]:
-            st.markdown("**Errors returned by the API:**\n\n" + "\n".join(f"- `{_code(e)}`" for e in d["api_errors"]))
-        else:
-            st.markdown("**Errors returned by the API:** none")
-        if d.get("user_error"):
-            st.markdown(f"**Shown to you:** {d['user_error']}")
-
-        st.markdown("**2. Criteria → server-side filters** ("
-                    + ("schema confirmed by introspection" if d["schema_verified"]
-                       else "documented filters only; schema not confirmed") + "). "
-                    "Exact form values; widened only where a flex box is ticked. "
-                    "Every criterion is re-checked here after fetching.")
-        if d.get("plan"):
-            st.markdown("\n".join(f"- **{_esc(c)}**: {'server-side' if w == 'server' else 'client-side only'}"
-                                   f" — `{_code(det)}`" for c, w, det in d["plan"]))
-        if d.get("price_retry"):
-            r = d["price_retry"]
-            st.markdown(f"⚠️ **Price filter dropped:** {r['reason']}; searched again without it and "
-                        f"checked price here instead (first attempt: {r['first_attempt']['raw_items']} stone(s)).")
-        st.code(json.dumps(d["server_query"], indent=2), language="json")
-        st.caption("Sign-in sends only a username and password, which are never shown or logged.")
-
-        total = d.get("api_total")
-        tot_txt = (f"{total:,} matching server-side (from the {d['api_total_source']})" if isinstance(total, int)
-                   else "the API didn't report a usable total")
-        st.markdown(f"**3. Returned by the API:** {d['api_returned']} stone(s) in {d['pages']} page(s) of up to "
-                    f"{src.PAGE_LIMIT}; {tot_txt}"
-                    + (f"; **stopped at the {d['cap']}-stone cap**" if d.get("cap_hit") else "; all matches fetched")
-                    + f". {d['kept_after_whitelist']} usable after the field whitelist.")
-        st.caption(f"Count query: {d.get('count_query') or 'none in the schema'} → {d.get('api_count_query')} · "
-                   f"total_count field → {d.get('api_total_count_field')}")
-
-        stats = live_stats if live_stats is not None else d["client_side"]
-        if stats:
-            basis = "current form and flex settings" if live_stats is not None else "settings at search time"
-            lines = [f"- {name}: removed {n}" for name, n in stats.get("removed", [])] or ["- nothing removed"]
-            mr = stats.get("media_removed") or {}
-            if mr:
-                lines = [f"- Media filter (checked first; never counted as outside your criteria): removed "
-                         f"{mr.get('no_video_360', 0)} with no video/360, {mr.get('no_image', 0)} with no image"] + lines
-            st.markdown(f"**4. Client-side re-check** (in order; {basis}):\n\n" + "\n".join(lines)
-                        + f"\n\nOutside criteria, needs a flex option that's off: {stats.get('needs_flex', 0)} · "
-                        f"Exact: {stats.get('exact', 0)} · Outside your criteria (shown): {stats.get('flexed', 0)}")
-        else:
-            st.markdown("**4. Client-side re-check:** no stones to check.")
-
-        sp = d.get("sample_price")
-        if sp:
-            per_ct = (f" · US\\${sp['usd_per_ct']:,.2f}/ct · CA\\${sp['cost_cad_per_ct']:,.2f}/ct cost"
-                      if sp.get("cost_cad_per_ct") else "")
-            st.markdown(f"**5. Sample price** ({sp['which']}: {sp['carat'] or '?'} ct {_esc(sp['stone'])}): "
-                        f"raw `{_code(sp['raw_price'])}` ÷ {sp['divisor']:g} = US\\${sp['usd']:,.2f} "
-                        f"× {sp['usd_cad_rate']:g} = **CA\\${sp['cost_cad']:,.2f} cost** "
-                        f"(client CA\\${sp['client_cad']:,.2f}){per_ct}.")
-            st.caption("Check this stone's price on the platform. If it's 100× off, change the price-divisor environment variable (see the setup notes).")
-        else:
-            st.markdown("**5. Sample price:** none (no priced stones returned).")
-
-        docs = d.get("schema_docs") or {}
-        keys = [k for k in docs if k.startswith(("item.", "result.", "query.labgrown", "query.dollar", "query.price"))
-                or k.endswith("count") or k.startswith(("diamond.", "certificate."))]
-        lines = [f"- `{_code(k)}`: {_esc(docs[k])}" for k in keys]
-        flags = d.get("labgrown_flags")
-        if flags:
-            lines.append(f"- Stones by the `{_code(d['labgrown_flag_field'])}` flag: natural {flags['natural']}, "
-                         f"lab-grown {flags['lab-grown']}, not stated {flags['unknown']}")
-        else:
-            lines.append("- No lab-grown flag field in the stone data to cross-check the type filter.")
-        st.markdown("**6. What the schema says about price / totals / type:**\n\n" + "\n".join(lines))
-
-        md = d.get("media")
-        if md:
-            v = md.get("video") or {}
-            lines = [f"- `{_code(f)}`" for f in md.get("fields") or []] or [
-                "- none found" if md.get("schema_verified") else "- schema not confirmed, so no extra fields requested"]
-            got = [f"- `{_code(k)}`: set on {e['count']} of {md['stones']} stone(s), e.g. `{_code(e['example'])}`"
-                   for k, e in (md.get("extra") or {}).items()] or ["- no extra media values on these stones"]
-            st.markdown("**7. Media in the stone data** (for 360 capture; hosts masked):\n\n"
-                        "Media fields in the schema:\n\n" + "\n".join(lines)
-                        + f"\n\nVideo links: {v.get('set', 0)} of {md['stones']} stone(s) — {v.get('files', 0)} direct "
-                        f"video file(s), {v.get('pages', 0)} viewer page(s)"
-                        + (f", e.g. `{_code(v['example'])}`" if v.get("example") else "")
-                        + "\n\nCertificate lookup by ID (fallback for other stones and pasted viewer links): "
-                        + (f"`{_code(md['cert_lookup'])}`" if md.get("cert_lookup") else "none in the schema")
-                        + "\n\nValues returned:\n\n" + "\n".join(got))
-        _diag_extra(d)
-
-
-def _diag_extra(d):
-    """Sections 8-9: media filter and certificate files."""
-    mf = d.get("media_filter")
-    if mf is not None:
-        parts = []
-        parts.append("- Hide no image: " + (f"**server-side** (`{mf['image_flag']}: true`)" if mf.get("image_flag")
-                                              else "client-side (no has-image filter in the schema)"))
-        parts.append("- Hide no video/360: " + (
-            "**server-side** (" + " + ".join(f"`{f}: true`" for f in mf["video_flags"]) + ", one search each, merged)"
-            if mf.get("video_flags") else "client-side (no filter pair meaning '360 or video' in the schema)"))
-        sr = mf.get("server_removed")
-        if mf.get("image_flag") or mf.get("video_flags"):
-            parts.append("- Removed by the server-side media filters: " + (
-                f"{sr:,} (count without them {mf.get('count_without_media_filters'):,})" if isinstance(sr, int)
-                else "not counted (the API gave no usable count)"))
-        if mf.get("union"):
-            parts.append(f"- Per-flag searches: {mf['union'].get('per')}; merged: {mf['union'].get('merged')}")
-        parts.append("- Removed here (client-side re-check): see section 4")
-        st.markdown("**8. Media filter:**\n\n" + "\n".join(parts))
-    cf = d.get("cert_files")
-    if cf is not None:
-        fl = [f"- `{_code(f)}`" for f in cf.get("fields") or []] or ["- none found in the schema"]
-        st.markdown("**9. Certificate files** (internal only; redacted copies are made on save):\n\n"
-                    "Fields in the schema:\n\n" + "\n".join(fl)
-                    + f"\n\nStones with a certificate file: {cf['with_file']} of {cf['stones']} "
-                    f"({cf.get('pdf_like', 0)} ending in .pdf)"
-                    + (f", e.g. `{_code(cf['example'])}`" if cf.get("example") else "")
-                    + f"\n\nLookup filters: certificate number `{_code(cf.get('cert_filter'))}` · stock number "
-                    f"`{_code(cf.get('stock_filter'))}` · stock number field(s): "
-                    + (", ".join(f"`{_code(x)}`" for x in cf.get("stock_fields") or []) or "none"))
 
 
 def _sort(rows, how, crit):
@@ -1962,7 +1831,6 @@ def _lookup_mode(client, ai_key, divisor, deps):
     lk = ss.get("ls_lookup")
     if lk:
         _lookup_results(lk, rate, markup, divisor, ai_key, deps)
-    _lookup_diagnostics(ss.get("ls_lookup_diag"))
 
 
 def _lookup_results(lk, rate, markup, divisor, ai_key, deps):
@@ -2047,39 +1915,3 @@ def _lookup_diag(cd, rep, numbers, dupes, over, rows, error, schema, stones):
                                                                      "Couldn't check")},
         "cert_files": _cert_file_diag(schema, stones) if schema else None,
     }
-
-
-def _lookup_diagnostics(d):
-    if not d:
-        return
-    with st.expander("Search diagnostics", expanded=False):
-        st.caption(f"Last lookup: {d['time_utc']} UTC. The same details are written to the server log. "
-                   "Numbers are masked to their last 4 characters.")
-        ok = str(d["sign_in"]).startswith("ok")
-        st.markdown(f"**1. Sign-in:** {'✅' if ok else '❌'} {d['sign_in']}")
-        st.markdown("**Errors returned by the API:** " + (
-            "\n\n" + "\n".join(f"- `{_code(e)}`" for e in d["api_errors"]) if d["api_errors"] else "none"))
-        if d.get("user_error"):
-            st.markdown(f"**Shown to you:** {d['user_error']}")
-        f = d.get("filters") or {}
-        st.markdown(f"**2. Lookup filters** ({'schema confirmed' if f.get('schema_verified') else 'schema not confirmed'}): "
-                    f"certificate number `{_code(f.get('cert_filter'))}` · stock number `{_code(f.get('stock_filter'))}` · "
-                    f"both types via `{_code(f.get('type_filter'))}` (natural and lab-grown searched separately) · "
-                    f"stock number field(s): {', '.join(f'`{_code(x)}`' for x in f.get('stock_fields') or []) or 'none'}")
-        st.markdown(f"**3. Input:** {d['numbers']} number(s) · {d['duplicates_removed']} duplicate(s) removed"
-                    + (f" · {d['over_cap']} over the {MAX_LOOKUP} cap (left out)" if d.get("over_cap") else ""))
-        calls = d.get("calls") or []
-        st.markdown(f"**4. API calls:** {len(calls)} · {d['api_returned']} listing(s) returned in {d['pages']} page(s)\n\n"
-                    + "\n".join(f"- by {c.get('by')} ({c.get('type', '-')}): {c.get('values', 0)} value(s) → "
-                                + (f"ERROR `{_code(c['error'])}`" if c.get("error") else f"{c.get('returned', 0)} listing(s)")
-                                for c in calls))
-        st.markdown("**5. Results:** " + " · ".join(f"{k} {v}" for k, v in (d.get("counts") or {}).items()) + "\n\n"
-                    + "\n".join(f"- `{_code(r['input'])}`: {r['status']} ({r['listings']} listing(s)"
-                                + (f", by {', '.join(r['by'])}" if r["by"] else "") + ")" for r in d.get("results") or []))
-        cf = d.get("cert_files")
-        if cf:
-            st.markdown("**6. Certificate files:** fields "
-                        + (", ".join(f"`{_code(x)}`" for x in cf.get("fields") or []) or "none in the schema")
-                        + f" · {cf['with_file']} of {cf['stones']} listing(s) have one ({cf.get('pdf_like', 0)} ending in .pdf)"
-                        + (f", e.g. `{_code(cf['example'])}`" if cf.get("example") else ""))
-        st.caption("The media filter isn't applied to lookups: every found stone is shown, with a No media badge where relevant.")

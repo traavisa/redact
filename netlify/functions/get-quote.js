@@ -21,7 +21,7 @@ function safeVideo(u) {
 }
 // Captured 360 frames: our own folder /media/<32 hex>/000.jpg … (n frames). Only captures
 // the rule in lib/spin.js trusts are served; others fall back to the original viewer.
-const { trustedSpin, rowForSpin, SPIN_ENABLED } = require('./lib/spin');
+const { trustedSpin, rowForSpin, spinsForClient } = require('./lib/spin');
 const FRAME_IMAGE_RE = /^[a-f0-9]{32}\/\d{3}\.jpg$/;
 const VIEWER_TOKEN_RE = /^[a-z2-9]{8,32}$/;
 // Certificates: our own /certs/ copies (random names), or the older uploads in our own
@@ -66,16 +66,18 @@ exports.handler = async function (event) {
 
   const q = rows[0];
   const expired = new Date(q.expires_at) < new Date();
+  // Kill switch: off, or "test" and this isn't the test client's quote = as if capture were off
+  const spinsOn = spinsForClient(q.client);
   const stones = expired ? [] : await Promise.all((q.stones || []).map(async (s) => {
     const out = {};
     SAFE_STONE_FIELDS.forEach((k) => { if (s[k] !== undefined) out[k] = s[k]; });
     if ('video_url' in out) { const v = safeVideo(out.video_url); if (v) out.video_url = v; else delete out.video_url; }
     if ('image_url' in out) { const v = safeImage(out.image_url); if (v) out.image_url = v; else delete out.image_url; }
     if ('pdf_url' in out) { const v = safePdf(out.pdf_url); if (v) out.pdf_url = v; else delete out.pdf_url; }
-    // Kill switch off: no captured frame is ever served, not even as a still image
-    if (!SPIN_ENABLED && out.image_url && FRAME_IMAGE_RE.test(out.image_url.slice(MEDIA_BASE.length))) delete out.image_url;
+    // Kill switch off for this quote: no captured frame is ever served, not even as a still image
+    if (!spinsOn && out.image_url && FRAME_IMAGE_RE.test(out.image_url.slice(MEDIA_BASE.length))) delete out.image_url;
     if ('spin' in out) {
-      const v = trustedSpin(out.spin);
+      const v = spinsOn ? trustedSpin(out.spin) : null;
       if (v) { out.spin = v; delete out.video_url; }
       else {
         // A capture that must not be shown: never its frames (not even as the still image).

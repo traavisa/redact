@@ -16,7 +16,8 @@ from fakesb import FakeSupabase
 
 APP = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")
 REMOVED = ["Revert bad 360", "Remove the promo clip", "List affected stones", "360 upgrade", "Media upgrade",
-           "Capture code", "Capture 360 frames", "Find stones with the promo clip"]
+           "Capture code", "Capture 360 frames", "Find stones with the promo clip",
+           "One-time fix", "Clear links to deleted media", "Search diagnostics"]
 SUPPLIER_WORDS = re.compile(r"nivoda|example-supplier", re.I)
 
 
@@ -100,7 +101,6 @@ def test_boots_and_removed_tools_are_gone(env):
     assert "Create quote" in t and "Live Search" in t
     for word in REMOVED:
         assert word not in t, word
-    assert "One-time fix: clear links to deleted media files" in t
     assert not SUPPLIER_WORDS.search(t)
     assert "Hide stones with no video/360" in t and "Hide stones with no image" in t
 
@@ -109,14 +109,16 @@ def test_removed_code_is_gone():
     here = os.path.dirname(APP)
     src = "\n".join(open(os.path.join(here, f)).read() for f in ("app.py", "spin_jobs.py", "stone_source.py"))
     for name in ("revert_bad", "find_promo", "clear_promo", "start_upgrade", "upgradable", "def audit",
-                 "REPAIR_BUTTONS_ENABLED", "stone_viewer", "STONE_LOOKUP", "PROMO_FILE"):
-        assert name not in src, name
+                 "REPAIR_BUTTONS_ENABLED", "stone_viewer", "STONE_LOOKUP", "PROMO_FILE", "dead_media",
+                 "def _diagnostics", "def _lookup_diagnostics", "def _diag_extra"):
+        assert name not in src + open(os.path.join(here, "live_search.py")).read(), name
+    assert not os.path.exists(os.path.join(here, "dead_media.py"))
     # the kill switch and the dormant capture code stay
     assert 'get_setting("SPIN_ENABLED")' in src and "class SaveJobs" in src
     assert os.path.exists(os.path.join(here, "spin_capture.py"))
 
 
-def test_criteria_search_media_filter_on_and_off(env):
+def test_criteria_search_media_filter_on_and_off(env, capfd):
     sb, api = env
     at = boot()
     at.button(key="ls_search").click().run()
@@ -125,8 +127,12 @@ def test_criteria_search_media_filter_on_and_off(env):
     assert any("has_image: true" in x and "has_v360: true" in x for x in q)       # server-side, merged
     assert any("has_image: true" in x and "has_video: true" in x for x in q)
     t = texts(at)
-    assert "Media: image" in t and "server-side" in t
-    assert "8. Media filter" in t and "9. Certificate files" in t and "certificate.pdfUrl" in t
+    assert "Search diagnostics" not in t and "8. Media filter" not in t           # not on screen…
+    log = [ln for ln in capfd.readouterr().out.splitlines() if ln.startswith("[live-search] ")]
+    assert len(log) == 1                                                           # …but in the server log
+    d = json.loads(log[0][len("[live-search] "):])
+    assert d["sign_in"].startswith("ok") and d["media_filter"]["image_flag"] == "has_image"
+    assert any(f.startswith("certificate.pdfUrl") for f in d["cert_files"]["fields"])
     n_on = t.count("Add to quote")
     # off: the stone without media comes back
     at.checkbox(key="ls_hide_novid").uncheck().run()
@@ -150,6 +156,7 @@ def test_lookup_then_save_quote(env):
     at.button(key="ls_lk_go").click().run()
     assert not at.exception, at.exception
     t = texts(at)
+    assert "Search diagnostics" not in t
     assert "Found: 2" in t and "Multiple matches: 1" in t and "Not found: 1" in t
     assert "On hold" in t and "No media" in t
     assert "Copy not-found list" in t and "999999999" in t
@@ -203,19 +210,6 @@ def test_get_quote_drops_foreign_pdf_links():
     s = out["stones"]
     assert "pdf_url" not in s[0] and s[1]["pdf_url"].endswith(".pdf") and s[2]["pdf_url"].endswith("ab12_1234.pdf")
     assert "2141438167" not in json.dumps(out) and "ls_ref" not in json.dumps(out)
-
-
-def test_dead_media_button(env):
-    sb, api = env
-    from test_dead_media import QUOTES, LIVE_V, LIVE_I, FRAME, PROMO
-    sb.tables["quotes"] = [dict(q) for q in QUOTES]
-    sb.storage["quote-media"] = {f: b"x" for f in (LIVE_V, LIVE_I, FRAME)}
-    at = boot()
-    at.button(key="dead_media_go").click().run()
-    assert not at.exception, at.exception
-    t = texts(at)
-    assert "fields cleared: 2" in t and "ERRORS: 0" in t and PROMO in t
-    assert sb.tables["quotes"][0]["stones"][0]["video_url"] == ""
 
 
 def _client_logo(name):

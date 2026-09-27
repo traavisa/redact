@@ -2,7 +2,7 @@
 // Tokens are random (never derived from the URL); the table has no public access,
 // so only this function (with the server-side service key) can read it.
 const TOKEN_RE = /^[a-z2-9]{8,32}$/;
-const { trustedRow, mediaLinks } = require('./lib/spin');
+const { trustedRow, mediaLinks, SPIN_MODE } = require('./lib/spin');
 
 exports.handler = async function (event) {
   const json = (code, body) => ({
@@ -19,8 +19,9 @@ exports.handler = async function (event) {
   const row = rows && rows[0];
   if (!row) return json(404, { error: 'Not found' });
   // Trusted captured frames: the viewer plays our own copies and never learns the vendor URL.
-  // Untrusted captures (first build, under 24 frames) are ignored: the original viewer is used.
-  const spin = trustedRow(row);
+  // Captures not made by the current code (or under 24 frames) are ignored: the original viewer
+  // is used. In test mode a /v/ link never shows frames (it can belong to any client's quote).
+  const spin = SPIN_MODE === 'on' ? trustedRow(row) : null;
   if (spin) return json(200, { spin });
   const url = row.vendor_url;
   if (!url || !/^https?:\/\//i.test(url)) return json(404, { error: 'Not found' });

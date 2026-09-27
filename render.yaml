@@ -17,6 +17,7 @@ services:
         sync: false
       - key: APP_PASSWORD
         sync: false
-      # 360 capture kill switch: only "true" turns capture on. Off by default.
+      # 360 capture kill switch, set in the Render dashboard (not here, so a Blueprint sync
+      # never overwrites it). Unset = off; "test" = Pure Carbon Group quotes only; "true" = all.
       - key: SPIN_ENABLED
-        value: "false"
+        sync: false

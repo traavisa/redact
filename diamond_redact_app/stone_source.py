@@ -28,6 +28,7 @@ PAGE_LIMIT = 50            # documented maximum per request
 TOKEN_TTL = 4 * 3600       # re-authenticate well before the token is likely to expire
 SCHEMA_TTL = 6 * 3600
 TIMEOUT = 30
+MAX_TIMEOUTS = 2           # timeouts in one search before the source counts as not responding
 
 
 # Settings. New neutral names first; the older names set on Render keep working.
@@ -46,6 +47,18 @@ def setting(get, what):
 
 class SourceError(Exception):
     """User-safe error. Message never names the source."""
+
+
+UNAVAILABLE = "The stone source isn't responding right now. Try again in a few minutes."
+
+
+class SourceUnavailable(SourceError):
+    """The source is unreachable or erroring: sign-in failed, HTTP 5xx, a connection error or
+    an unreadable answer, or repeated timeouts. Always shown as UNAVAILABLE; the specific
+    cause is in diag (sign_in / api_errors) and the server log."""
+
+    def __init__(self, msg=UNAVAILABLE):
+        super().__init__(msg)
 
 
 class _AuthError(Exception):
@@ -113,10 +126,10 @@ class Client:
         self.reset_diag()
 
     def reset_diag(self):
-        """Diagnostics for the last search (shown in the tab and logged). Always sanitised."""
+        """Diagnostics for the last search (written to the server log). Always sanitised."""
         self.diag = {"sign_in": "not attempted", "api_errors": [], "pages": 0, "raw_items": 0,
                      "total_count": None, "count_query_total": None, "real_total": None,
-                     "cap_hit": False, "labgrown_flags": None}
+                     "cap_hit": False, "labgrown_flags": None, "timeouts": 0}
 
     def _err(self, text):
         msg = sanitise(text, (self.username, self.password))
@@ -131,25 +144,30 @@ class Client:
         body = {"query": query}
         if variables:
             body["variables"] = variables
-        try:
-            r = requests.post(self.url, headers=headers, data=json.dumps(body), timeout=TIMEOUT)
-        except requests.Timeout:
-            self._err(f"Timed out after {TIMEOUT}s")
-            raise SourceError("The stone search timed out. Try again, or narrow the criteria.")
-        except requests.RequestException as e:
-            self._err(f"Connection error: {type(e).__name__}")
-            raise SourceError("Couldn't reach the stone search service. Check the connection and try again.")
+        while True:
+            try:
+                r = requests.post(self.url, headers=headers, data=json.dumps(body), timeout=TIMEOUT)
+                break
+            except requests.Timeout:
+                # One timeout is retried once; a second one (in this search) means the source is down
+                self.diag["timeouts"] = self.diag.get("timeouts", 0) + 1
+                self._err(f"Timed out after {TIMEOUT}s (timeout {self.diag['timeouts']})")
+                if self.diag["timeouts"] >= MAX_TIMEOUTS:
+                    raise SourceUnavailable()
+            except requests.RequestException as e:
+                self._err(f"Connection error: {type(e).__name__}")
+                raise SourceUnavailable()
         if r.status_code in (401, 403):
             self._err(f"HTTP {r.status_code}")
             raise _AuthError()
         if r.status_code >= 500:
             self._err(f"HTTP {r.status_code}")
-            raise SourceError("The stone search service is having problems right now. Try again shortly.")
+            raise SourceUnavailable()
         try:
             data = r.json()
         except ValueError:
             self._err(f"HTTP {r.status_code}: response was not JSON")
-            raise SourceError("The stone search service sent an unreadable response.")
+            raise SourceUnavailable()
         errs = data.get("errors") or []
         if errs:
             for e in errs:
@@ -176,8 +194,8 @@ class Client:
             tok = None
         if not tok:
             self.state.pop("_ls_tok", None)
-            self.diag["sign_in"] = "FAILED"
-            raise SourceError("Live Search couldn't sign in. Check the username and password in the settings.")
+            self.diag["sign_in"] = "FAILED (no token returned)"
+            raise SourceUnavailable()
         self.state["_ls_tok"] = (tok, time.time())
         self.diag["sign_in"] = "ok (re-signed in after the token was refused)" if force else "ok (new token)"
         return tok
@@ -191,7 +209,7 @@ class Client:
                 return self._post(query, token=self._token(force=True))
             except _AuthError:
                 self.diag["sign_in"] = "FAILED (token refused after re-sign-in)"
-                raise SourceError("Live Search's sign-in was refused. Check the account settings.")
+                raise SourceUnavailable()
 
     # ── schema discovery (introspection) ─────────────────────────────────────
     _schema_cache = {}
@@ -205,6 +223,8 @@ class Client:
         try:
             info = self._introspect()
             stamp = time.time()
+        except SourceUnavailable:
+            raise                  # the source is down: the search would fail too
         except Exception:
             # Introspection unavailable: fall back to the documented filters only,
             # and try again in ~10 minutes rather than holding the fallback for hours.
@@ -473,6 +493,8 @@ class Client:
                         call["returned"] = len(stones)
                         for st_ in stones:
                             out.setdefault(st_["sid"], st_)
+                    except SourceUnavailable:
+                        raise                  # the source is down: no point trying the rest
                     except SourceError as e:
                         call["error"] = sanitise(e)
                     rep["calls"].append(call)

@@ -397,10 +397,12 @@ def bulk_parse(uploaded, kind_choice="Auto-detect"):
             "filename": uploaded.name}
 
 
-def rehost_media(stones_payload, qid=None):
+def rehost_media(stones_payload, qid=None, client=""):
     """Replaces every stone's image/video link, in place, with our own /media/ copy, an
     opaque /v/ viewer link, or nothing (see quote_media.py). Vendor links are never saved.
-    Stones whose video is a 360 viewer page are then captured as our own frames
+    When capture is allowed for this client (spin_jobs.capture_allowed: SPIN_ENABLED "true",
+    or "test" and the client is Pure Carbon Group), stones whose video is a 360 viewer page
+    are then captured as our own frames from their certificate's 360 API fields
     (spin_capture.py) for up to spin_jobs.SAVE_BUDGET seconds; slower ones keep the /v/
     link for now and are finished after saving. Returns (notes, jobs). Never raises."""
     import quote_media, spin_jobs
@@ -418,7 +420,7 @@ def rehost_media(stones_payload, qid=None):
     except Exception:
         pairs = [({"url": "", "note": "video couldn't be saved — left out" if v else ""},
                   {"url": "", "note": "image couldn't be saved — left out" if i else ""}) for v, i in items]
-    jobs = spin_jobs.SaveJobs(SUPABASE_URL, SUPABASE_KEY, qid or "")
+    jobs = spin_jobs.SaveJobs(SUPABASE_URL, SUPABASE_KEY, qid or "", client)
     for n, (s, (vid, img), hint) in enumerate(zip(stones_payload, pairs, hints), 1):
         s["video_url"] = vid["url"]
         if img["url"]:
@@ -427,9 +429,9 @@ def rehost_media(stones_payload, qid=None):
             s.pop("image_url", None)
         label = f"···{s['cert_last4']}" if s.get("cert_last4") else f"Diamond {n}"
         src = vid.get("src") or ""
-        if (spin_jobs.SPIN_ENABLED and vid.get("how") == "viewer" and src and "youtube" not in src
+        if (jobs.allowed and vid.get("how") == "viewer" and src and "youtube" not in src
                 and "too large" not in vid.get("note", "")):
-            jobs.start(n - 1, label, src, vid["url"], hint)   # its note comes from the capture below
+            jobs.start(n - 1, label, src, vid["url"], hint)   # its result goes in the 360 capture log
             notes += quote_media.notes_for(label, ({}, img))
         else:
             notes += quote_media.notes_for(label, (vid, img))
@@ -456,9 +458,10 @@ def cert_lookup(cert_id):
 import spin_capture as _spin_capture
 _spin_capture.CERT_LOOKUP = cert_lookup
 import spin_jobs as _spin_jobs
-# KILL SWITCH: 360 capture runs only when the Render env var SPIN_ENABLED is exactly "true".
-# Unset (default) = OFF: no capture on save; quotes keep original viewer links.
-_spin_jobs.SPIN_ENABLED = get_setting("SPIN_ENABLED").strip().lower() == "true"
+# KILL SWITCH: the Render env var SPIN_ENABLED. Unset (default) = OFF: no capture on save;
+# quotes keep their private viewer links. "test" = capture only for Pure Carbon Group quotes;
+# "true" = capture for every client. See spin_jobs.mode().
+_spin_jobs.SPIN_MODE = _spin_jobs.mode(get_setting("SPIN_ENABLED"))
 
 
 def save_quote(client, stones_payload, expiry_days):
@@ -479,7 +482,7 @@ def save_quote(client, stones_payload, expiry_days):
                                                            SUPABASE_URL, SUPABASE_KEY)
         except Exception as e:
             cert_notes = [f"Certificates not attached: unexpected problem ({type(e).__name__})"]
-    notes, jobs = rehost_media(stones_payload, qid)
+    notes, jobs = rehost_media(stones_payload, qid, client)
     st.session_state.media_notes = notes + cert_notes
     st.session_state.cert_log = cert_logs
     st.session_state.capture_qid = qid if jobs.jobs else None
@@ -504,6 +507,8 @@ def show_media_notes():
         import spin_jobs
         stat = spin_jobs.status(qid)
         if stat:
+            st.caption("360 capture log:\n\n" + "\n".join(f"- {_md(label)}: {_md(capture_log_line(v))}"
+                                                              for label, v in stat.items()))
             with st.expander("360 capture status — details for each stone", expanded=False):
                 for label, v in stat.items():
                     st.markdown(f"**{_md(label)}** ({v['at']} UTC): {_md(v['note'])}")
@@ -513,6 +518,18 @@ def show_media_notes():
                     st.caption("Still capturing — the saved quote updates itself when done.")
                 if st.button("Refresh capture status", key=f"cap_refresh_{qid}"):
                     st.rerun()
+
+def capture_log_line(v):
+    """One stone's capture log: method, frame count and top frame (or why it wasn't captured)."""
+    lg = v.get("log")
+    if not lg:
+        return v["note"]
+    frames = f"{lg['frames']} frames"
+    if lg.get("source_frames") and lg["source_frames"] != lg["frames"]:
+        frames += f" (thinned evenly from {lg['source_frames']})"
+    top = (f"top frame: top_index {lg['top_index']} (frame {lg['top_frame']} of the spinner, where it starts)"
+           if lg.get("top_index") is not None else f"top frame: frame {lg['top_frame']} of the spinner")
+    return f"method: {lg['method']} · {frames} · {top}"
 
 def _md(t):
     return str(t).replace("*", "\\*").replace("_", "\\_").replace("<", "&lt;")
@@ -898,48 +915,6 @@ with tab2:
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
     qhc1,qhc2 = st.columns([4,1])
     with qhc1: st.markdown('<div class="section-label" style="margin-bottom:0">Quote history</div>', unsafe_allow_html=True)
-
-    # ── ONE-TIME FIX (remove after it has run): links to deleted /media/ files ──
-    import dead_media
-    _dm = st.session_state.get("dead_media")
-    with st.expander("🧹 One-time fix: clear links to deleted media files", expanded=bool(_dm)):
-        st.caption("Checks every stone in every quote. A video or image that points at a /media/ file that no "
-                   "longer exists in storage (e.g. the deleted promo clip) is cleared; nothing else changes.")
-        if st.button("Clear links to deleted media", key="dead_media_go", type="primary", use_container_width=True):
-            with st.spinner("Checking every quote and stored file…"):
-                try:
-                    st.session_state.dead_media = dead_media.run(SUPABASE_URL, SUPABASE_KEY)
-                except dead_media.DeadMediaError as e:
-                    st.session_state.dead_media = {"error": str(e)}
-            load_quote_history.clear()
-            st.rerun()
-        if _dm and _dm.get("error"):
-            st.error("ERROR — nothing was changed: " + _dm["error"])
-        elif _dm:
-            (st.error if _dm["errors"] or _dm["unchecked"] else st.success)(
-                f"{_dm['at']} UTC · read {_dm['quotes_read']} quotes, {_dm['files_referenced']} referenced file(s), "
-                f"{_dm['files_listed']} file(s) in storage · deleted files still referenced: {len(_dm['dead_files'])} "
-                f"· fields cleared: {_dm['cleared']} · ERRORS: {_dm['errors']}"
-                + (f" · couldn't check {len(_dm['unchecked'])} file(s) (left as is)" if _dm["unchecked"] else ""))
-            if _dm["dead_files"]:
-                st.markdown("Deleted files: " + ", ".join(f"`{n}`" for n in _dm["dead_files"]))
-            if _dm["unchecked"]:
-                st.markdown("Couldn't check: " + ", ".join(f"`{n}` ({w})" for n, w in _dm["unchecked"].items()))
-            import csv, io as _io
-            _buf = _io.StringIO()
-            _w = csv.writer(_buf)
-            _w.writerow(["quote_link", "client", "stone", "last4", "field", "file", "result"])
-            for _r in _dm["rows"]:
-                _w.writerow([f"{QUOTE_BASE}/q/{_r['quote']}", _r["client"], _r["stone"], _r["last4"],
-                             _r["field"], _r["file"], _r["result"]])
-            if _dm["rows"]:
-                st.dataframe([{"Quote": _r["quote"], "Client": _r["client"], "Stone": f"{_r['stone']} · ···{_r['last4']}",
-                               "Field": _r["field"], "File": _r["file"], "Result": _r["result"]} for _r in _dm["rows"]],
-                             hide_index=True, use_container_width=True)
-                st.download_button("Download CSV of cleared fields", _buf.getvalue(), file_name="dead_media_cleared.csv",
-                                   mime="text/csv", use_container_width=True)
-            else:
-                st.info("No stone points at a deleted media file.")
 
     def render_quote_row(q):
         exp_str = ""
