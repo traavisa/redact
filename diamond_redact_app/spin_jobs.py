@@ -1,4 +1,4 @@
-"""Runs 360 captures for quotes at save time (with a time limit). Dormant while the kill switch is off.
+"""Runs 360 captures for quotes in the background after saving. Dormant while the kill switch is off.
 
 Kill switch: the Render env var SPIN_ENABLED (see mode()):
   - unset / anything else = OFF: no capture; quotes keep their private /v/ viewer links.
@@ -6,13 +6,12 @@ Kill switch: the Render env var SPIN_ENABLED (see mode()):
     every other client's quote is saved exactly as with capture off.
   - "true" = capture for every client.
 
-Save flow (see app.save_quote):
+Save flow (see app.save_quote) — the save never waits for a capture:
   - Each stone whose video is a viewer page already has an opaque /v/ link (quote_media).
-  - start() begins capturing those stones in the background; wait() gives them up to
-    SAVE_BUDGET seconds. Stones done by then are saved with their frames ("spin") and no
-    viewer link at all.
-  - The quote is saved. finish() then waits for the rest and updates the saved quote
-    (spin added, /v/ link removed) as each one completes.
+  - start() queues a capture for each of those stones (all stones of a quote in parallel);
+    the quote is saved at once with its /v/ links and its link is shown straight away.
+  - finish() then updates the saved quote as EACH stone completes, in whatever order they
+    finish (spin added, /v/ link removed). progress() gives "2 of 3 done" for the app.
   - The /v/ token's row in media_links also gets the frames, so a /v/ link that was
     already sent (e.g. in a customer link) shows our spinner instead of the vendor page.
 
@@ -22,15 +21,15 @@ import datetime
 import json
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, wait as fwait
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 
 import quote_media as qm
 import spin_capture as sc
 
-SAVE_BUDGET = 25          # seconds a save waits for captures before saving with /v/ links
-CAPTURE_WORKERS = 3       # stones captured at the same time (each downloads frames in parallel too)
+CAPTURE_WORKERS = 4       # stones captured at the same time (frame downloads/uploads share
+                          # spin_capture's pools, so the source never sees more than its limit)
 LEGACY_VIEWER = "https://video.alldiamondeverything.com/?u="
 
 _pool = ThreadPoolExecutor(max_workers=CAPTURE_WORKERS, thread_name_prefix="spin")
@@ -248,14 +247,22 @@ def apply(stone, res):
         if still.startswith(qm.MEDIA_BASE):
             stone["image_url"] = still                      # the certificate's own still image
         elif not stone.get("image_url") or _is_frame(stone.get("image_url")):
-            stone["image_url"] = f"{qm.MEDIA_BASE}{sp['id']}/{stone['spin']['top']:03d}.jpg"   # the top frame
+            stone["image_url"] = f"{qm.MEDIA_BASE}{sp['id']}/{stone['spin']['top']:03d}.{frame_ext(stone['spin']['v'])}"   # the top frame
         return True
     return False
 
 
 def _is_frame(u):
     import re
-    return bool(re.fullmatch(re.escape(qm.MEDIA_BASE) + r"[a-f0-9]{32}/\d{3}\.jpg", str(u or "")))
+    return bool(re.fullmatch(re.escape(qm.MEDIA_BASE) + r"[a-f0-9]{32}/\d{3}\.(jpg|webp)", str(u or "")))
+
+
+def frame_ext(v):
+    """A capture's frame file extension, from its capture version (v5+ = WebP)."""
+    try:
+        return "webp" if int(v) >= sc.WEBP_SINCE else "jpg"
+    except (TypeError, ValueError):
+        return "jpg"
 
 
 # ── Save-time flow ────────────────────────────────────────────────────────────
@@ -266,56 +273,57 @@ class SaveJobs:
         self.sb_url, self.key, self.qid = sb_url, key, qid
         self.allowed = capture_allowed(client)
         self.jobs = []                  # (index, label, link_saved, future)
-        self.skipped = []
-        self.saved = threading.Event()
-        self.save_ok = False
 
     def start(self, index, label, vendor_url, link_saved, hint=None):
+        """Queues one stone's capture. Returns at once: nothing here touches the network."""
         if not self.allowed:                            # capture off for this quote: as if never asked
             return
-        ok, why = version_check()
-        if not ok:                                      # keep the /v/ link; never capture with old code
-            self.skipped.append(f"{label}: 360 capture skipped — {why}; saved with a private viewer link")
-            _set_status(self.qid, label, "360 capture skipped: " + why)
-            return
-        fut = _pool.submit(capture_one, self.sb_url, self.key, vendor_url, hint)
+        fut = _pool.submit(_checked_capture, self.sb_url, self.key, vendor_url, hint)
         self.jobs.append((index, label, link_saved, fut))
-        _set_status(self.qid, label, "capturing 360 frames…")
-
-    def wait(self, stones, budget=SAVE_BUDGET):
-        """Waits up to `budget` seconds; applies finished captures to `stones` in place.
-        Returns media notes for skipped and still-running captures (results are in status())."""
-        notes = list(self.skipped)
-        if not self.jobs:
-            return notes
-        fwait([f for *_, f in self.jobs], timeout=budget)
-        for i, label, _, fut in self.jobs:
-            if fut.done():
-                res = _result(fut)
-                apply(stones[i], res)          # its result goes in the capture log, not the media note
-                _set_status(self.qid, label, _note_text(res), res.get("facts"), res.get("log"))
-            else:
-                notes.append(f"{label}: 360 capture still running — saved with a private viewer link for now; "
-                             "the quote updates itself when capture finishes (see Capture status)")
-        return notes
+        _set_status(self.qid, label, PENDING)
 
     def finish(self, saved_ok):
-        """Call once the quote is saved (or failed). Pending captures update the saved quote."""
-        self.save_ok = saved_ok
-        pending = [j for j in self.jobs if not j[3].done()]
-        if not pending or not saved_ok:
+        """Call once the quote is saved (or failed). Each capture updates the saved quote as soon
+        as it completes. If the save failed, nothing is updated."""
+        if not self.jobs:
             return
-        threading.Thread(target=self._finish, args=(pending,), daemon=True).start()
+        if not saved_ok:
+            for _, label, _, _ in self.jobs:
+                _set_status(self.qid, label, "quote not saved — 360 capture result not used")
+            return
+        threading.Thread(target=self._finish, daemon=True).start()
 
-    def _finish(self, pending):
-        for i, label, link_saved, fut in pending:
-            res = _result(fut, timeout=900)
+    def _finish(self):
+        futs = {fut: (i, label, link_saved) for i, label, link_saved, fut in self.jobs}
+        for fut in as_completed(futs, timeout=None):
+            i, label, link_saved = futs[fut]
+            res = _result(fut)
             if res.get("ok"):
                 ok = patch_stone(self.sb_url, self.key, self.qid, i, link_saved, res)
                 if not ok:
                     res = {**res, "note": res["note"] + " — but the saved quote couldn't be updated"}
             _set_status(self.qid, label, _note_text(res), res.get("facts"), res.get("log"))
             _log("spin-save", {"quote": self.qid, "stone": label, "ok": res.get("ok"), "note": res.get("note")})
+            tm = (res.get("log") or {}).get("timing")
+            if tm:
+                _log("spin-timing", {"quote": self.qid, "stone": label, "frames": res["log"]["frames"], **tm})
+
+
+PENDING = "capturing 360 frames…"
+
+
+def _checked_capture(sb_url, key, vendor_url, hint):
+    """The version gate, then the capture — both in the background, so a save never waits."""
+    ok, why = version_check()
+    if not ok:                                          # keep the /v/ link; never capture with old code
+        return {"ok": False, "spin": None, "note": f"skipped — {why}", "facts": [why]}
+    return capture_one(sb_url, key, vendor_url, hint)
+
+
+def progress(qid):
+    """(done, total) captures for a quote."""
+    stat = status(qid)
+    return sum(v["note"] != PENDING for v in stat.values()), len(stat)
 
 
 def _result(fut, timeout=None):

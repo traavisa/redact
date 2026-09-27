@@ -1685,6 +1685,7 @@ def _quote_box(rows, deps):
             for p in payload:
                 deps["add_history"](p["orig_filename"], f"···{p['cert_last4']} → {link}", p["cert_type"], q_client)
             ss.quote_link = link
+            ss.capture_tab = "ls"
             ss.ls_last_link = (link, q_client, len(payload))
             _clear_picks()
             st.rerun()
@@ -1697,6 +1698,8 @@ def _quote_box(rows, deps):
         if ss.get("media_notes"):
             st.caption("Media note — the quote was saved; these items were handled differently:\n\n"
                        + "\n".join(f"- {m}" for m in ss.media_notes))
+        if deps.get("show_capture_status"):
+            deps["show_capture_status"]("ls")                # "360 processing: 2 of 3 done" + capture log
         if ss.get("cert_log"):
             with st.expander("Certificate log — one line per stone", expanded=False):
                 st.dataframe([{"Stone": c.get("stone"), "Source": c.get("source"), "Lab/format": c.get("lab_format"),

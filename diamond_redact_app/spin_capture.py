@@ -1,10 +1,12 @@
 """360 capture: turns a stone's 360 frames (from its own API fields) into our own numbered frames.
 
-The frames are downloaded here, re-encoded (no metadata, max FRAME_WIDTH px wide) and
-uploaded to the "quote-media" bucket as <random uuid>/000.jpg, 001.jpg, … so the quote
-and share pages can play them with our own spinner (spin360.js) from
-https://quote.alldiamondeverything.com/media/<uuid>/NNN.jpg. Nothing a client loads
-then comes from a vendor.
+Only the frames kept after thinning are downloaded (DOWNLOAD_WORKERS at a time, over kept-alive
+connections, with polite retries), re-encoded as WebP (no metadata, max FRAME_WIDTH px wide) and
+uploaded in parallel to the "quote-media" bucket as <random uuid>/000.webp, 001.webp, … so the
+quote and share pages can play them with our own spinner (spin360.js) from
+https://quote.alldiamondeverything.com/media/<uuid>/NNN.webp. Nothing a client loads then comes
+from a vendor. (Captures made by v4 are <uuid>/NNN.jpg; the pages pick the extension from the
+capture's version.) Each capture logs its timing: frame fetch, re-encode, upload and total.
 
 Where the frames come from — ONLY the certificate's 360 API fields (v360 / product_videos:
 url, frame_count, top_index):
@@ -21,7 +23,7 @@ thinned evenly to MAX_FRAMES, always including top_index; the spinner starts on 
 (if the top frame can't be downloaded, the capture fails).
 
 Every step records a short diagnostic (hosts masked) so a failed capture says exactly why.
-Nothing identifying goes into file names: only the random folder and 000.jpg, 001.jpg, …
+Nothing identifying goes into file names: only the random folder and 000.webp, 001.webp, …
 """
 import io
 import json
@@ -33,6 +35,7 @@ from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 from PIL import Image, ImageOps
 
 import quote_media as qm
@@ -41,10 +44,13 @@ import quote_media as qm
 # Bump when capture rules change. Everything captured records it (stone spin.v,
 # media_links.spin_version); pages and Netlify functions only show captures from
 # version >= TRUSTED_VERSION. v1 = page scraping (8-frame minimum), v2/v3 = certificate
-# fields with page analysis as a fallback. v4 = the certificate's API fields ONLY.
+# fields with page analysis as a fallback. v4 = the certificate's API fields ONLY (JPEG frames).
+# v5 = the same capture rules, frames stored as WebP (NNN.webp) — the pages use the version
+# to pick the file extension. v4 captures stay trusted: they were made by the same rules.
 # netlify/functions/lib/spin.js must carry the same CAPTURE_VERSION and TRUSTED_VERSION.
-CAPTURE_VERSION = 4
-TRUSTED_VERSION = 4          # only captures made by the current (API-fields-only) code are shown
+CAPTURE_VERSION = 5
+TRUSTED_VERSION = 4          # only captures made under the API-fields-only rules are shown
+WEBP_SINCE = 5               # captures from this version on are .webp
 
 
 def _commit():
@@ -62,11 +68,19 @@ def _commit():
 COMMIT = _commit()
 CODE_TAG = f"capture code v{CAPTURE_VERSION} (commit {COMMIT})"
 
-MAX_FRAMES = 120             # more are evenly thinned out: 3° a frame is smooth, and far lighter on phones
+MAX_FRAMES = 72              # kept frames (5° a frame); more are evenly thinned out. The app's
+                             # SPIN_MAX_FRAMES setting can raise it (e.g. 120) — see set_max_frames()
 MIN_FRAMES = 24             # fewer is not a real 360 (e.g. a page's shared images)
-FRAME_WIDTH = 1000
-JPEG_QUALITY = 84
-DOWNLOAD_WORKERS = 8
+FRAME_WIDTH = 720
+WEBP_QUALITY = 80
+WEBP_METHOD = 2              # encoder effort 0-6: 2 is ~20% faster than the default 4, same size
+FRAME_EXT, FRAME_TYPE = "webp", "image/webp"
+DOWNLOAD_WORKERS = 24        # frame downloads at once, shared by every capture (polite to the source)
+UPLOAD_WORKERS = 12          # frame uploads at once, shared by every capture
+ENCODE_WORKERS = 2           # re-encoding releases the GIL, so a second core is used when there is one
+RETRIES = 2                  # extra tries for a frame after a timeout, connection error, 429 or 5xx
+RETRY_WAIT = (0.5, 1.5)      # seconds before each retry (a Retry-After up to 5 s is respected)
+CACHE_CONTROL = "public, max-age=31536000, immutable"   # frame names are unique: cache them forever
 MAX_MISSING = 0.10           # up to 10% of frames may fail to download; they're skipped
 MAX_COUNT = 1024             # a larger frame_count is implausible
 # Shared site images that are never a stone's frames (a page's own gallery, logos, …)
@@ -75,6 +89,28 @@ _SHARED_ASSET = re.compile(r"bridal_image|banner|logo|icon|sprite|placeholder|av
 # Certificate lookup by ID for /diamond/<id>/video/<w>/<h> viewer links: set by the app to a
 # function cert_id -> (hint dict or None, reason). None means no lookup is available.
 CERT_LOOKUP = None
+
+
+def set_max_frames(value):
+    """Kept-frame count from the SPIN_MAX_FRAMES setting (24-240); anything else keeps the default."""
+    global MAX_FRAMES
+    try:
+        v = int(str(value).strip())
+    except (TypeError, ValueError):
+        return MAX_FRAMES
+    if MIN_FRAMES <= v <= 240:
+        MAX_FRAMES = v
+    return MAX_FRAMES
+
+
+# One kept-alive HTTP session and shared worker pools for every capture: no new DNS lookup or
+# TLS handshake per frame, and the source never sees more than DOWNLOAD_WORKERS requests at once.
+_http = requests.Session()
+_http.mount("https://", HTTPAdapter(pool_connections=8, pool_maxsize=DOWNLOAD_WORKERS + UPLOAD_WORKERS))
+_http.mount("http://", HTTPAdapter(pool_connections=8, pool_maxsize=DOWNLOAD_WORKERS + UPLOAD_WORKERS))
+_dl_pool = ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS, thread_name_prefix="frame-dl")
+_up_pool = ThreadPoolExecutor(max_workers=UPLOAD_WORKERS, thread_name_prefix="frame-up")
+_enc_pool = ThreadPoolExecutor(max_workers=ENCODE_WORKERS, thread_name_prefix="frame-enc")
 
 
 def shared_asset(url):
@@ -115,8 +151,8 @@ def _is_image(url):
     try:
         if not qm._public_host(url):
             return False
-        with requests.get(url, stream=True, timeout=(8, 15), allow_redirects=True,
-                          headers={"User-Agent": qm.UA, "Accept": "image/*,*/*"}) as r:
+        with _http.get(url, stream=True, timeout=(8, 15), allow_redirects=True,
+                       headers={"User-Agent": qm.UA, "Accept": "image/*,*/*"}) as r:
             if r.status_code >= 400:
                 return False
             head = next(r.iter_content(32), b"")
@@ -282,8 +318,8 @@ def pick(n, top=0, limit=None):
 
 
 def clean_frame(data, size=None):
-    """Re-encodes one frame from its pixels only (no EXIF/XMP/ICC), max FRAME_WIDTH wide.
-    `size` forces every frame to the first frame's size."""
+    """Re-encodes one frame from its pixels only (no EXIF/XMP/ICC) as WebP, max FRAME_WIDTH wide.
+    `size` forces every frame to the first frame's size. Returns (bytes, size)."""
     with Image.open(io.BytesIO(data)) as im:
         im.seek(0)
         im = ImageOps.exif_transpose(im)
@@ -304,82 +340,156 @@ def clean_frame(data, size=None):
         clean = Image.new("RGB", size)
         clean.paste(flat)
     out = io.BytesIO()
-    clean.save(out, "JPEG", quality=JPEG_QUALITY, optimize=True)
+    clean.save(out, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
     return out.getvalue(), size
 
 
+def _retry_wait(attempt, r=None):
+    wait = RETRY_WAIT[min(attempt, len(RETRY_WAIT) - 1)]
+    try:
+        wait = max(wait, min(5.0, float(r.headers.get("Retry-After")))) if r is not None else wait
+    except (TypeError, ValueError):
+        pass
+    time.sleep(wait)
+
+
+def _fetch(url):
+    """One frame's bytes over the shared session, with polite retries. None if it can't be had.
+    Same checks as quote_media._download: a real image, under the size limit."""
+    for attempt in range(RETRIES + 1):
+        try:
+            with _http.get(url, stream=True, timeout=(8, 20), allow_redirects=True,
+                           headers={"User-Agent": qm.UA, "Accept": "image/*,*/*"}) as r:
+                if r.status_code == 429 or r.status_code >= 500:
+                    if attempt < RETRIES:
+                        _retry_wait(attempt, r)
+                        continue
+                    return None
+                if r.status_code >= 400:
+                    return None                                  # 404 etc.: not worth retrying
+                ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+                if ctype not in qm.IMAGE_TYPES and ctype not in qm.LOOSE_TYPES:
+                    return None
+                buf = io.BytesIO()
+                for chunk in r.iter_content(256 * 1024):
+                    buf.write(chunk)
+                    if buf.tell() > qm.MAX_IMAGE_BYTES:
+                        return None
+            data = buf.getvalue()
+            return data if qm._sniff(data[:16]) == "image" else None
+        except requests.RequestException:
+            if attempt < RETRIES:
+                _retry_wait(attempt)
+                continue
+            return None
+    return None
+
+
 def _upload_frame(sb_url, key, path, data):
-    r = requests.post(f"{sb_url}/storage/v1/object/{qm.BUCKET}/{path}",
-                      headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "image/jpeg",
-                               "Cache-Control": "max-age=31536000", "x-upsert": "false"},
-                      data=data, timeout=(10, 60))
-    if r.status_code not in (200, 201):
+    """Uploads one frame, cached forever by browsers (the name is unique). Retries on 5xx / 429 /
+    connection errors; a 409 on a retry means the earlier try already stored it."""
+    for attempt in range(RETRIES + 1):
+        try:
+            r = _http.post(f"{sb_url}/storage/v1/object/{qm.BUCKET}/{path}",
+                           headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": FRAME_TYPE,
+                                    "Cache-Control": CACHE_CONTROL, "x-upsert": "false"},
+                           data=data, timeout=(10, 60))
+        except requests.RequestException as e:
+            if attempt < RETRIES:
+                _retry_wait(attempt)
+                continue
+            raise RuntimeError(f"upload failed ({type(e).__name__})")
+        if r.status_code in (200, 201) or (attempt and r.status_code == 409):
+            return
+        if (r.status_code == 429 or r.status_code >= 500) and attempt < RETRIES:
+            _retry_wait(attempt, r)
+            continue
         raise RuntimeError(f"upload HTTP {r.status_code}")
 
 
 def _remove(sb_url, key, paths):
     try:
-        requests.delete(f"{sb_url}/storage/v1/object/{qm.BUCKET}",
-                        headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
-                        data=json.dumps({"prefixes": paths}), timeout=20)
+        _http.delete(f"{sb_url}/storage/v1/object/{qm.BUCKET}",
+                     headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                     data=json.dumps({"prefixes": paths}), timeout=20)
     except Exception:
         pass
 
 
-def store_frames(sb_url, key, urls, facts, top=0):
-    """Downloads, cleans and uploads the frames. Returns (folder_id, count, top position)."""
+PHASE2_STEP = 8               # the spinner loads every 8th frame (from the top frame) first
+
+
+def first_view(n, top):
+    """Frames the spinner loads before dragging works: the top frame, then every 8th from it."""
+    return sorted({(top + k * PHASE2_STEP) % n for k in range(-(-n // PHASE2_STEP))})
+
+
+def store_frames(sb_url, key, urls, facts, top=0, timing=None):
+    """Downloads ONLY the frames kept after thinning (top_index always among them), cleans and
+    uploads them. Returns (folder_id, count, top position). Fills `timing` (a dict) with
+    fetch_s / encode_s / upload_s (seconds), bytes and first_view_bytes."""
+    tm = timing if timing is not None else {}
+    t0 = time.time()
     if any(shared_asset(u) for u in urls[:1] + urls[-1:]):
         raise CaptureFailed("frames are shared site images, not the stone")
+    try:
+        public = qm._public_host(urls[0])                  # one DNS check: every frame is in one folder
+    except qm.Broken:
+        public = False
+    if not public:
+        raise CaptureFailed("frame address isn't public")
     idx, top_pos = pick(len(urls), top)
     urls = [urls[i] for i in idx]
     if len(urls) < MIN_FRAMES:
         raise CaptureFailed(f"only {len(urls)} frame(s) — under the {MIN_FRAMES}-frame minimum")
 
-    def get(u):
-        for attempt in range(2):
-            try:
-                data, kind = qm._download(u, "image")
-                if kind == "image":
-                    return data
-            except (qm.Broken, qm.NotAFile, qm.TooLarge):
-                return None
-            except Exception:
-                pass
-        return None
-
-    t0 = time.time()
-    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as ex:
-        raw = list(ex.map(get, urls))
+    # 1. Fetch the kept frames only, in parallel (the shared pool limits load on the source)
+    raw = list(_dl_pool.map(_fetch, urls))
+    tm["fetch_s"] = round(time.time() - t0, 2)
     kept = [i for i, d in enumerate(raw) if d]            # positions (in rotation order) that downloaded
-    good = [raw[i] for i in kept]
-    missing = len(urls) - len(good)
-    facts.append(f"downloaded {len(good)}/{len(urls)} frame(s) in {time.time() - t0:.1f}s")
-    if not good or missing > len(urls) * MAX_MISSING or len(good) < MIN_FRAMES:
+    missing = len(urls) - len(kept)
+    facts.append(f"downloaded {len(kept)}/{len(urls)} frame(s) in {tm['fetch_s']:.1f}s")
+    if not kept or missing > len(urls) * MAX_MISSING or len(kept) < MIN_FRAMES:
         raise CaptureFailed(f"{missing} of {len(urls)} frames wouldn't download")
     if not raw[top_pos]:
         raise CaptureFailed("the top frame (top_index) wouldn't download")
-    first, size = clean_frame(good[0])
-    cleaned, pos = [first], [kept[0]]
-    for i, d in zip(kept[1:], good[1:]):
-        try:
-            cleaned.append(clean_frame(d, size)[0])
-            pos.append(i)
-        except Exception:
-            pass
-    if top_pos not in pos:
+
+    # 2. Re-encode, in parallel (the top frame first: it fixes the size for all). Frames are
+    #    numbered once the readable ones are known.
+    t1 = time.time()
+    try:
+        first, size = clean_frame(raw[top_pos])
+    except Exception:
         raise CaptureFailed("the top frame (top_index) couldn't be read as an image")
+    others = [i for i in kept if i != top_pos]
+
+    def enc(i):
+        try:
+            return clean_frame(raw[i], size)[0]
+        except Exception:
+            return None
+    done = dict(zip(others, _enc_pool.map(enc, others)))
+    done[top_pos] = first
+    pos = [i for i in kept if done.get(i)]
+    raw = None
+    tm["encode_s"] = round(time.time() - t1, 2)
     new_top = pos.index(top_pos)                          # the spinner starts on top_index
-    if len(cleaned) < max(MIN_FRAMES, len(urls) * (1 - MAX_MISSING)):
+    if len(pos) < max(MIN_FRAMES, len(urls) * (1 - MAX_MISSING)):
         raise CaptureFailed("too many frames couldn't be read as images")
+    cleaned = [done[i] for i in pos]
+    # 3. Upload, in parallel
     folder = uuid.uuid4().hex
-    paths = [f"{folder}/{i:03d}.jpg" for i in range(len(cleaned))]
-    with ThreadPoolExecutor(max_workers=DOWNLOAD_WORKERS) as ex:
-        errs = list(ex.map(lambda pd: _safe_upload(sb_url, key, *pd), zip(paths, cleaned)))
+    paths = [f"{folder}/{i:03d}.{FRAME_EXT}" for i in range(len(cleaned))]
+    t2 = time.time()
+    errs = list(_up_pool.map(lambda pd: _safe_upload(sb_url, key, *pd), zip(paths, cleaned)))
+    tm["upload_s"] = round(time.time() - t2, 2)
     if any(errs):
         _remove(sb_url, key, paths)
         raise CaptureFailed(f"frame upload failed ({next(e for e in errs if e)})")
-    facts.append(f"stored {len(cleaned)} frame(s), {size[0]}×{size[1]}, "
-                 f"{sum(len(c) for c in cleaned) // 1024} KB total")
+    tm["bytes"] = sum(len(c) for c in cleaned)
+    tm["first_view_bytes"] = sum(len(cleaned[j]) for j in first_view(len(cleaned), new_top))
+    facts.append(f"stored {len(cleaned)} frame(s), {size[0]}×{size[1]} WebP, {tm['bytes'] // 1024} KB total "
+                 f"({tm['bytes'] // len(cleaned) // 1024} KB each; first view {tm['first_view_bytes'] // 1024} KB)")
     return folder, len(cleaned), new_top
 
 
@@ -419,9 +529,10 @@ def capture(sb_url, key, viewer_url, hint=None):
             raise CaptureFailed("frames aren't all from the stone's own v360 folder")
         else:
             facts.append(f"method: {fs.method} — {len(fs.urls)} frames via {fs.source}, pattern {fs.pattern}")
-            folder, n, top = store_frames(sb_url, key, fs.urls, facts, fs.top)
+            timing = {}
+            folder, n, top = store_frames(sb_url, key, fs.urls, facts, fs.top, timing)
             log = {"method": fs.source, "frames": n, "source_frames": len(fs.urls),
-                   "top_index": fs.top, "top_frame": top}
+                   "top_index": fs.top, "top_frame": top, "timing": timing}
             res = {"ok": True, "spin": {"id": folder, "n": n, "top": top, "v": CAPTURE_VERSION}, "video": "", "facts": facts,
                    "method": fs.method, "still": fs.still, "log": log,
                    "note": f"360 captured via {fs.method}: {n} frames"
@@ -435,6 +546,12 @@ def capture(sb_url, key, viewer_url, hint=None):
         res = {"ok": False, "spin": None, "video": "", "facts": facts + [type(e).__name__],
                "note": f"capture error ({type(e).__name__})"}
     res["seconds"] = round(time.time() - t0, 1)
+    if res.get("log"):
+        tm = res["log"]["timing"]
+        tm["total_s"] = res["seconds"]                     # the whole capture, API field checks included
+        facts_line = (f"timing: fetch {tm.get('fetch_s', 0):.1f}s · re-encode {tm.get('encode_s', 0):.1f}s · "
+                      f"upload {tm.get('upload_s', 0):.1f}s · total {tm['total_s']:.1f}s")
+        res["facts"] = list(res["facts"]) + [facts_line]
     res["note"] = _clean_text(res["note"])
     res["facts"] = [_clean_text(f) for f in res["facts"]]
     if res["ok"]:

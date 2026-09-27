@@ -11,7 +11,7 @@ const SAFE_STONE_FIELDS = [
 const MEDIA_BASE = 'https://quote.alldiamondeverything.com/media/';
 const VIEWER_LINK_BASE = 'https://video.alldiamondeverything.com/v/';
 const LEGACY_VIEWER_BASE = 'https://video.alldiamondeverything.com/?u=';
-const MEDIA_FILE_RE = /^[a-f0-9]{32}(\.(jpg|png|mp4|webm)|\/\d{3}\.jpg)$/;   // files, or one captured 360 frame
+const MEDIA_FILE_RE = /^[a-f0-9]{32}(\.(jpg|png|mp4|webm)|\/\d{3}\.(jpg|webp))$/;   // files, or one captured 360 frame
 function safeVideo(u) {
   u = String(u || '');
   if (u.startsWith(MEDIA_BASE)) return MEDIA_FILE_RE.test(u.slice(MEDIA_BASE.length)) ? u : undefined;
@@ -19,10 +19,10 @@ function safeVideo(u) {
   if (u.startsWith(LEGACY_VIEWER_BASE)) return u;
   return undefined;
 }
-// Captured 360 frames: our own folder /media/<32 hex>/000.jpg … (n frames). Only captures
+// Captured 360 frames: our own folder /media/<32 hex>/000.webp … (v5+; 000.jpg … for v4). Only captures
 // the rule in lib/spin.js trusts are served; others fall back to the original viewer.
 const { trustedSpin, rowForSpin, spinsForClient } = require('./lib/spin');
-const FRAME_IMAGE_RE = /^[a-f0-9]{32}\/\d{3}\.jpg$/;
+const FRAME_IMAGE_RE = /^[a-f0-9]{32}\/\d{3}\.(jpg|webp)$/;
 const VIEWER_TOKEN_RE = /^[a-z2-9]{8,32}$/;
 // Certificates: our own /certs/ copies (random names), or the older uploads in our own
 // storage. Anything else is dropped.

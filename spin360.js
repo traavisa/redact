@@ -1,14 +1,19 @@
 /* 360° spinner — plays our own re-hosted frames, no libraries.
  *
- * Frames live at https://quote.alldiamondeverything.com/media/<32-hex id>/000.jpg, 001.jpg, …
- * (captured and cleaned by the app). Nothing here loads from anywhere else.
+ * Frames live at https://quote.alldiamondeverything.com/media/<32-hex id>/000.webp, 001.webp, …
+ * (capture version 5+; version 4 captures are 000.jpg …), captured and cleaned by the app.
+ * Nothing here loads from anywhere else.
  *
- *   Spin360.mount(el, { id, n, top })  one spinner in `el`; `top` is the frame it starts on
- *   Spin360.mountAll(root)            every [data-spin-id][data-spin-n] inside `root`
+ *   Spin360.mount(el, { id, n, top, v })  one spinner in `el`; `top` is the frame it starts on
+ *   Spin360.mountAll(root)               every [data-spin-id][data-spin-n] inside `root`
+ *   Spin360.html(spin, { still })        markup for a page: the top frame as a plain image (so it
+ *                                        shows at once), over the stone's still image if given
  *
- * Drag / swipe to rotate (vertical swipes still scroll the page), arrow keys when focused,
- * gentle auto-rotate until touched, frames preloaded coarse-to-fine with a progress ring
- * (you can rotate before everything has loaded), paused while off-screen.
+ * Loading is progressive and lazy: nothing loads until the stone is near the screen; then the
+ * top frame, then every 8th frame (dragging works from here, within a second or two), then the
+ * rest in the background. Drag / swipe to rotate (vertical swipes still scroll the page), arrow
+ * keys when focused, gentle auto-rotate once every frame is in, paused while off-screen.
+ * Frame files never change (unique names), so repeat visits come from the browser cache.
  */
 (function () {
   'use strict';
@@ -17,7 +22,9 @@
   var TURN_SECONDS = 10;       // auto-rotate: one full turn
   var TOP_PAUSE = 1.4;         // auto-rotate rests this long on the top frame after each turn
   var DRAG_TURN = 1.25;        // a drag across 1.25× the spinner's width = one full turn
-  var PARALLEL = 6;
+  var PARALLEL = 8;            // frames requested at once (HTTP/2 on our domain)
+  var COARSE = 8;              // phase 2: every 8th frame from the top frame
+  var WEBP_SINCE = 5;          // capture version from which frames are .webp
 
   var CSS = '' +
     '.s360{position:relative;width:100%;height:100%;background:#000;overflow:hidden;user-select:none;-webkit-user-select:none;' +
@@ -25,14 +32,17 @@
     '.s360.dragging{cursor:grabbing}' +
     '.s360:focus-visible{box-shadow:inset 0 0 0 1px #c9a84c}' +
     '.s360 canvas{position:absolute;inset:0;width:100%;height:100%;display:block}' +
-    '.s360-load{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;' +
-    'background:rgba(0,0,0,.35);transition:opacity .45s;pointer-events:none}' +
+    '.s360-host{position:relative;width:100%;height:100%;background:#000 center/contain no-repeat}' +
+    '.s360-poster{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block;transition:opacity .3s}' +
+    '.s360-poster.gone{opacity:0;pointer-events:none}' +
+    '.s360-load{position:absolute;right:10px;top:10px;display:flex;align-items:center;gap:6px;padding:4px 8px 4px 5px;' +
+    'border-radius:99px;background:rgba(10,10,10,.55);transition:opacity .45s;pointer-events:none}' +
     '.s360-load.done{opacity:0}' +
-    '.s360-ring{width:46px;height:46px;transform:rotate(-90deg)}' +
+    '.s360-ring{width:16px;height:16px;transform:rotate(-90deg)}' +
     '.s360-ring circle{fill:none;stroke-width:2}' +
     '.s360-ring .bg{stroke:rgba(255,255,255,.12)}' +
     '.s360-ring .fg{stroke:#c9a84c;stroke-linecap:round;transition:stroke-dashoffset .2s}' +
-    '.s360-pct{font:500 10px/1 Inter,-apple-system,sans-serif;letter-spacing:.14em;color:rgba(255,255,255,.7);text-transform:uppercase}' +
+    '.s360-pct{font:500 9px/1 Inter,-apple-system,sans-serif;letter-spacing:.12em;color:rgba(255,255,255,.7);text-transform:uppercase}' +
     '.s360-hint{position:absolute;left:50%;bottom:12px;transform:translateX(-50%);display:flex;align-items:center;gap:7px;' +
     'padding:6px 11px;border-radius:99px;background:rgba(10,10,10,.62);border:1px solid rgba(201,168,76,.28);' +
     'font:500 10px/1 Inter,-apple-system,sans-serif;letter-spacing:.12em;text-transform:uppercase;color:#d8c48a;' +
@@ -55,19 +65,23 @@
 
   function pad3(i) { return ('00' + i).slice(-3); }
 
-  // 0, n/2, n/4, 3n/4, n/8 … : a rough full turn is available early, then it fills in
+  // Offsets from the top frame, in load order: 0; every 8th (a rough full turn, dragging works);
+  // then every 4th, every 2nd, the rest (it fills in). Returns [order, number of coarse frames].
   function loadOrder(n) {
-    var out = [], seen = new Uint8Array(n), step = 1;
-    while (step < n) step *= 2;
-    for (; step >= 1; step = step / 2) {
-      for (var i = 0; i < n; i += step) { if (!seen[i]) { seen[i] = 1; out.push(i); } }
-      if (step === 1) break;
+    var out = [0], seen = new Uint8Array(n), step, i;
+    seen[0] = 1;
+    for (i = COARSE; i < n; i += COARSE) { seen[i] = 1; out.push(i); }
+    var coarse = out.length;
+    for (step = COARSE / 2; step >= 1; step = step / 2) {
+      for (i = 0; i < n; i += step) { if (!seen[i]) { seen[i] = 1; out.push(i); } }
     }
-    return out;
+    return [out, coarse];
   }
 
-  function Spinner(el, id, n, top) {
+  function Spinner(el, id, n, top, v) {
     this.el = el; this.id = id; this.n = n; this.top = top;
+    this.ext = Number(v) >= WEBP_SINCE ? 'webp' : 'jpg';
+    this.coarseLeft = 0;
     this.turnStart = top; this.restUntil = 0;
     this.imgs = new Array(n); this.loaded = 0; this.failed = 0;
     this.pos = top; this.vel = 0; this.auto = !matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -77,6 +91,7 @@
 
   Spinner.prototype.build = function () {
     var el = this.el, self = this;
+    this.poster = el.querySelector('img.s360-poster');     // the top frame, already in the page
     el.innerHTML = '';
     el.classList.add('s360');
     el.tabIndex = 0;
@@ -85,16 +100,17 @@
     this.canvas = document.createElement('canvas');
     this.ctx = this.canvas.getContext('2d');
     el.appendChild(this.canvas);
+    if (this.poster) el.appendChild(this.poster);           // stays on top until the canvas has drawn
     var badge = document.createElement('div'); badge.className = 's360-badge'; badge.textContent = '360°';
     el.appendChild(badge);
     this.loadEl = document.createElement('div'); this.loadEl.className = 's360-load';
-    this.loadEl.innerHTML = '<svg class="s360-ring" viewBox="0 0 46 46"><circle class="bg" cx="23" cy="23" r="20"/>' +
-      '<circle class="fg" cx="23" cy="23" r="20" stroke-dasharray="125.66" stroke-dashoffset="125.66"/></svg>' +
-      '<div class="s360-pct">Loading 360°</div>';
+    this.loadEl.innerHTML = '<svg class="s360-ring" viewBox="0 0 46 46"><circle class="bg" cx="23" cy="23" r="18" stroke-width="6"/>' +
+      '<circle class="fg" cx="23" cy="23" r="18" stroke-width="6" stroke-dasharray="113.1" stroke-dashoffset="113.1"/></svg>' +
+      '<div class="s360-pct">360°</div>';
     el.appendChild(this.loadEl);
     this.ring = this.loadEl.querySelector('.fg');
     this.pct = this.loadEl.querySelector('.s360-pct');
-    this.hint = document.createElement('div'); this.hint.className = 's360-hint';
+    this.hint = document.createElement('div'); this.hint.className = 's360-hint gone';
     this.hint.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" ' +
       'stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/>' +
       '<path d="M3 21v-5h5"/></svg><span>Drag to rotate</span>';
@@ -104,45 +120,57 @@
     if (window.ResizeObserver) new ResizeObserver(function () { self.resize(); }).observe(el);
     else window.addEventListener('resize', function () { self.resize(); });
 
+    // Lazy: frames only start loading when the stone is (nearly) on screen
     if (window.IntersectionObserver) {
+      this.visible = false;
       new IntersectionObserver(function (es) {
         es.forEach(function (e) {
           self.visible = e.isIntersecting;
           if (e.isIntersecting) { self.start(); self.kick(); }
         });
-      }, { rootMargin: '300px 0px' }).observe(el);
+      }, { rootMargin: '200px 0px' }).observe(el);
     } else {
       this.start();
     }
     this.bindInput();
   };
 
-  Spinner.prototype.src = function (i) { return MEDIA_BASE + this.id + '/' + pad3(i) + '.jpg'; };
+  Spinner.prototype.src = function (i) { return MEDIA_BASE + this.id + '/' + pad3(i) + '.' + this.ext; };
 
   Spinner.prototype.start = function () {
     if (this.started) return;
     this.started = true;
-    // Load order starts at the top frame, so it's the first thing on screen
-    var self = this, queue = loadOrder(this.n).map(function (i) { return (i + self.top) % self.n; }), tried = new Uint8Array(this.n), active = 0;
+    // Load order starts at the top frame, then every 8th frame, then the rest
+    var self = this, lo = loadOrder(this.n), tried = new Uint8Array(this.n), active = 0;
+    var queue = lo[0].map(function (i) { return (i + self.top) % self.n; });
+    var coarse = {};
+    queue.slice(0, lo[1]).forEach(function (i) { coarse[i] = 1; });
+    this.coarseLeft = lo[1];
     function next() {
-      while (active < PARALLEL && queue.length) load(queue.shift());
+      // The top frame goes alone first (nothing competes with it); then PARALLEL at a time
+      var limit = self.loaded + self.failed === 0 ? 1 : PARALLEL;
+      while (active < limit && queue.length) load(queue.shift());
+    }
+    function settle(i) {
+      if (coarse[i]) { delete coarse[i]; if (--self.coarseLeft === 0) self.hint.classList.remove('gone'); }
     }
     function load(i) {
       active++;
       var im = new Image();
       im.decoding = 'async';
+      if (i === self.top && im.fetchPriority !== undefined) im.fetchPriority = 'high';
       im.onload = function () {
-        active--; self.imgs[i] = im; self.loaded++; self.progress();
+        active--; self.imgs[i] = im; self.loaded++; settle(i); self.progress();
         if (self.drawn < 0) self.draw(true);           // first frame on screen as soon as it arrives
         next();
       };
       im.onerror = function () {
         active--;
         if (!tried[i]) { tried[i] = 1; queue.push(i); }  // one more try, at the end of the queue
-        else { self.failed++; self.progress(); }
+        else { self.failed++; settle(i); self.progress(); }
         next();
       };
-      im.src = self.src(i);
+      im.src = self.src(i);                            // the page's top-frame image is reused from cache
     }
     next();
     this.loop();
@@ -150,8 +178,8 @@
 
   Spinner.prototype.progress = function () {
     var done = this.loaded + this.failed, f = done / this.n;
-    this.ring.setAttribute('stroke-dashoffset', String(125.66 * (1 - f)));
-    this.pct.textContent = 'Loading ' + Math.round(f * 100) + '%';
+    this.ring.setAttribute('stroke-dashoffset', String(113.1 * (1 - f)));
+    this.pct.textContent = '360° ' + Math.round(f * 100) + '%';
     if (done >= this.n) {
       this.loadEl.classList.add('done');
       if (!this.loaded) this.fail();
@@ -196,6 +224,7 @@
     ctx.imageSmoothingQuality = 'high';
     ctx.drawImage(im, (c.width - w) / 2, (c.height - h) / 2, w, h);
     this.drawn = k;
+    if (this.poster) { this.poster.classList.add('gone'); this.poster = null; }
   };
 
   Spinner.prototype.kick = function () { if (!this.raf && this.started) this.loop(); };
@@ -283,24 +312,36 @@
       if (!el || !spin || !valid(spin.id, Number(spin.n))) return null;
       injectCss();
       var n = Number(spin.n), top = Math.floor(Number(spin.top) || 0);
-      return new Spinner(el, String(spin.id), n, top >= 0 && top < n ? top : 0);
+      return new Spinner(el, String(spin.id), n, top >= 0 && top < n ? top : 0, Number(spin.v) || 0);
     },
     mountAll: function (root) {
       var els = (root || document).querySelectorAll('[data-spin-id][data-spin-n]'), out = [];
       for (var i = 0; i < els.length; i++) {
         if (els[i].__s360) continue;
         var s = Spin360.mount(els[i], { id: els[i].getAttribute('data-spin-id'), n: Number(els[i].getAttribute('data-spin-n')),
-          top: Number(els[i].getAttribute('data-spin-top') || 0) });
+          top: Number(els[i].getAttribute('data-spin-top') || 0), v: Number(els[i].getAttribute('data-spin-v') || 0) });
         if (s) { els[i].__s360 = s; out.push(s); }
       }
       return out;
     },
-    // HTML placeholder for a page's own markup; mountAll() fills it in
-    html: function (spin) {
+    // Top frame URL (a plain image a page can show before the script runs)
+    topSrc: function (spin) {
+      var n = Number(spin.n), top = Math.floor(Number(spin.top) || 0);
+      return MEDIA_BASE + spin.id + '/' + pad3(top >= 0 && top < n ? top : 0) + '.' + (Number(spin.v) >= WEBP_SINCE ? 'webp' : 'jpg');
+    },
+    // HTML placeholder for a page's own markup; mountAll() fills it in. The top frame is a lazy
+    // <img> in the markup, so it shows as soon as the stone nears the screen; `opts.still` (our own
+    // /media/ still image) sits behind it until it arrives.
+    html: function (spin, opts) {
       if (!Spin360.valid(spin)) return '';
-      var top = Math.floor(Number(spin.top) || 0);
+      injectCss();
+      var top = Math.floor(Number(spin.top) || 0), v = Number(spin.v) || 0;
+      var still = opts && typeof opts.still === 'string' && opts.still.indexOf(MEDIA_BASE) === 0 &&
+        /^[a-f0-9\/.]+$/.test(opts.still.slice(MEDIA_BASE.length)) ? opts.still : '';
       return '<div class="s360-host" data-spin-id="' + spin.id + '" data-spin-n="' + Number(spin.n) +
-        '" data-spin-top="' + (top >= 0 && top < spin.n ? top : 0) + '"></div>';
+        '" data-spin-top="' + (top >= 0 && top < spin.n ? top : 0) + '" data-spin-v="' + v + '"' +
+        (still ? ' style="background-image:url(\'' + still + '\')"' : '') + '>' +
+        '<img class="s360-poster" src="' + Spin360.topSrc(spin) + '" alt="" loading="lazy" decoding="async"></div>';
     },
   };
   window.Spin360 = Spin360;

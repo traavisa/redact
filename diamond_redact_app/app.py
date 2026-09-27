@@ -403,8 +403,9 @@ def rehost_media(stones_payload, qid=None, client=""):
     When capture is allowed for this client (spin_jobs.capture_allowed: SPIN_ENABLED "true",
     or "test" and the client is Pure Carbon Group), stones whose video is a 360 viewer page
     are then captured as our own frames from their certificate's 360 API fields
-    (spin_capture.py) for up to spin_jobs.SAVE_BUDGET seconds; slower ones keep the /v/
-    link for now and are finished after saving. Returns (notes, jobs). Never raises."""
+    (spin_capture.py) in the background, all stones in parallel. The quote is saved with the /v/
+    link and the saved quote is updated as each one finishes. Returns (notes, jobs); never waits
+    for a capture and never raises."""
     import quote_media, spin_jobs
     notes = []
     import spin_capture
@@ -435,11 +436,7 @@ def rehost_media(stones_payload, qid=None, client=""):
             notes += quote_media.notes_for(label, ({}, img))
         else:
             notes += quote_media.notes_for(label, (vid, img))
-    try:
-        notes += jobs.wait(stones_payload)
-    except Exception:
-        pass
-    return notes, jobs
+    return notes, jobs          # captures run in the background; the quote is saved straight away
 
 _LOOKUP_STATE = {}   # sign-in token cache for background certificate lookups
 
@@ -462,6 +459,8 @@ import spin_jobs as _spin_jobs
 # quotes keep their private viewer links. "test" = capture only for Pure Carbon Group quotes;
 # "true" = capture for every client. See spin_jobs.mode().
 _spin_jobs.SPIN_MODE = _spin_jobs.mode(get_setting("SPIN_ENABLED"))
+# Frames kept per stone (default 72, evenly thinned, top_index always kept). SPIN_MAX_FRAMES=120 raises it.
+_spin_capture.set_max_frames(get_setting("SPIN_MAX_FRAMES") or _spin_capture.MAX_FRAMES)
 
 
 def save_quote(client, stones_payload, expiry_days):
@@ -495,29 +494,49 @@ def save_quote(client, stones_payload, expiry_days):
     load_quote_history.clear()
     return shorten(f"{QUOTE_BASE}/q/{qid}")
 
-def show_media_notes():
-    """Small note under a new quote link: media handled differently, and what 360 capture
-    found for each stone (frame count and pattern, or why it failed)."""
+def show_media_notes(where="cq"):
+    """Small note under a new quote link: media handled differently, then the 360 capture panel
+    (only in the tab where the quote was made)."""
     notes = st.session_state.get("media_notes") or []
     if notes:
         st.caption("Media note — the quote was saved; these items were handled differently:\n\n"
                    + "\n".join(f"- {n}" for n in notes))
+    show_capture_status(where)
+
+def show_capture_status(where):
+    """"360 processing: 2 of 3 done", refreshing itself every 2 s while captures run, then the
+    capture log (method, frames, top frame, timing, size) and per-stone details."""
     qid = st.session_state.get("capture_qid")
-    if qid:
-        import spin_jobs
-        stat = spin_jobs.status(qid)
-        if stat:
-            st.caption("360 capture log:\n\n" + "\n".join(f"- {_md(label)}: {_md(capture_log_line(v))}"
-                                                              for label, v in stat.items()))
-            with st.expander("360 capture status — details for each stone", expanded=False):
-                for label, v in stat.items():
-                    st.markdown(f"**{_md(label)}** ({v['at']} UTC): {_md(v['note'])}")
-                    if v.get("facts"):
-                        st.code("\n".join(v["facts"]), language=None)
-                if any("capturing" in v["note"] for v in stat.values()):
-                    st.caption("Still capturing — the saved quote updates itself when done.")
-                if st.button("Refresh capture status", key=f"cap_refresh_{qid}"):
-                    st.rerun()
+    if not qid or st.session_state.get("capture_tab", "cq") != where:
+        return
+    import spin_jobs
+    done, total = spin_jobs.progress(qid)
+    if not total:
+        return
+    live = done < total
+    if live:
+        st.session_state["capture_live"] = qid
+    st.fragment(run_every=2 if live else None)(_capture_panel)(qid, where)
+
+def _capture_panel(qid, where):
+    import spin_jobs
+    done, total = spin_jobs.progress(qid)
+    stat = spin_jobs.status(qid)
+    if done < total:
+        st.info(f"⏳ 360 processing: {done} of {total} done — the quote link already works; "
+                "each stone switches to its spinner as soon as it's ready.")
+    else:
+        st.caption(f"✅ 360 processing: {done} of {total} done.")
+        if st.session_state.get("capture_live") == qid:        # stop refreshing: one last full rerun
+            st.session_state["capture_live"] = None
+            st.rerun()
+    st.caption("360 capture log:\n\n" + "\n".join(f"- {_md(label)}: {_md(capture_log_line(v))}"
+                                                      for label, v in stat.items()))
+    with st.expander("360 capture status — details for each stone", expanded=False):
+        for label, v in stat.items():
+            st.markdown(f"**{_md(label)}** ({v['at']} UTC): {_md(v['note'])}")
+            if v.get("facts"):
+                st.code("\n".join(v["facts"]), language=None)
 
 def capture_log_line(v):
     """One stone's capture log: method, frame count and top frame (or why it wasn't captured)."""
@@ -529,7 +548,15 @@ def capture_log_line(v):
         frames += f" (thinned evenly from {lg['source_frames']})"
     top = (f"top frame: top_index {lg['top_index']} (frame {lg['top_frame']} of the spinner, where it starts)"
            if lg.get("top_index") is not None else f"top frame: frame {lg['top_frame']} of the spinner")
-    return f"method: {lg['method']} · {frames} · {top}"
+    out = f"method: {lg['method']} · {frames} · {top}"
+    tm = lg.get("timing") or {}
+    if tm.get("total_s") is not None:
+        out += (f" · time: fetch {tm.get('fetch_s', 0):.1f}s, re-encode {tm.get('encode_s', 0):.1f}s, "
+                f"upload {tm.get('upload_s', 0):.1f}s, total {tm['total_s']:.1f}s")
+    if tm.get("bytes"):
+        out += (f" · page weight {tm['bytes'] / 1048576:.1f} MB ({tm['bytes'] // max(1, lg['frames']) // 1024} KB a frame; "
+                f"first view {tm.get('first_view_bytes', 0) // 1024} KB)")
+    return out
 
 def _md(t):
     return str(t).replace("*", "\\*").replace("_", "\\_").replace("<", "&lt;")
@@ -806,6 +833,7 @@ with tab2:
                         link = save_quote(q_client, payload, q_expiry)
                     if link:
                         st.session_state.quote_link = link
+                        st.session_state.capture_tab = "cq"
                         st.session_state.bulk_last_link = (link, q_client, n)
                         st.session_state.bulk_upkey += 1      # clears the upload box
                         for sp in payload:
@@ -872,6 +900,7 @@ with tab2:
                 link = save_quote(q_client, stones_payload, q_expiry)
                 if link:
                     st.session_state.quote_link = link
+                    st.session_state.capture_tab = "cq"
                     st.session_state.quote_upkey += 1
                     for s_orig, s_pay in zip(stones_ready, stones_payload):
                         add_history(
@@ -995,6 +1024,7 @@ with tab_ls:
     live_search.render({
         "get_setting": get_setting,
         "save_quote": save_quote,
+        "show_capture_status": show_capture_status,
         "add_history": add_history,
         "client_selector": client_selector,
     })

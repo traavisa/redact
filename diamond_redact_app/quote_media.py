@@ -200,7 +200,8 @@ def _upload(sb_url, key, data, ext, ctype):
     name = f"{uuid.uuid4().hex}.{ext}"
     r = requests.post(f"{sb_url}/storage/v1/object/{BUCKET}/{name}",
                       headers={"apikey": key, "Authorization": f"Bearer {key}", "Content-Type": ctype,
-                               "Cache-Control": "max-age=31536000", "x-upsert": "false"},
+                               "Cache-Control": "public, max-age=31536000, immutable",   # unique names
+                               "x-upsert": "false"},
                       data=data, timeout=(10, 120))
     if r.status_code not in (200, 201):
         raise RuntimeError("upload failed")

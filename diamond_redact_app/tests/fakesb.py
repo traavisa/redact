@@ -34,10 +34,12 @@ class FakeSupabase:
         self.storage = {"quote-media": {f: b"x" for f in files}, "certificates": {}}
         self.block_reads = block_reads
         self.calls = []
+        self.headers = []
 
     # ── routing ──
     def request(self, method, url, params=None, json_body=None, data=None, headers=None):
         self.calls.append((method, url))
+        self.headers.append((method, url, dict(headers or {})))
         u = urlparse(url)
         if not url.startswith(SB):
             return None
@@ -110,4 +112,6 @@ class FakeSupabase:
             return fn
         for m in real:
             monkeypatch.setattr(requests, m, make(m))
+            fn = make(m)
+            monkeypatch.setattr(requests.Session, m, lambda _self, url, *a, _fn=fn, **kw: _fn(url, *a, **kw))
         return self
