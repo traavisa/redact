@@ -121,6 +121,8 @@ def test_removed_code_is_gone():
 def test_criteria_search_media_filter_on_and_off(env, capfd):
     sb, api = env
     at = boot()
+    at.radio(key="ls_type").set_value("Natural")          # the tab opens on Lab-grown / IGI; this test wants everything
+    at.multiselect(key="ls_labs").set_value([]).run()
     at.button(key="ls_search").click().run()
     assert not at.exception, at.exception
     q = [x for x in api.queries if "diamonds_by_query(query:" in x]

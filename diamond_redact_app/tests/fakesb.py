@@ -1,9 +1,19 @@
 """A fake Supabase (REST tables + storage), patched in for requests.get/post/patch/head/delete."""
 import json
+import os
 import re
 from urllib.parse import parse_qs, urlparse
 
 SB = "https://srlbevzrkovruyerixdi.supabase.co"
+SETUP_SQL = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                         "supabase", "quote_media_setup.sql")
+
+
+def bucket_mime_types():
+    """allowed_mime_types of the quote-media bucket exactly as supabase/quote_media_setup.sql sets them."""
+    sql = open(SETUP_SQL).read()
+    m = re.search(r"array\[([^\]]*)\]", sql[sql.index("insert into storage.buckets"):])
+    return re.findall(r"'([^']+)'", m.group(1))
 
 
 class Resp:
@@ -35,6 +45,7 @@ class FakeSupabase:
         self.block_reads = block_reads
         self.calls = []
         self.headers = []
+        self.allowed_mime = {"quote-media": bucket_mime_types()}     # the real bucket rules; None = anything
 
     # ── routing ──
     def request(self, method, url, params=None, json_body=None, data=None, headers=None):
@@ -58,6 +69,11 @@ class FakeSupabase:
             return Resp(200, content=b"x") if ok else Resp(400, {"statusCode": "404", "error": "not_found"})
         m = re.match(r"/storage/v1/object/([^/]+)/(.+)$", path)
         if m and method == "POST":
+            ctype = str((headers or {}).get("Content-Type", "")).split(";")[0].strip()
+            allowed = self.allowed_mime.get(m.group(1))
+            if allowed is not None and ctype not in allowed:
+                return Resp(415, {"statusCode": "415", "error": "invalid_mime_type",
+                                  "message": f"mime type {ctype} is not supported"})
             self.storage.setdefault(m.group(1), {})[m.group(2)] = data
             return Resp(200, {"Key": m.group(2)})
         return Resp(404, {})

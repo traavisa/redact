@@ -14,7 +14,7 @@ const PREVIEW_IMAGES = {
   'pure-carbon-group': 'Pure Carbon Group.png', 'cavalier': 'Cavalier.png', 'foe-and-dear': 'Foe & Dear.png',
   'harlings': 'Harlings.png', 'rodan': 'Rodan.png', 'nfr': 'NFR.png', 'nash-jewellers': 'Nash.png',
   'janinas': 'janinas.jpg', 'ijl': 'IJL2.png', 'gem-by-carati': 'gem.jpg', 'vena-nova': 'Vena.jpg',
-  'touch-of-gold': 'TOG.png',
+  'touch-of-gold': 'TOG.png', 'spence': 'Spence.png',
 };
 
 function slugOf(name) {

@@ -30,7 +30,11 @@ def _in(name, t):
     return {"name": name, "description": None, "type": t}
 
 
-def schema(media_flags=("has_image", "has_v360", "has_video"), stock_filter=True, cert_pdf=True, v360=False):
+RANGE_FIELDS = {"length": "length", "width": "width", "height": "depth"}     # query filter -> certificate field
+
+
+def schema(media_flags=("has_image", "has_v360", "has_video"), stock_filter=True, cert_pdf=True, v360=False,
+           range_filters=()):
     s = _scalar("String")
     cert_fields = [_f(n, s) for n in ("id", "lab", "shape", "certNumber", "cut", "clarity", "polish", "symmetry",
                                        "color", "floInt", "floCol")]
@@ -48,6 +52,7 @@ def schema(media_flags=("has_image", "has_v360", "has_video"), stock_filter=True
     if stock_filter:
         q_in.append(_in("supplier_stock_ids", _list(s)))
     q_in += [_in(f, _scalar("Boolean")) for f in media_flags]
+    q_in += [_in(f, {"kind": "INPUT_OBJECT", "name": "FloatRange", "ofType": None}) for f in range_filters]
     qarg = {"name": "query", "type": {"kind": "INPUT_OBJECT", "name": "DiamondQuery", "ofType": None}}
     root = [_f("diamonds_by_query", _obj("Result"), [qarg, {"name": "offset", "type": _scalar("Int")},
                                                      {"name": "limit", "type": _scalar("Int")}]),
@@ -60,12 +65,16 @@ def schema(media_flags=("has_image", "has_v360", "has_video"), stock_filter=True
              {"kind": "INPUT_OBJECT", "name": "DiamondQuery", "inputFields": q_in},
              {"kind": "OBJECT", "name": "V360", "fields": [_f("url", s), _f("frame_count", _scalar("Int")),
                                                           _f("top_index", _scalar("Int"))]},
-             {"kind": "SCALAR", "name": "String"}, {"kind": "SCALAR", "name": "Boolean"}]
+             {"kind": "INPUT_OBJECT", "name": "FloatRange",
+              "inputFields": [_in("from", _scalar("Float")), _in("to", _scalar("Float"))]},
+             {"kind": "SCALAR", "name": "String"}, {"kind": "SCALAR", "name": "Boolean"},
+             {"kind": "SCALAR", "name": "Float"}]
     return {"__schema": {"queryType": {"name": "Query"}, "types": types}}
 
 
 def stone(sid, cert, lab="IGI", price=100000, lg=True, stock=None, video=True, image=True, pdf=True,
-          availability="AVAILABLE", carat=1.01, color="G", clarity="VS1", shape="ROUND", v360=None):
+          availability="AVAILABLE", carat=1.01, color="G", clarity="VS1", shape="ROUND", v360=None,
+          length=6.5, width=6.48, depth=4.0):
     return {"id": f"item-{sid}", "price": price, "_lg": lg,
             "diamond": {"id": sid, "availability": availability,
                         "video": f"{HOST}/v360/{sid}/view.html" if video else None,
@@ -74,7 +83,7 @@ def stone(sid, cert, lab="IGI", price=100000, lg=True, stock=None, video=True, i
                         "certificate": {"id": f"c-{sid}", "lab": lab, "certNumber": cert, "shape": shape,
                                         "carats": carat, "color": color, "clarity": clarity, "cut": "EX",
                                         "polish": "EX", "symmetry": "EX", "floInt": "NON", "floCol": None,
-                                        "length": 6.5, "width": 6.48, "depth": 4.0, "depthPercentage": 61.5,
+                                        "length": length, "width": width, "depth": depth, "depthPercentage": 61.5,
                                         "table": 57.0,
                                         "pdfUrl": f"{HOST}/certs/{cert}.pdf" if pdf else None,
                                         "v360": v360}}}
@@ -111,6 +120,13 @@ class FakeAPI:
             if "certificate_numbers" in qi and c["certNumber"] not in qi["certificate_numbers"]:
                 continue
             if "supplier_stock_ids" in qi and d["supplierStockId"] not in qi["supplier_stock_ids"]:
+                continue
+            bad = False
+            for name, field in RANGE_FIELDS.items():
+                r = qi.get(name)
+                if r and not (r["from"] <= (c[field] if c[field] is not None else -1) <= r["to"]):
+                    bad = True
+            if bad:
                 continue
             if qi.get("has_image") and not d["image"]:
                 continue

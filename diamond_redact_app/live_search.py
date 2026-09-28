@@ -138,12 +138,14 @@ def _f(v, default=None):
 
 
 DEFAULTS = {
-    "ls_type": "Natural", "ls_shapes": [], "ls_ct_min": None, "ls_ct_max": None,
+    "ls_type": "Lab-grown", "ls_shapes": [], "ls_ct_min": None, "ls_ct_max": None,
     "ls_col_mode": "White (D–Z)", "ls_col": ("D", "Z"), "ls_fancy_col": "Yellow", "ls_fancy_int": [],
     "ls_cla": ("FL", "I3"), "ls_cut": "Any", "ls_pol": "Any", "ls_sym": "Any",
-    "ls_flo": [], "ls_labs": [], "ls_pr_min": None, "ls_pr_max": None, "ls_pr_basis": "My cost",
+    "ls_flo": [], "ls_labs": ["IGI"], "ls_pr_min": None, "ls_pr_max": None, "ls_pr_basis": "My cost",
     "ls_ratio_min": None, "ls_ratio_max": None, "ls_depth_min": None, "ls_depth_max": None,
     "ls_table_min": None, "ls_table_max": None, "ls_as_grown": False,
+    "ls_length_min": None, "ls_length_max": None, "ls_width_min": None, "ls_width_max": None,
+    "ls_height_min": None, "ls_height_max": None,               # mm; "height" = the stone's depth in mm
     "ls_hide_novid": True, "ls_hide_noimg": True,
 }
 FLEX_DEFAULTS = {"ls_fx_col": False, "ls_fx_cla": False, "ls_fx_ct": False, "ls_fx_ct_tol": "±0.05",
@@ -154,7 +156,7 @@ def _init_state(default_markup, default_rate):
     ss = st.session_state
     for k, v in {**DEFAULTS, **FLEX_DEFAULTS}.items():
         if k not in ss:
-            ss[k] = v
+            ss[k] = list(v) if isinstance(v, list) else v
     ss.setdefault("ls_markup", float(default_markup))
     ss.setdefault("ls_rate", float(default_rate))
     ss.setdefault("ls_notes", {})
@@ -253,6 +255,12 @@ PARSE_FIELDS = [   # (name, kind, options, description)
     ("table_min", "number", None, "minimum table %"),
     ("table_max", "number", None, "maximum table %"),
     ("as_grown_only", "bool", None, "lab-grown only: as-grown (untreated) stones only"),
+    ("length_min", "number", None, "minimum length in mm (the longer side)"),
+    ("length_max", "number", None, "maximum length in mm (the longer side)"),
+    ("width_min", "number", None, "minimum width in mm (the shorter side)"),
+    ("width_max", "number", None, "maximum width in mm (the shorter side)"),
+    ("height_min", "number", None, "minimum depth (height) in mm — NOT depth %"),
+    ("height_max", "number", None, "maximum depth (height) in mm — NOT depth %"),
 ]
 PARSE_SCHEMA = {"type": "object", "additionalProperties": False,
                 "required": [f[0] for f in PARSE_FIELDS],
@@ -273,6 +281,14 @@ PARSE_SYSTEM = (
     "- Prices are in Canadian dollars. A budget from a jeweller for their customer is usually the "
     "client price; only use 'cost' if the request says it's the dealer's cost. If unclear, "
     "leave price_basis unstated.\n"
+    "- Sizes are in millimetres: length is the longer side, width the shorter side, height (depth in mm) "
+    "the stone's depth. 'at least 7mm wide' -> width_min=7 (stated, not interpreted); 'up to 9mm long' -> "
+    "length_max=9. 'X x Y' or 'X by Y' means length X and width Y; 'around/about/approx' -> that size "
+    "+/-0.2mm (interpreted; e.g. 'around 9 x 7' -> length 8.8-9.2, width 6.8-7.2, note '9 x 7 mm +/-0.2, confirm'). "
+    "A single size with no 'x' (e.g. '6.5mm round') is both length and width, +/-0.15 (interpreted). "
+    "Depth in percent stays depth_min/depth_max; only a depth in mm is height_min/height_max.\n"
+    "- IGI reports are usually lab-grown and GIA/HRD/AGS reports usually natural: if a lab is named but the "
+    "type is not, set type from that with interpreted=true and a note ending ', confirm'.\n"
     "- Output JSON only.")
 
 
@@ -386,6 +402,15 @@ def apply_parse(result):
     v, i, n = get("as_grown_only")
     if v is True:
         setk("ls_as_grown", True, i, n)
+    for dim in ("length", "width", "height"):
+        num(f"{dim}_min", f"ls_{dim}_min", 0.5, 100)
+        num(f"{dim}_max", f"ls_{dim}_max", 0.5, 100)
+        lo, hi = ss[f"ls_{dim}_min"], ss[f"ls_{dim}_max"]
+        if lo and hi and lo > hi:
+            ss[f"ls_{dim}_min"], ss[f"ls_{dim}_max"] = hi, lo
+    # The IGI default only makes sense for lab-grown: a natural request that names no lab searches any lab
+    if ss.ls_type == "Natural" and not get("labs")[0]:
+        ss.ls_labs = []
     ss["ls_notes"] = notes
     ss["ls_ver"] = ss.get("ls_ver", 0) + 1       # re-create the range sliders with the new values
     return filled, notes
@@ -413,6 +438,8 @@ def read_criteria():
         "pr_min": ss.ls_pr_min, "pr_max": ss.ls_pr_max, "pr_client": ss.ls_pr_basis == "Client price",
         "ratio": (ss.ls_ratio_min, ss.ls_ratio_max), "depth": (ss.ls_depth_min, ss.ls_depth_max),
         "table": (ss.ls_table_min, ss.ls_table_max),
+        "length": (ss.ls_length_min, ss.ls_length_max), "width": (ss.ls_width_min, ss.ls_width_max),
+        "height": (ss.ls_height_min, ss.ls_height_max),
         "as_grown": bool(ss.ls_as_grown) and ss.ls_type == "Lab-grown",
         "hide_vid": bool(ss.ls_hide_novid), "hide_img": bool(ss.ls_hide_noimg),
     }
@@ -454,17 +481,27 @@ FILTER_FIELDS = {
     "L/W ratio": ["ratio", "length_width_ratio", "lw_ratio", "l_w_ratio"],
     "Depth %": ["depth_percentage", "depthPercentage", "depth_percent", "depth_pct"],
     "Table %": ["table_percentage", "tablePercentage", "table_percent", "table_pct", "table"],
+    "Length": ["length", "lengths", "length_mm"],
+    "Width": ["width", "widths", "width_mm"],
+    "Depth (mm)": ["height", "height_mm", "depth_mm", "depthMm"],       # plus bare "depth", see _pick
     "As-grown": ["as_grown", "asGrown", "is_as_grown", "treated", "is_treated", "treatment",
                  "treatments", "lab_grown_treatment"],
 }
 # Flex option -> the criterion it widens (for "was this filtered server-side?")
 FLEX_CRITERION = {"col": "Colour", "cla": "Clarity", "ct": "Carat", "budget": "Price",
                   "lab": "Lab", "flo": "Fluorescence"}
-_OPEN_HI = {"Carat": 100.0, "Price": 100_000_000, "L/W ratio": 100.0, "Depth %": 100.0, "Table %": 100.0}
+_OPEN_HI = {"Carat": 100.0, "Price": 100_000_000, "L/W ratio": 100.0, "Depth %": 100.0, "Table %": 100.0,
+            "Length": 100.0, "Width": 100.0, "Depth (mm)": 100.0}
 
 
 def _pick(have, crit, kinds):
-    for name in FILTER_FIELDS[crit]:
+    names = list(FILTER_FIELDS[crit])
+    if crit == "Depth (mm)":
+        # a bare "depth" filter is only the millimetre depth when a separate depth-% filter exists
+        pct = [n for n in FILTER_FIELDS["Depth %"] if have.get(n) and have[n]["kind"] in ("range", "ranges")]
+        if pct and "depth" not in pct:
+            names.append("depth")
+    for name in names:
         spec = have.get(name)
         if spec and spec["kind"] in kinds:
             return name, spec
@@ -631,7 +668,9 @@ def server_query(c, fx, schema, rate, markup, divisor):
         else:
             client("Price")
     # Proportions
-    for crit, (lo, hi) in (("L/W ratio", c["ratio"]), ("Depth %", c["depth"]), ("Table %", c["table"])):
+    for crit, (lo, hi) in (("L/W ratio", c["ratio"]), ("Depth %", c["depth"]), ("Table %", c["table"]),
+                           ("Length", c.get("length", (None, None))), ("Width", c.get("width", (None, None))),
+                           ("Depth (mm)", c.get("height", (None, None)))):
         if lo or hi:
             f, spec = _pick(have, crit, ("range", "ranges"))
             if f:
@@ -801,6 +840,14 @@ def classify(s, c, fx, pv):
         if lo or hi:
             if val is None or (lo and val < lo) or (hi and val > hi):
                 return fail(label)
+    # Dimensions in mm (hard), as listed for the stone (the same fields the server-side filters use):
+    # length is normally the longer side, width the shorter, height = the depth in mm
+    for (lo, hi), val, label in ((c.get("length", (None, None)), s.get("length"), "Length"),
+                                 (c.get("width", (None, None)), s.get("width"), "Width"),
+                                 (c.get("height", (None, None)), s.get("depth_mm"), "Depth (mm)")):
+        if lo or hi:
+            if val is None or (lo and val < lo - 1e-9) or (hi and val > hi + 1e-9):
+                return fail(label)
     # As-grown (hard when the data says so; unknown is flagged on the card)
     if c["as_grown"] and as_grown_status(s) is False:
         return fail("As-grown only")
@@ -809,7 +856,7 @@ def classify(s, c, fx, pv):
 
 FILTER_ORDER = ["Shape", "Carat range", "Fancy colour", "Fancy intensity", "Colour range", "Clarity range",
                 "Cut min", "Polish min", "Symmetry min", "Fluorescence", "Lab", "Price", "Price min",
-                "Price max", "L/W ratio", "Depth %", "Table %", "As-grown only"]
+                "Price max", "L/W ratio", "Depth %", "Table %", "Length", "Width", "Depth (mm)", "As-grown only"]
 
 
 def bucket(stones, c, fx, rate, markup, divisor, stats=None):
@@ -993,6 +1040,30 @@ def _clear_picks():
         del st.session_state[k]
 
 
+NEW_SEARCH_CLEARS = ("ls_results", "ls_picks_ai", "ls_diag", "ls_lookup", "ls_lookup_diag", "ls_parse_msg",
+                     "ls_parse_err", "ls_last_link")
+
+
+def _new_search():
+    """The "New search" button: everything on the Live Search tab back to how it opens — the pasted
+    request, all criteria (and flex boxes) at their defaults, results, selections, the look-up box and
+    its report, top picks, and notes. Markup % and the USD→CAD rate, the chosen mode and the client
+    picked for quotes stay as they are."""
+    ss = st.session_state
+    for k, v in {**DEFAULTS, **FLEX_DEFAULTS}.items():
+        ss[k] = list(v) if isinstance(v, list) else v
+    ss["ls_req"] = ""
+    ss["ls_lk_text"] = ""
+    ss["ls_notes"] = {}
+    ss["ls_ver"] = ss.get("ls_ver", 0) + 1            # the range sliders are re-created at their defaults
+    for k in NEW_SEARCH_CLEARS:
+        ss[k] = None
+    ss.pop("ls_autosearch", None)
+    _clear_picks()
+    for k in [k for k in ss if str(k).startswith(("ls_sort", "ls_view", "ls_show_n"))]:
+        del ss[k]
+
+
 def render(deps):
     """deps: get_setting, save_quote, add_history, client_selector (all from app.py)."""
     try:
@@ -1028,7 +1099,14 @@ def _render(deps):
     _amber_css()
     client = src.Client(url, user, pw, ss)
 
-    mode = st.radio("Mode", MODES, horizontal=True, key="ls_mode", label_visibility="collapsed")
+    a, b = st.columns([3, 1])
+    with a:
+        mode = st.radio("Mode", MODES, horizontal=True, key="ls_mode", label_visibility="collapsed")
+    with b:
+        st.button("New search", type="primary", key="ls_new_search", on_click=_new_search,
+                  use_container_width=True,
+                  help="Clears the request, criteria, results, selections, look-up and notes. "
+                       "Markup % and the USD → CAD rate stay.")
     if mode == MODES[1]:
         _lookup_mode(client, ai_key, divisor, deps)
         return
@@ -1139,6 +1217,19 @@ def _render(deps):
                 st.number_input(f"{label} min", min_value=0.0, step=step, format="%.2f", key=lo); _note(lo)
             with b:
                 st.number_input(f"{label} max", min_value=0.0, step=step, format="%.2f", key=hi); _note(hi)
+
+    with st.expander("Dimensions in mm (length, width, depth)",
+                     expanded=any(ss.get(k) for k in ("ls_length_min", "ls_length_max", "ls_width_min",
+                                                      "ls_width_max", "ls_height_min", "ls_height_max"))):
+        st.caption("Stones outside these are left out (no flex). Length and width are as listed for the stone "
+                   "(length is normally the longer side).")
+        for label, lo, hi in (("Length", "ls_length_min", "ls_length_max"), ("Width", "ls_width_min", "ls_width_max"),
+                              ("Depth (height)", "ls_height_min", "ls_height_max")):
+            a, b = st.columns(2)
+            with a:
+                st.number_input(f"{label} min (mm)", min_value=0.0, step=0.1, format="%.2f", key=lo); _note(lo)
+            with b:
+                st.number_input(f"{label} max (mm)", min_value=0.0, step=0.1, format="%.2f", key=hi); _note(hi)
 
     a, b = st.columns(2)
     with a:
@@ -1460,6 +1551,10 @@ def _criteria_text(c, fx):
     if c["pr_min"] or c["pr_max"]:
         basis = "client price" if c["pr_client"] else "cost"
         parts.append(f"{basis} {_fmt_money(c['pr_min'] or 0)}–{_fmt_money(c['pr_max']) if c['pr_max'] else 'any'}")
+    for lbl, key in (("length", "length"), ("width", "width"), ("depth", "height")):
+        lo, hi = c.get(key, (None, None))
+        if lo or hi:
+            parts.append(f"{lbl} {lo or 0:g}–{hi:g} mm" if hi else f"{lbl} {lo:g}+ mm")
     if c["as_grown"]:
         parts.append("as-grown only")
     return ", ".join(parts)

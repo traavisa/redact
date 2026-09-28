@@ -307,6 +307,10 @@ class SaveJobs:
             tm = (res.get("log") or {}).get("timing")
             if tm:
                 _log("spin-timing", {"quote": self.qid, "stone": label, "frames": res["log"]["frames"], **tm})
+            elif not res.get("ok"):                     # a failed capture: why (storage's own message, masked) and how far it got
+                _log("spin-timing", {"quote": self.qid, "stone": label, "ok": False,
+                                     "error": sc.mask_text(res.get("note"), 200),
+                                     **(res.get("fail_timing") or {})})
 
 
 PENDING = "capturing 360 frames…"

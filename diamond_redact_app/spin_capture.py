@@ -145,6 +145,35 @@ def _clean_text(t):
     return _NAME.sub("[source]", str(t))
 
 
+_URL = re.compile(r"https?://\S+")
+
+
+def mask_text(t, limit=140):
+    """A storage error message made safe for the capture log: web addresses become [host]/…,
+    long IDs become <id>, the supplier name is removed, control characters dropped, length capped."""
+    t = re.sub(r"\s+", " ", str(t or "")).strip()
+    t = _URL.sub(lambda m: mask(m.group(0)), t)
+    t = _LONG_ID.sub("<id>", t)
+    t = _NAME.sub("[source]", t)
+    return t if len(t) <= limit else t[:limit - 1] + "…"
+
+
+def storage_error(r):
+    """The storage service's own words for a failed upload, masked: 'upload HTTP 415: mime type
+    image/webp is not supported'. Falls back to the status alone."""
+    msg = ""
+    try:
+        body = r.json()
+        if isinstance(body, dict):
+            msg = body.get("message") or body.get("error_description") or body.get("error") or ""
+            if body.get("error") and body.get("error") not in msg:
+                msg = f"{body['error']}: {msg}" if msg else body["error"]
+    except Exception:
+        msg = getattr(r, "text", "") or ""
+    msg = mask_text(msg)
+    return f"upload HTTP {r.status_code}" + (f": {msg}" if msg else "")
+
+
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 def _is_image(url):
     """True if the URL serves an image (checked from the file's own first bytes)."""
@@ -404,7 +433,7 @@ def _upload_frame(sb_url, key, path, data):
         if (r.status_code == 429 or r.status_code >= 500) and attempt < RETRIES:
             _retry_wait(attempt, r)
             continue
-        raise RuntimeError(f"upload HTTP {r.status_code}")
+        raise RuntimeError(storage_error(r))
 
 
 def _remove(sb_url, key, paths):
@@ -498,7 +527,7 @@ def _safe_upload(sb_url, key, path, data):
         _upload_frame(sb_url, key, path, data)
         return None
     except Exception as e:
-        return str(e)[:60]
+        return mask_text(e, 160)
 
 
 _cache = {}                   # viewer URL -> result, so re-quoting a stone doesn't re-capture
@@ -519,6 +548,7 @@ def capture(sb_url, key, viewer_url, hint=None):
         if viewer_url in _cache:
             return _cache[viewer_url]
     t0 = time.time()
+    timing = {}                                        # filled by store_frames, kept when a capture fails
     try:
         fs, facts = find_frames(viewer_url, hint)
         if fs is None:
@@ -529,7 +559,6 @@ def capture(sb_url, key, viewer_url, hint=None):
             raise CaptureFailed("frames aren't all from the stone's own v360 folder")
         else:
             facts.append(f"method: {fs.method} — {len(fs.urls)} frames via {fs.source}, pattern {fs.pattern}")
-            timing = {}
             folder, n, top = store_frames(sb_url, key, fs.urls, facts, fs.top, timing)
             log = {"method": fs.source, "frames": n, "source_frames": len(fs.urls),
                    "top_index": fs.top, "top_frame": top, "timing": timing}
@@ -540,12 +569,15 @@ def capture(sb_url, key, viewer_url, hint=None):
                            + f", starts on top_index {fs.top}; pattern {fs.pattern}"}
     except CaptureFailed as e:
         facts = locals().get("facts") or []
-        res = {"ok": False, "spin": None, "video": "", "facts": facts + [str(e)], "note": str(e)}
+        res = {"ok": False, "spin": None, "video": "", "facts": facts + [str(e)], "note": str(e),
+               "fail_timing": timing}
     except Exception as e:
         facts = locals().get("facts") or []
         res = {"ok": False, "spin": None, "video": "", "facts": facts + [type(e).__name__],
                "note": f"capture error ({type(e).__name__})"}
     res["seconds"] = round(time.time() - t0, 1)
+    if res.get("fail_timing") is not None:
+        res["fail_timing"]["total_s"] = res["seconds"]
     if res.get("log"):
         tm = res["log"]["timing"]
         tm["total_s"] = res["seconds"]                     # the whole capture, API field checks included

@@ -1,4 +1,4 @@
-"""Certificate redaction and grading-data extraction for IGI, GIA and GIA Colour PDFs.
+"""Certificate redaction and grading-data extraction for IGI, GIA, GIA Colour, IGI Photo and GIA Dossier PDFs.
 
 Used by Create quote (uploaded certificates) and by Live Search / direct lookup (certificates
 fetched from the stone data, see cert_attach.py). Masks all but the last 4 digits of the
@@ -37,7 +37,87 @@ ZONES = {
     },
 }
 
+# Two further layouts (added after the three above, which are untouched):
+#   "IGI Photo"   — the IGI report whose diamond photo carries the inscription number mid-photo
+#                   ("Sample Image Used"); same page and other number positions as "IGI".
+#   "GIA Dossier" — the compact GIA Natural Diamond Dossier (509 x 360 pt): the report number at
+#                   the top, in the grading block and in the laser inscription line.
+# Their zones mark "last4" places: every run of 7+ digits found there is masked up to the last
+# 4 digits, worked out from the glyph positions (not a fixed share of the box). Their "meta"
+# entry gives the lab they belong to and the exact page size they are made for.
+_IGI_PLACES = ("num_top_centre", "num_left", "num_left_insc", "num_right_top", "num_right_insc",
+               "num_vert_report", "num_vert_insc")
+ZONES["IGI Photo"] = {k: dict(ZONES["IGI"][k], last4=True) for k in _IGI_PLACES}
+ZONES["IGI Photo"]["num_diamond_photo"] = {"x0":640.0,"y0":184.0,"x1":700.0,"y1":196.0,"last4":True}
+ZONES["IGI Photo"]["qr"] = dict(ZONES["IGI"]["qr"])
+# The barcode above the date encodes the report number: blanked (its area must come out white).
+ZONES["IGI Photo"]["barcode"] = {"x0":817.2,"y0":45.1,"x1":913.6,"y1":60.3,"pad":0.5,"blank":True}
+ZONES["GIA Dossier"] = {
+    "num_head":   {"x0":350.2,"y0":36.1, "x1":414.1,"y1":49.6, "last4":True},
+    "num_report": {"x0":189.3,"y0":92.0, "x1":229.9,"y1":100.5,"last4":True},
+    "num_insc":   {"x0":80.7, "y0":252.4,"x1":120.6,"y1":260.8,"last4":True},
+    "qr":         {"x0":441.2,"y0":283.85,"x1":495.2,"y1":337.85,"pad":0.0},
+}
+LAYOUT_META = {
+    "IGI Photo":   {"lab": "IGI", "page": (1008.0, 612.0)},
+    "GIA Dossier": {"lab": "GIA", "page": (509.05, 360.0)},
+}
+PAGE_TOL = 3.0
+KEEP_DIGITS = 4
+MIN_MASKED_RUN = 7      # a digit run shorter than this isn't a report / inscription number
+
 PADDING       = 1.5
+
+
+def lab_of(cert_type):
+    """The lab a layout belongs to: 'IGI', 'GIA' or 'GIA Colour' (what quotes store as cert_type)."""
+    return LAYOUT_META.get(cert_type, {}).get("lab", cert_type)
+
+
+def page_fits(page, cert_type):
+    """True when the page is the exact size a last4 layout was made for (always True for the older layouts)."""
+    want = LAYOUT_META.get(cert_type, {}).get("page")
+    if not want:
+        return True
+    return abs(page.rect.width - want[0]) <= PAGE_TOL and abs(page.rect.height - want[1]) <= PAGE_TOL
+
+
+def zone_rect(z, pad=None):
+    p = z.get("pad", PADDING) if pad is None else pad
+    return fitz.Rect(z["x0"] - p, z["y0"] - p, z["x1"] + p, z["y1"] + p)
+
+
+def last4_rects(page, area, keep=KEEP_DIGITS):
+    """Rectangles that hide every digit but the last `keep` of each number (7+ digits, plus an
+    'LG' stuck to it) whose glyphs touch `area`. Positions come from the glyphs themselves."""
+    rects = []
+    for blk in page.get_text("rawdict")["blocks"]:
+        for line in blk.get("lines", []):
+            dx, dy = line.get("dir", (1, 0))
+            for span in line["spans"]:
+                chars = span["chars"]
+                text = "".join(c["c"] for c in chars)
+                for m in _re.finditer(r"\d{%d,}" % MIN_MASKED_RUN, text):
+                    a, b = m.start(), m.end()
+                    if not fitz.Rect(*chars[a]["bbox"]).intersects(area) and \
+                       not any(fitz.Rect(*c["bbox"]).intersects(area) for c in chars[a:b]):
+                        continue
+                    if text[max(0, a - 2):a] == "LG":
+                        a -= 2
+                    hide, kept = chars[a:b - keep], chars[b - keep]
+                    r = fitz.Rect(*hide[0]["bbox"])
+                    for c in hide[1:]:
+                        r |= fitz.Rect(*c["bbox"])
+                    k = fitz.Rect(*kept["bbox"])
+                    if abs(dx) >= abs(dy):                     # horizontal
+                        if dx > 0: r.x1 = min(r.x1, k.x0 - 0.1)
+                        else:      r.x0 = max(r.x0, k.x1 + 0.1)
+                    else:                                      # vertical
+                        if dy < 0: r.y0 = max(r.y0, k.y1 + 0.1)
+                        else:      r.y1 = min(r.y1, k.y0 - 0.1)
+                    if not r.is_empty:
+                        rects.append(r)
+    return rects
 
 
 def redact_pdf(file_bytes, cert_type, logo_img):
@@ -45,9 +125,15 @@ def redact_pdf(file_bytes, cert_type, logo_img):
     doc = fitz.open(stream=file_bytes, filetype="pdf")
     for page in doc:
         for key, z in zones.items():
-            x0=z["x0"]-PADDING; y0=z["y0"]-PADDING
-            x1=z["x1"]+PADDING; y1=z["y1"]+PADDING
-            if key=="qr":
+            pad=z.get("pad", PADDING)
+            x0=z["x0"]-pad; y0=z["y0"]-pad
+            x1=z["x1"]+pad; y1=z["y1"]+pad
+            if z.get("last4"):
+                for r in last4_rects(page, fitz.Rect(x0,y0,x1,y1)):
+                    page.add_redact_annot(r,fill=(1,1,1)); page.apply_redactions()
+            elif z.get("blank"):
+                page.add_redact_annot(fitz.Rect(x0,y0,x1,y1),fill=(1,1,1)); page.apply_redactions()
+            elif key=="qr":
                 rect=fitz.Rect(x0,y0,x1,y1)
                 page.add_redact_annot(rect,fill=(1,1,1)); page.apply_redactions()
                 if logo_img:
@@ -91,6 +177,26 @@ def extract_cert_data_gia(text):
     return dict(shape=shape, cut=cut, carat=carat, color=color, clarity=clarity,
                 measurements=meas, ratio=ratio, polish=polish, symmetry=symmetry,
                 fluorescence=fluor)
+
+
+def extract_cert_data_gia_dossier(text):
+    """The compact Diamond Dossier: same labels as the full GIA report, but the measurements can
+    be a range ("5.09 - 5.12 x 3.22 mm") and the fluorescence can be two words ("Strong Blue")."""
+    out = extract_cert_data_gia(text)
+    m = _re.search(r"Measurements\s*\.+\s*([\d.]+)(?:\s*-\s*([\d.]+))?\s*x\s*([\d.]+)", text, _re.IGNORECASE)
+    if m:
+        lo, hi, depth = m.group(1), m.group(2), m.group(3)
+        out["measurements"] = f"{lo} - {hi} x {depth}" if hi else f"{lo} x {depth}"
+        try:
+            if hi:
+                a_, b_ = sorted((float(lo), float(hi)))
+                out["ratio"] = f"{b_ / a_:.2f}"
+        except Exception:
+            pass
+    m = _re.search(r"Fluorescence\s*\.+\s*(.+)", text, _re.IGNORECASE)
+    if m:
+        out["fluorescence"] = m.group(1).strip()
+    return out
 
 
 def extract_cert_data_gia_colour(text):
@@ -158,8 +264,10 @@ def extract_cert_data(file_bytes, cert_type):
     except:
         return {}
 
-    if cert_type == "IGI":
+    if cert_type in ("IGI", "IGI Photo"):
         raw = extract_cert_data_igi(text)
+    elif cert_type == "GIA Dossier":
+        raw = extract_cert_data_gia_dossier(text)
     elif cert_type == "GIA Colour":
         raw = extract_cert_data_gia_colour(text)
     else:

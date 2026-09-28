@@ -362,3 +362,47 @@ def test_versions_match_between_app_and_site():
     assert f"const CAPTURE_VERSION = {spin_capture.CAPTURE_VERSION};" in js
     assert f"const TRUSTED_VERSION = {spin_capture.TRUSTED_VERSION};" in js
     assert "value:" not in open(os.path.join(ROOT, "render.yaml")).read().split("key: SPIN_ENABLED")[1]
+
+
+def test_setup_sql_allows_webp_and_the_fake_bucket_enforces_it():
+    from fakesb import bucket_mime_types
+    allowed = bucket_mime_types()
+    assert "image/webp" in allowed and {"image/jpeg", "image/png", "video/mp4", "video/webm"} <= set(allowed)
+
+
+def test_webp_upload_accepted_by_the_bucket_as_set_up(spin_env):
+    sb, api, seen = spin_env
+    save("Pure Carbon Group", "LG600000001")
+    assert any(n.endswith(".webp") for n in sb.storage["quote-media"])
+
+
+def test_storage_refusal_message_is_in_capture_log_and_timing_log(spin_env, capfd):
+    """A bucket that doesn't allow WebP: storage's message (masked) reaches the capture log and [spin-timing]."""
+    sb, api, seen = spin_env
+    sb.allowed_mime["quote-media"] = ["image/jpeg", "image/png", "video/mp4", "video/webm"]      # the old setup
+    at = save("Pure Carbon Group", "LG600000001")
+    s = sb.tables["quotes"][-1]["stones"][0]
+    assert "spin" not in s or not s["spin"]                                                    # viewer link kept
+    t = texts(at)
+    assert "frame upload failed (upload HTTP 415" in t and "mime type image/webp is not supported" in t
+    out = capfd.readouterr().out
+    line = [ln for ln in out.splitlines() if ln.startswith("[spin-timing] ")]
+    assert len(line) == 1
+    d = json.loads(line[0][len("[spin-timing] "):])
+    assert d["ok"] is False and "HTTP 415" in d["error"] and "image/webp is not supported" in d["error"]
+    assert d["fetch_s"] >= 0 and d["encode_s"] >= 0 and "total_s" in d
+    assert not any(n.endswith(".webp") for n in sb.storage["quote-media"])                     # nothing stored
+
+
+def test_storage_error_text_is_masked():
+    class R:
+        status_code = 400
+        text = ""
+
+        def json(self):
+            return {"statusCode": "400", "error": "Bad", "message":
+                    "cannot reach https://srlbevzrkovruyerixdi.supabase.co/storage/v1/object/quote-media/"
+                    "0123456789abcdef0123456789abcdef/000.webp via nivoda-cdn"}
+    m = spin_capture.storage_error(R())
+    assert m.startswith("upload HTTP 400: Bad: ") and "supabase.co" not in m and "0123456789abcdef" not in m
+    assert "nivoda" not in m.lower() and "[host]" in m and len(m) < 200
