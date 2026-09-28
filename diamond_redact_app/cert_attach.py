@@ -177,7 +177,8 @@ def check_layout(page, cert_type, numbers):
                 return f"a report/inscription number is outside the {cert_type} layout's masked areas"
     if not seen:
         return "the report number isn't in the PDF's text, so the redaction can't be checked"
-    return qr_outside(page, _rect(zones["qr"], zones["qr"].get("pad", certs.PADDING) + 1.5))
+    return qr_outside(page, _rect(zones["qr"], zones["qr"].get("pad", certs.PADDING) + 1.5)) \
+        or certs.barcode_outside(page, cert_type)
 
 
 def qr_outside(page, qr):
@@ -285,6 +286,9 @@ def verify(pdf_bytes, numbers, cert_type, logo_img):
         raw = doc.tobytes(expand=255, garbage=0).upper()
         if any(v.encode() in raw for v in variants):
             fails.append("raw PDF data")
+        # Any barcode-like picture must be inside a blanked area (and blanked areas must come out white)
+        if certs.barcode_outside(doc[0], cert_type):
+            fails.append("barcode")
         # Blanked areas (a barcode that encodes the number) must come out white
         for key, z in certs.ZONES[cert_type].items():
             if z.get("blank"):

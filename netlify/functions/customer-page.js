@@ -1,55 +1,31 @@
 // Serves the customer share page at /c/<store>/<code>#<key> (short, encrypted)
 // and /c/<store>#<data> (older long links). Only the store and the short code
 // reach this server. The key or data after "#" stays in the customer's browser.
-// No database, no quote data, no logging.
+// No quote data, no logging; the only database read is the client list (name + logo).
 //
-// The store's logo is taken from the CLIENT_LOGOS list in quote.html, so a new
-// client logo only ever needs adding there. Only that ONE logo is put in the
-// page, so the customer never sees your other clients' names.
+// The store's logo comes from the app's client list in the database (clients added with
+// "Add a new client"), else from the CLIENT_LOGOS list in quote.html (see lib/clients.js).
+// Only that ONE logo is put in the page, so the customer never sees your other clients' names.
 const fs = require('fs');
 const path = require('path');
 
-// Optional link-preview images (WhatsApp / iMessage), from the /logos folder
-const PREVIEW_IMAGES = {
-  'pure-carbon-group': 'Pure Carbon Group.png', 'cavalier': 'Cavalier.png', 'foe-and-dear': 'Foe & Dear.png',
-  'harlings': 'Harlings.png', 'rodan': 'Rodan.png', 'nfr': 'NFR.png', 'nash-jewellers': 'Nash.png',
-  'janinas': 'janinas.jpg', 'ijl': 'IJL2.png', 'gem-by-carati': 'gem.jpg', 'vena-nova': 'Vena.jpg',
-  'touch-of-gold': 'TOG.png', 'spence': 'Spence.png',
-};
+const { slugOf, lookup } = require('./lib/clients');
 
-function slugOf(name) {
-  return String(name || '').toLowerCase().replace(/&/g, 'and').replace(/['’]/g, '')
-    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
-}
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
   }[c]));
 }
 
-let STORES = null;   // slug -> { name, logo }
-function stores() {
-  if (STORES) return STORES;
-  STORES = {};
-  try {
-    const q = fs.readFileSync(path.join(__dirname, '..', '..', 'quote.html'), 'utf8');
-    const start = q.indexOf('const CLIENT_LOGOS = {');
-    const block = q.slice(start, q.indexOf('\n};', start));
-    const re = /^\s*"((?:[^"\\]|\\.)+)":\s*"(data:image\/[a-z+]+;base64,[A-Za-z0-9+/=]+)"/gm;
-    let m;
-    while ((m = re.exec(block))) {
-      STORES[slugOf(m[1])] = { name: m[1], logo: m[2] };
-    }
-  } catch (e) { /* page still works without a logo */ }
-  return STORES;
-}
-
 exports.handler = async function (event) {
   let html = fs.readFileSync(path.join(__dirname, '..', '..', 'customer.html'), 'utf8');
   // Path is /c/<store> or /c/<store>/<code>; pick the segment that is a known store
   const parts = String(event.path || '').toLowerCase().split('/').filter(Boolean);
-  const slug = parts.find((p) => stores()[p]) || '';
-  const store = stores()[slug];
+  let slug = '', store = null;
+  for (const p of parts) {                           // clients added in the app first, then the built-in ones
+    const hit = await lookup(p);
+    if (hit) { slug = p; store = hit; break; }
+  }
 
   let title = 'Diamond Selection';
   let meta = `<meta property="og:title" content="Diamond Selection" />
@@ -61,8 +37,8 @@ exports.handler = async function (event) {
   <meta property="og:description" content="${escapeHtml(`Diamonds selected for you by ${store.name}.`)}" />
   <meta property="og:site_name" content="${escapeHtml(store.name)}" />`;
     const host = (event.headers && (event.headers['x-forwarded-host'] || event.headers.host)) || '';
-    if (host && PREVIEW_IMAGES[slug]) {
-      meta += `\n  <meta property="og:image" content="${escapeHtml(`https://${host}/logos/${encodeURIComponent(PREVIEW_IMAGES[slug])}`)}" />`;
+    if (host) {                                      // link-preview image: this client's logo, from our own domain
+      meta += `\n  <meta property="og:image" content="${escapeHtml(`https://${host}/client-logo/${slug}`)}" />`;
     }
     html = html
       .replace('<link rel="icon" id="favicon" href="data:,">', `<link rel="icon" id="favicon" href="${store.logo}">`)

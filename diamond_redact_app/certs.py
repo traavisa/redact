@@ -50,8 +50,11 @@ _IGI_PLACES = ("num_top_centre", "num_left", "num_left_insc", "num_right_top", "
 ZONES["IGI Photo"] = {k: dict(ZONES["IGI"][k], last4=True) for k in _IGI_PLACES}
 ZONES["IGI Photo"]["num_diamond_photo"] = {"x0":640.0,"y0":184.0,"x1":700.0,"y1":196.0,"last4":True}
 ZONES["IGI Photo"]["qr"] = dict(ZONES["IGI"]["qr"])
-# The barcode above the date encodes the report number: blanked (its area must come out white).
-ZONES["IGI Photo"]["barcode"] = {"x0":817.2,"y0":45.1,"x1":913.6,"y1":60.3,"pad":0.5,"blank":True}
+# The barcode above the date encodes the report number: blanked on both IGI layouts (its area
+# must come out white). Nothing else on the original "IGI" layout changes.
+BARCODE_ZONE = {"x0":817.2,"y0":45.1,"x1":913.6,"y1":60.3,"pad":0.5,"blank":True}
+ZONES["IGI Photo"]["barcode"] = dict(BARCODE_ZONE)
+ZONES["IGI"]["barcode"] = dict(BARCODE_ZONE)
 ZONES["GIA Dossier"] = {
     "num_head":   {"x0":350.2,"y0":36.1, "x1":414.1,"y1":49.6, "last4":True},
     "num_report": {"x0":189.3,"y0":92.0, "x1":229.9,"y1":100.5,"last4":True},
@@ -67,6 +70,32 @@ KEEP_DIGITS = 4
 MIN_MASKED_RUN = 7      # a digit run shorter than this isn't a report / inscription number
 
 PADDING       = 1.5
+
+
+def barcode_like(page, bbox):
+    """True when the picture at `bbox` looks like a barcode: wide and short, and mostly pure black
+    and white with a real share of black bars (edges may be soft). Photos, logos and the grey security strip don't."""
+    r = fitz.Rect(bbox)
+    if r.height <= 0 or r.width / r.height < 4 or r.height > 30 or r.width < 30:
+        return False
+    px = page.get_pixmap(clip=r, dpi=144, colorspace=fitz.csGRAY, alpha=False).samples
+    if not px:
+        return False
+    dark = sum(1 for v in px if v < 80)
+    light = sum(1 for v in px if v > 175)
+    return (dark + light) >= 0.6 * len(px) and 0.1 <= dark / len(px) <= 0.85
+
+
+def barcode_outside(page, cert_type):
+    """'' when every barcode-like picture on the page lies inside one of the layout's blanked
+    areas, else why not. A barcode that isn't blanked could still carry the report number."""
+    zones = ZONES[cert_type]
+    blanks = [zone_rect(z, 2.0) for z in zones.values() if z.get("blank")]
+    for info in page.get_image_info():
+        b = fitz.Rect(info["bbox"])
+        if barcode_like(page, b) and not any(z.contains(b) for z in blanks):
+            return "a barcode-like picture is outside the layout's blanked areas"
+    return ""
 
 
 def lab_of(cert_type):

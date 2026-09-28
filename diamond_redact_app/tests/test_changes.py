@@ -75,7 +75,7 @@ def test_quote_page_has_the_logo_and_share_page_carries_only_it():
     body = d["body"]
     assert 'const STORE_NAME = "Spence"' in body and "Spence — Diamond Selection" in body
     assert 'const STORE_LOGO = "data:image/png;base64,' + _app_logo_b64("Spence")[:40] in body
-    assert "https://quote.alldiamondeverything.com/logos/Spence.png" in body        # link preview image
+    assert "https://quote.alldiamondeverything.com/client-logo/spence" in body       # link preview image (our domain)
     assert "Nash Jewellers" not in body and "Bijouterie" not in body                # no other client's name
     assert not SUPPLIER.search(re.sub(r"https?://\S+", "", body))
 
@@ -435,3 +435,119 @@ def test_setting_names_neutral_first_old_names_still_work():
                                           "user": ("LS_USERNAME", "NIVODA_USERNAME"),
                                           "password": ("LS_PASSWORD", "NIVODA_PASSWORD"),
                                           "divisor": ("LS_PRICE_DIVISOR", "NIVODA_PRICE_DIVISOR")}
+
+
+# ── Follow-up 2: logos of clients added in the app, on quote / share pages and link previews ────────
+def _custom_logo(color=(200, 30, 30), fmt="PNG"):
+    b = io.BytesIO()
+    Image.new("RGB", (60, 60), color).save(b, fmt)
+    return base64.b64encode(b.getvalue()).decode()
+
+
+ZED = _custom_logo()
+CLIENTS_JS = """
+const fs = require('fs');
+const rows = %s;
+global.fetch = async (url, opts) => {
+  if (%s) throw new Error('database down');
+  if (!String(url).includes('/rest/v1/custom_clients')) throw new Error('unexpected ' + url);
+  if (!opts.headers.apikey) throw new Error('no key');
+  return { ok: true, json: async () => rows };
+};
+process.env.SUPABASE_URL = 'https://db.test'; process.env.SUPABASE_SERVICE_KEY = 'k';
+const logo = require('%s/netlify/functions/client-logo.js');
+const page = require('%s/netlify/functions/customer-page.js');
+const H = { host: 'quote.alldiamondeverything.com' };
+(async () => {
+  const out = {};
+  for (const p of %s) {
+    const r = await logo.handler({ path: '/.netlify/functions/client-logo/' + p });
+    out[p] = { status: r.statusCode, type: (r.headers || {})['Content-Type'], b64: r.body, cache: (r.headers || {})['Cache-Control'] };
+  }
+  out.share = (await page.handler({ path: '/c/%s/abc', headers: H })).body;
+  process.stdout.write(JSON.stringify(out));
+})();
+"""
+
+
+def _clients_run(rows, down=False, slugs=("zed-and-co", "spence", "nope"), share="zed-and-co"):
+    js = CLIENTS_JS % (json.dumps(rows), "true" if down else "false", ROOT, ROOT, json.dumps(list(slugs)), share)
+    return json.loads(_node(js))
+
+
+def _builtin_b64(name):
+    return _app_logo_b64(name) if name == "Spence" else None
+
+
+def test_client_logo_function_order_database_then_builtin_then_pure_carbon():
+    d = _clients_run([{"name": "Zed & Co", "logo_b64": ZED}])
+    z = d["zed-and-co"]
+    assert z["status"] == 200 and z["type"] == "image/png" and z["b64"] == ZED and "max-age" in z["cache"]
+    assert d["spence"]["b64"] == _app_logo_b64("Spence")                        # built-in
+    q = open(os.path.join(ROOT, "quote.html")).read()
+    pcg = re.search(r'"Pure Carbon Group": "data:image/png;base64,([A-Za-z0-9+/=]+)"', q).group(1)
+    assert d["nope"]["status"] == 200 and d["nope"]["b64"] == pcg               # unknown: Pure Carbon
+    # a client added in the app wins over a built-in one of the same name
+    d = _clients_run([{"name": "Spence", "logo_b64": ZED}])
+    assert d["spence"]["b64"] == ZED
+    # database down or table empty: built-in and Pure Carbon still work
+    d = _clients_run([], down=True)
+    assert d["spence"]["b64"] == _app_logo_b64("Spence") and d["zed-and-co"]["b64"] == pcg
+    # a row that isn't an image is ignored
+    d = _clients_run([{"name": "Zed & Co", "logo_b64": base64.b64encode(b"<svg onload=x>").decode()}])
+    assert d["zed-and-co"]["b64"] == pcg
+
+
+def test_share_page_and_link_preview_for_a_client_added_in_the_app():
+    d = _clients_run([{"name": "Zed & Co", "logo_b64": ZED}, {"name": "Other <b>", "logo_b64": ZED}])
+    body = d["share"]
+    assert 'const STORE_NAME = "Zed & Co"' in body and "Zed &amp; Co — Diamond Selection" in body
+    assert f'const STORE_LOGO = "data:image/png;base64,{ZED}"' in body
+    assert "https://quote.alldiamondeverything.com/client-logo/zed-and-co" in body
+    assert "Other" not in body and "Nash Jewellers" not in body                  # only this client
+    assert not SUPPLIER.search(re.sub(r"https?://\S+", "", body))
+    # a built-in client's share page is unchanged apart from the preview image source
+    d = _clients_run([], share="nash-jewellers")
+    assert 'const STORE_NAME = "Nash Jewellers"' in d["share"]
+
+
+def test_quote_page_reads_the_logo_from_our_domain_with_builtin_backup():
+    q = open(os.path.join(ROOT, "quote.html")).read()
+    assert "'/client-logo/' + clientSlug(s.client)" in q and "img.onerror" in q
+    assert "CLIENT_LOGOS[s.client] || CLIENT_LOGOS['Pure Carbon Group']" in q    # backup if the request fails
+    fn = re.search(r"function clientSlug\(name\) \{.*?\n\}", q, re.S).group(0)
+    js = fn + """
+    const { slugOf } = require('%s/netlify/functions/lib/clients');
+    const bad = ["Zed & Co", "Janina's", "Foe & Dear", "Barclay\u2019s", "  A  B ", "Touch of Gold", "", "Nash Jewellers"]
+      .filter((n) => (clientSlug(n) || 'pure-carbon-group') !== (slugOf(n) || 'pure-carbon-group'));
+    process.stdout.write(JSON.stringify(bad));
+    """ % ROOT
+    assert json.loads(_node(js)) == []                                            # page and server agree on every slug
+    assert "quote_system" not in open(os.path.join(ROOT, "netlify.toml")).read()
+    assert '"/client-logo/*"' in open(os.path.join(ROOT, "netlify.toml")).read()
+
+
+def test_old_copy_is_deleted():
+    assert not os.path.exists(os.path.join(HERE, "quote_system"))
+
+
+def test_client_added_in_the_app_gets_its_logo_on_certificates_and_order_matches_the_pages(env):
+    import streamlit as st
+    sb, api = env
+    st.cache_data.clear()                                                       # the app caches the client list for 5 minutes
+    sb.tables["custom_clients"].append({"name": "Zed & Co", "logo_b64": ZED})
+    sb.tables["custom_clients"].append({"name": "Spence", "logo_b64": ZED})       # overrides the built-in, as on the pages
+    for who in ("Zed & Co", "Spence"):
+        sb.storage["certificates"].clear()
+        at = boot()
+        at.session_state["ls_client_sel"] = who
+        at.radio(key="ls_mode").set_value("Look up stones").run()
+        at.text_area(key="ls_lk_text").input("LG833689789").run()
+        at.button(key="ls_lk_go").click().run()
+        at.button(key="ls_add_quote").click().run()
+        assert not at.exception, at.exception
+        pdf = next(iter(sb.storage["certificates"].values()))
+        logo = Image.open(io.BytesIO(base64.b64decode(ZED))).convert("RGBA")
+        assert C.verify(pdf, {"833689789"}, "IGI", logo) == [], who
+    at = boot()
+    assert any(b.key == "ovl_t2_client_Zed & Co" for b in at.button)             # in the picker too

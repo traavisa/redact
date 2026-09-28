@@ -543,11 +543,22 @@ function showError() {
   document.getElementById('error').classList.add('visible');
 }
 
+function clientSlug(name) {
+  return String(name || '').toLowerCase().replace(/&/g, 'and').replace(/['\u2019]/g, '')
+    .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'pure-carbon-group';
+}
+
 function render(s, certTypes, isExpired) {
-  const logo = CLIENT_LOGOS[s.client] || CLIENT_LOGOS['Pure Carbon Group'];
-  document.getElementById('header-logo').src = logo;
+  // The client's logo comes from our own domain (clients added in the app, else built-in, else Pure Carbon);
+  // if that request fails, the built-in copy in this page is used.
+  const logo = '/client-logo/' + clientSlug(s.client);
+  const backup = CLIENT_LOGOS[s.client] || CLIENT_LOGOS['Pure Carbon Group'];
+  ['header-logo', 'footer-logo'].forEach((id) => {
+    const img = document.getElementById(id);
+    img.onerror = () => { img.onerror = null; img.src = backup; };
+    img.src = logo;
+  });
   document.getElementById('header-name').textContent = s.client;
-  document.getElementById('footer-logo').src = logo;
   document.getElementById('footer-name').textContent = s.client;
   document.getElementById('watermark-logo').src = CLIENT_LOGOS['Pure Carbon Group'];
   document.title = s.client ? ('Diamond Options \u2014 ' + s.client) : 'Diamond Options';

@@ -11,6 +11,7 @@ import requests
 from pathlib import Path
 from PIL import Image
 import streamlit as st
+import login_token
 
 try:
     import fitz
@@ -103,6 +104,10 @@ div[data-testid="stFormSubmitButton"] button { width: 100%; background: #c9a84c 
 </style>
 """
 
+_SESSION_SECRET = get_setting("APP_SESSION_SECRET")
+_SESSION_DAYS = login_token.days_from(get_setting("APP_SESSION_DAYS"))
+login_token.note_secret(_SESSION_SECRET)     # says in the Render log (once) when remember-me is off
+
 def require_login():
     if not APP_PASSWORD:
         st.markdown(LOGIN_CSS, unsafe_allow_html=True)
@@ -112,7 +117,14 @@ def require_login():
         st.stop()
     if st.session_state.get("authed"):
         return
+    # A remembered browser: a valid, unexpired token signed with the current secret and password
+    if (_SESSION_SECRET and not st.session_state.get("logged_out")
+            and login_token.valid(login_token.read_cookie(), _SESSION_SECRET, APP_PASSWORD)):
+        st.session_state.authed = True
+        return
     st.markdown(LOGIN_CSS, unsafe_allow_html=True)
+    if st.session_state.pop("clear_cookie", False):
+        login_token.run_script(login_token.clear_cookie_html())
     st.markdown('<div class="login-title">Diamond Tools</div>'
                 '<div class="login-sub">Pure Carbon Group</div>', unsafe_allow_html=True)
     with st.form("login", clear_on_submit=True):
@@ -121,12 +133,18 @@ def require_login():
     if submitted:
         if hmac.compare_digest(pw.encode("utf-8"), APP_PASSWORD.encode("utf-8")):
             st.session_state.authed = True
+            st.session_state.logged_out = False
+            if _SESSION_SECRET:
+                st.session_state.issue_cookie = login_token.make_token(_SESSION_SECRET, APP_PASSWORD, _SESSION_DAYS)
             st.rerun()
         time.sleep(1)  # slow down guessing
         st.error("Incorrect password.")
     st.stop()
 
 require_login()
+_tok = st.session_state.pop("issue_cookie", None)
+if _tok:
+    login_token.run_script(login_token.set_cookie_html(_tok, _SESSION_DAYS))
 
 if not SUPABASE_KEY:
     st.error("Database key missing: add SUPABASE_SERVICE_KEY to the app's environment variables (Render) "
@@ -231,18 +249,17 @@ def gen_id(n=8):
     return "".join(random.choices(chars, k=n))
 
 def get_logo_img(name):
-    # Check built-in logos first
-    b64 = CLIENT_LOGOS.get(name)
+    # Clients added in the app first (the same order the quote / share pages use), then the built-in logos
+    b64 = None
+    try:
+        for r in load_custom_clients():
+            if r.get("name") == name and r.get("logo_b64"):
+                b64 = r.get("logo_b64")
+                break
+    except Exception:
+        pass
     if not b64:
-        # Fall back to custom clients from Supabase
-        try:
-            rows = load_custom_clients()
-            for r in rows:
-                if r.get("name") == name:
-                    b64 = r.get("logo_b64")
-                    break
-        except:
-            pass
+        b64 = CLIENT_LOGOS.get(name)
     if b64:
         return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
     return None
@@ -468,17 +485,20 @@ def client_selector(key_prefix, session_key):
         new_name = st.text_input("Client name", placeholder="e.g. Vendor ABC", key=f"{key_prefix}_new_name")
         new_file = st.file_uploader("Logo image", type=["png","jpg","jpeg","webp"], key=f"{key_prefix}_new_logo")
         if st.button("Save client", key=f"{key_prefix}_save") and new_name and new_file:
-            img = Image.open(new_file).convert("RGBA")
-            img.thumbnail((200,200))
-            buf = io.BytesIO(); img.save(buf, "PNG")
-            b64 = base64.b64encode(buf.getvalue()).decode()
-            if save_custom_client(new_name.strip(), b64):
-                st.session_state[session_key] = new_name.strip()
-                load_custom_clients.clear()
-                st.success(f"Saved: {new_name}")
-                st.rerun()
+            if any(str(c.get("name", "")).strip().lower() == new_name.strip().lower() for c in load_custom_clients()):
+                st.error(f"{new_name.strip()} is already saved.")
             else:
-                st.error("Failed to save — check Supabase connection.")
+                img = Image.open(new_file).convert("RGBA")
+                img.thumbnail((200,200))
+                buf = io.BytesIO(); img.save(buf, "PNG")
+                b64 = base64.b64encode(buf.getvalue()).decode()
+                if save_custom_client(new_name.strip(), b64):
+                    st.session_state[session_key] = new_name.strip()
+                    load_custom_clients.clear()
+                    st.rerun()
+                else:
+                    st.error("Failed to save — check Supabase connection.")
+        st.caption("One step: the logo is used on certificates, quote pages, share pages and link previews.")
 
     return st.session_state.get(session_key, CLIENT_ORDER[0])
 st.markdown("""
@@ -566,6 +586,8 @@ with _logout_col:
                 '.st-key-logout button p { font-size: 12px !important; }</style>', unsafe_allow_html=True)
     if st.button("Log out", type="primary", key="logout"):
         st.session_state.authed = False
+        st.session_state.logged_out = True       # this session never re-logs in from the cookie
+        st.session_state.clear_cookie = True     # the login screen then removes the cookie
         st.rerun()
 
 # Tabs: Create quote, Live Search. (The separate "Redact certificate" tab was retired;

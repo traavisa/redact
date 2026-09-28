@@ -7,6 +7,9 @@
 [functions."customer-page"]
   included_files = ["customer.html", "quote.html"]
 
+[functions."client-logo"]
+  included_files = ["quote.html"]
+
 [[redirects]]
   from = "/q/*"
   to = "/.netlify/functions/quote-page/:splat"
@@ -27,6 +30,13 @@
 [[redirects]]
   from = "/c"
   to = "/.netlify/functions/customer-page"
+  status = 200
+
+# Client logos (quote pages, share pages, link previews): the client's own logo from the database,
+# else the built-in one, else Pure Carbon Group. Always from our own domain.
+[[redirects]]
+  from = "/client-logo/*"
+  to = "/.netlify/functions/client-logo/:splat"
   status = 200
 
 [[redirects]]

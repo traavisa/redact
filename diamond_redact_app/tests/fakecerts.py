@@ -48,6 +48,25 @@ def gia(number="2141438167", colour=False, number_elsewhere=False, tiny_right=Fa
     return doc.tobytes()
 
 
+def barcode_png(w=101, h=10):
+    im = Image.new("RGB", (w, h), (255, 255, 255))
+    px = im.load()
+    for x in range(2, w - 2):
+        if (x * 7 + x // 3) % 5 < 2:
+            for y in range(h):
+                px[x, y] = (0, 0, 0)
+    b = io.BytesIO()
+    im.save(b, "PNG")
+    return b.getvalue()
+
+
+def add_barcode(pdf, rect=(817.2, 45.1, 913.6, 60.3), page_no=0):
+    """The same PDF with a barcode picture at `rect`."""
+    doc = fitz.open(stream=pdf, filetype="pdf")
+    doc[page_no].insert_image(fitz.Rect(*rect), stream=barcode_png())
+    return doc.tobytes()
+
+
 def igi(number="833689789"):
     doc = fitz.open()
     p = doc.new_page(width=1008, height=612)

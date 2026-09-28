@@ -17,6 +17,12 @@ services:
         sync: false
       - key: APP_PASSWORD
         sync: false
+      # Remember-me login: a long random secret signs the login cookie (unset = the password is asked
+      # in every new browser session). APP_SESSION_DAYS is optional (default 30).
+      - key: APP_SESSION_SECRET
+        sync: false
+      - key: APP_SESSION_DAYS
+        sync: false
       # 360 capture kill switch, set in the Render dashboard (not here, so a Blueprint sync
       # never overwrites it). Unset = off; "test" = Pure Carbon Group quotes only; "true" = all.
       - key: SPIN_ENABLED

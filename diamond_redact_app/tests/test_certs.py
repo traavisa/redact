@@ -16,6 +16,16 @@ import quote_media
 UP = []
 
 
+class no_barcode_zone:
+    """The original layouts changed in exactly one way since they were first written: the IGI layout
+    now also blanks its barcode. With that one zone taken out, output must match the old code byte for byte."""
+    def __enter__(self):
+        self.z = certs.ZONES["IGI"].pop("barcode")
+
+    def __exit__(self, *a):
+        certs.ZONES["IGI"]["barcode"] = self.z
+
+
 def uploader(sb, key, data):
     UP.append(data)
     return C.CERT_BASE + "0" * 32 + ".pdf"
@@ -44,8 +54,9 @@ def test_create_quote_redaction_unchanged():
     ns = {"fitz": fitz, "io": __import__("io"), "IGI_B64": "", "GIA_B64": ""}
     exec(zones_src + "PADDING = 1.5\n" + fn_src, ns)
     no_id = lambda b: b.rsplit(b"trailer", 1)[0]      # the trailer holds the file ID, random per save
-    for ctype, pdf in (("GIA", F.gia()), ("GIA Colour", F.gia(colour=True)), ("IGI", F.igi())):
-        assert no_id(ns["redact_pdf"](pdf, ctype, F.logo())) == no_id(certs.redact_pdf(pdf, ctype, F.logo()))
+    with no_barcode_zone():
+        for ctype, pdf in (("GIA", F.gia()), ("GIA Colour", F.gia(colour=True)), ("IGI", F.igi())):
+            assert no_id(ns["redact_pdf"](pdf, ctype, F.logo())) == no_id(certs.redact_pdf(pdf, ctype, F.logo()))
 
 
 @pytest.mark.parametrize("name,pdf,cert_no,lab,ctype", [
@@ -292,11 +303,13 @@ def test_old_layouts_redact_exactly_as_before_after_new_layouts():
     ns = {}
     exec(old, ns)
     no_id = lambda b: b.rsplit(b"trailer", 1)[0]
-    for ctype, pdf in (("GIA", F.gia()), ("GIA colour", F.gia(colour=True)), ("IGI", F.igi())):
-        t = "GIA Colour" if ctype == "GIA colour" else ctype
-        assert no_id(ns["redact_pdf"](pdf, t, F.logo())) == no_id(certs.redact_pdf(pdf, t, F.logo()))
-    for t in ("IGI", "GIA", "GIA Colour"):
-        assert ns["ZONES"][t] == certs.ZONES[t]
+    with no_barcode_zone():
+        for ctype, pdf in (("GIA", F.gia()), ("GIA colour", F.gia(colour=True)), ("IGI", F.igi())):
+            t = "GIA Colour" if ctype == "GIA colour" else ctype
+            assert no_id(ns["redact_pdf"](pdf, t, F.logo())) == no_id(certs.redact_pdf(pdf, t, F.logo()))
+        for t in ("IGI", "GIA", "GIA Colour"):
+            assert ns["ZONES"][t] == certs.ZONES[t]
+    assert certs.ZONES["IGI"]["barcode"] == certs.ZONES["IGI Photo"]["barcode"]      # the one addition
 
 
 def test_create_quote_path_uses_new_layouts_and_keeps_old_ones():
@@ -316,3 +329,58 @@ def test_create_quote_path_uses_new_layouts_and_keeps_old_ones():
         d = fitz.open(stream=real("gia_dossier_4417250938.pdf"), filetype="pdf")
         d[0].insert_text((30, 350), "Ref 4417250938", fontsize=6)
         C.redact_for_quote(d.tobytes(), "GIA", F.logo())
+
+
+# ── Barcodes ──────────────────────────────────────────────────────────────────
+def _pix_dark(pdf, zone_key, layout="IGI"):
+    d = fitz.open(stream=pdf, filetype="pdf")
+    px = d[0].get_pixmap(clip=C._rect(certs.ZONES[layout][zone_key]), dpi=72, colorspace=fitz.csGRAY, alpha=False).samples
+    return sum(1 for v in px if v < 200) / len(px)
+
+
+def test_old_igi_layout_blanks_its_barcode_and_verifies():
+    UP.clear()
+    pdf = F.add_barcode(F.igi())
+    assert _pix_dark(pdf, "barcode") > 0.1                                  # the barcode is there to begin with
+    log = run(pdf, "LG833689789", "IGI")
+    assert log["verification"] == "passed" and log["lab_format"] == "IGI" and log["cert_type"] == "IGI", log
+    assert _pix_dark(UP[0], "barcode") == 0                                 # blank now
+    text, meta, n = _text(UP[0])
+    assert "833689789" not in re.sub(r"\D", "", text)
+
+
+def test_old_igi_without_a_barcode_still_redacts_as_before():
+    UP.clear()
+    log = run(F.igi(), "LG833689789", "IGI")
+    assert log["verification"] == "passed" and _pix_dark(UP[0], "barcode") == 0
+
+
+def test_barcode_left_in_place_fails_verification_on_every_igi_layout():
+    for layout, pdf in (("IGI", F.igi()), ("IGI Photo", real("igi_photo_LG725041893.pdf"))):
+        red = C.strip(certs.redact_pdf(pdf, layout, F.logo()))
+        no = "833689789" if layout == "IGI" else "725041893"
+        assert C.verify(red, {no}, layout, F.logo()) == []
+        d = fitz.open(stream=red, filetype="pdf")
+        d[0].insert_image(fitz.Rect(817.2, 45.1, 913.6, 60.3), stream=F.barcode_png())
+        assert any("barcode" in f for f in C.verify(d.tobytes(), {no}, layout, F.logo())), layout
+
+
+@pytest.mark.parametrize("make,cert_no,lab", [
+    (lambda: F.igi(), "LG833689789", "IGI"),
+    (lambda: F.gia(), "2141438167", "GIA"),
+    (lambda: F.gia(colour=True), "2141438167", "GIA"),
+    (lambda: real("gia_dossier_4417250938.pdf"), "4417250938", "GIA"),
+])
+def test_a_barcode_anywhere_else_is_not_attached(make, cert_no, lab):
+    """A barcode-like picture outside the blanked area could still carry the report number: refuse (fail closed)."""
+    UP.clear()
+    log = run(F.add_barcode(make(), rect=(300, 20, 396, 35)), cert_no, lab)
+    assert log["pdf_url"] == "" and "barcode-like picture" in log["note"] and not UP
+
+
+def test_security_strip_and_logos_are_not_mistaken_for_barcodes():
+    for name in ("igi_photo_LG725041893.pdf", "gia_dossier_4417250938.pdf"):
+        d = fitz.open(stream=real(name), filetype="pdf")
+        for lay in ("IGI Photo", "GIA Dossier"):
+            if certs.LAYOUT_META[lay]["lab"] == ("IGI" if "igi" in name else "GIA"):
+                assert certs.barcode_outside(d[0], lay) == ""
