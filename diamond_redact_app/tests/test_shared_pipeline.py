@@ -245,7 +245,8 @@ def both(env, monkeypatch):
     monkeypatch.setattr(quote_media, "ALLOW_PRIVATE_HOSTS", True)
     monkeypatch.setattr(quote_media, "process_stones", lambda sb_, k, items: [
         ({"url": viewer if v else "", "how": "viewer" if v else "dropped", "src": v, "note": ""},
-         {"url": "", "how": "dropped", "note": ""}) for v, i in items])
+         {"url": quote_media.MEDIA_BASE + "d" * 32 + ".jpg" if i else "", "how": "hosted" if i else "dropped", "note": ""})
+        for v, i in items])
     monkeypatch.setattr(quote_media, "process", lambda *a: {"how": "hosted", "url": quote_media.MEDIA_BASE + "c" * 32 + ".jpg",
                                                               "note": ""})
     monkeypatch.setattr(spin_jobs, "version_check", lambda force=False: (True, "test"))
@@ -523,3 +524,62 @@ def test_new_search_clears_uploads_and_overrides(broken_cert):
     assert at.session_state["ls_cert_up"] and at.session_state["ls_over"] == {"q1": "4000"}
     at.button(key="ls_new_search").click().run()
     assert not at.session_state["ls_cert_up"] and not at.session_state["ls_over"]
+
+
+# ── Follow-ups ────────────────────────────────────────────────────────────────
+def _status_for(at):
+    return spin_jobs.STATUS[at.session_state["capture_qid"]]
+
+
+def _no_link_stone(api):
+    s = stone("z2", "LG833689789", "IGI", 150000, video=False, v360=OWN)      # 360 API fields, no viewer link
+    api.stones = [s]
+    stone_source.Client._schema_cache.clear()
+
+
+def test_live_search_stone_with_360_fields_but_no_viewer_link_is_captured(both):
+    sb, api, viewer = both
+    _no_link_stone(api)
+    at = _live_search_quote()
+    s = sb.tables["quotes"][-1]["stones"][0]
+    assert s["spin"]["n"] == 72 and s["video_url"] == "" and "media_ref" not in s
+    (label, v), = _status_for(at).items()
+    assert "step a (stone's own search-result fields)" in "\n".join(v["facts"]) and "360 captured" in v["note"]
+
+
+def test_failed_capture_without_a_viewer_link_leaves_the_still_image_only(both, monkeypatch):
+    sb, api, viewer = both
+    _no_link_stone(api)
+    monkeypatch.setattr(sc, "_is_image", lambda u: False)                      # the frames don't answer
+    at = _live_search_quote()
+    s = sb.tables["quotes"][-1]["stones"][0]
+    assert "spin" not in s and s["video_url"] == "" and s["image_url"].startswith(quote_media.MEDIA_BASE)
+    (label, v), = _status_for(at).items()
+    assert v["note"].endswith("showing the still image only") and "private viewer link" not in v["note"]
+
+
+def test_create_quote_360_is_rejected_when_its_number_differs_from_the_pdf(both, monkeypatch):
+    sb, api, viewer = both
+    monkeypatch.setattr(sc, "PUBLIC_LOOKUP", lambda cid: (
+        {"certificate": {**REAL["data"]["certificate"], "certNumber": "7531752625"}}, "ok"))      # another stone's number
+    at = _create_quote(F.igi(), "igi-9789.pdf")                                                     # PDF: 833689789
+    s = sb.tables["quotes"][-1]["stones"][0]
+    assert "spin" not in s and s["video_url"] == viewer and s["pdf_url"].startswith(cert_attach.CERT_BASE)
+    (label, v), = _status_for(at).items()
+    assert "step c (public 360 endpoint): rejected — its certificate number isn't this stone's" in "\n".join(v["facts"])
+    assert "_cert_no" not in json.dumps(sb.tables["quotes"][-1]) and "833689789" not in json.dumps(sb.tables["quotes"][-1])
+
+
+def test_create_quote_360_is_kept_when_the_number_matches_the_pdf(both):
+    sb, api, viewer = both
+    at = _create_quote(F.igi())
+    s = sb.tables["quotes"][-1]["stones"][0]
+    assert s["spin"]["n"] == 72
+
+
+def test_pdf_numbers_are_never_printed_or_saved(both, capfd):
+    sb, api, viewer = both
+    _create_quote(F.igi(), "igi-9789.pdf")
+    _live_search_quote()
+    out = capfd.readouterr().out
+    assert '"_numbers"' not in out and not [ln for ln in out.splitlines() if ln.startswith("[cert]") and "833689789" in ln]

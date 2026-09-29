@@ -406,6 +406,7 @@ def analyse(data, job, log=None):
             log["lab_format"] = f"{ctype} (unsupported layout)"
             raise _skip(f"unsupported layout ({why})")
         log["lab_format"] = layout
+        log["_numbers"] = sorted(numbers)             # internal: never printed, shown or saved
         return layout, numbers
     finally:
         doc.close()
@@ -512,7 +513,7 @@ def attach_all(stones, jobs, logo_img, sb_url, key, workers=4, **kw):
         elif lg.get("note"):
             notes.append(f"{lg['stone']}: {lg['note']}")
         try:
-            print("[cert] " + json.dumps({k: v for k, v in lg.items() if k != "pdf_url"}
+            print("[cert] " + json.dumps({k: v for k, v in lg.items() if k != "pdf_url" and not k.startswith("_")}
                                          | {"attached": bool(lg.get("pdf_url"))}), flush=True)
         except Exception:
             pass

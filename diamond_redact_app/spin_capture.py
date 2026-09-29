@@ -387,10 +387,19 @@ def still_by_link(viewer_url):
 
 
 def _cert_no_conflict(hint, expect):
-    """'' unless the lookup's certificate number is known and differs from the stone's."""
+    """'' unless the lookup's certificate number is known and differs from the stone's. `expect` is
+    the stone's report number, or several candidates (numbers read from an uploaded PDF)."""
     got = re.sub(r"\D", "", str(((hint or {}).get("certificate") or {}).get("certNumber") or ""))
-    want = re.sub(r"\D", "", str(expect or ""))
-    return "" if not got or not want or got == want else "its certificate number isn't this stone's"
+    want = [expect] if isinstance(expect, str) else list(expect or [])
+    want = {re.sub(r"\D", "", str(w)) for w in want} - {""}
+    return "" if not got or not want or got in want else "its certificate number isn't this stone's"
+
+
+def hint_key(hint):
+    """A stand-in for the viewer link of a stone that has 360 fields but no link: '360:<its frame folder>'.
+    '' when the fields carry no frame folder. Only used to cache / label the capture, never saved or fetched."""
+    c = _v360_candidates(hint)
+    return "360:" + str(c[0][1]["url"]).split("?")[0].rstrip("/") if c else ""
 
 
 def _via_lookup(name, fn, cert_id, expect, facts):

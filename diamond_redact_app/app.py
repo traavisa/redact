@@ -302,6 +302,10 @@ def rehost_media(stones_payload, qid=None, client="", cert_nos=None):
                 and "too large" not in vid.get("note", "")):
             jobs.start(n - 1, label, src, vid["url"], hint, cno)   # its result goes in the 360 capture log
             notes += quote_media.notes_for(label, ({}, img))
+        elif jobs.allowed and not vid["url"] and spin_capture.hint_key(hint):
+            # 360 fields but no viewer link: captured from the fields alone; if that fails the stone keeps its still image
+            jobs.start(n - 1, label, spin_capture.hint_key(hint), "", hint, cno)
+            notes += quote_media.notes_for(label, ({}, img))
         else:
             notes += quote_media.notes_for(label, (vid, img))
     return notes, jobs          # captures run in the background; the quote is saved straight away
@@ -340,7 +344,8 @@ def save_quote(client, stones_payload, expiry_days):
     # Live Search certificates (cert_attach.py): links are popped here, never saved. A stone
     # gets a pdf_url only when its redaction was verified; anything else becomes a note.
     cert_jobs = [s.pop("_cert", None) for s in stones_payload]
-    cert_nos = [(j or {}).get("cert_no") or None for j in cert_jobs]
+    extra_nos = [s.pop("_cert_no", None) for s in stones_payload]          # Create quote: numbers read from the PDF
+    cert_nos = [(j or {}).get("cert_no") or x or None for j, x in zip(cert_jobs, extra_nos)]
     cert_notes, cert_logs = [], []
     if any(j is not None for j in cert_jobs):
         try:
@@ -507,7 +512,7 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
 html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; }
-.block-container { max-width: 760px; padding-top: 1rem; padding-bottom: 3rem; }
+.block-container { max-width: 760px; padding-top: 4.5rem; padding-bottom: 3rem; }
 .stButton > button[kind="primary"] {
     background-color: #1a1a1a !important; border-color: #1a1a1a !important;
     color: #ffffff !important; font-family: 'DM Sans', sans-serif !important;
@@ -518,6 +523,11 @@ html, body, [class*="css"] { font-family: 'DM Sans', sans-serif !important; }
 .stTabs [data-baseweb="tab-list"] { gap: 8px; }
 .stTabs [data-baseweb="tab"] { padding: 8px 20px; border-radius: 8px !important; }
 .pcg-header { display: flex; align-items: center; gap: 12px; padding-bottom: 0.7rem; border-bottom: 1px solid rgba(128,128,128,0.15); margin-bottom: 1rem; }
+/* header row stays on one line on phones: logo + title left, Log out right, vertically centred */
+div[data-testid="stHorizontalBlock"]:has(.st-key-logout) { flex-wrap: nowrap !important; align-items: center !important; }
+div[data-testid="stHorizontalBlock"]:has(.st-key-logout) > div[data-testid="stColumn"]:first-child { flex: 1 1 auto !important; min-width: 0 !important; width: auto !important; }
+div[data-testid="stHorizontalBlock"]:has(.st-key-logout) > div[data-testid="stColumn"]:last-child { flex: 0 0 auto !important; min-width: 0 !important; width: auto !important; }
+.pcg-header { border-bottom: none !important; margin-bottom: 0 !important; padding-bottom: 0 !important; }
 .pcg-logo { width: 38px; height: 38px; border-radius: 50%; object-fit: cover; flex-shrink: 0; }
 .pcg-title { font-size: 1.1rem; font-weight: 600; }
 .pcg-sub { font-size: 0.68rem; opacity: 0.35; letter-spacing: 0.09em; text-transform: uppercase; margin-top: 2px; }
@@ -584,7 +594,7 @@ with _head_col:
   </div>
 </div>""", unsafe_allow_html=True)
 with _logout_col:
-    st.markdown('<style>.st-key-logout button { min-height: 0 !important; padding: 3px 10px !important; margin-top: 6px; }'
+    st.markdown('<style>.st-key-logout button { min-height: 0 !important; padding: 3px 10px !important; margin-top: 0; }'
                 '.st-key-logout button p { font-size: 12px !important; }</style>', unsafe_allow_html=True)
     if st.button("Log out", type="primary", key="logout"):
         st.session_state.authed = False
@@ -667,6 +677,7 @@ with tab2:
                     "currency":      q_currency,
                     "price_type":    s["price_type"],
                     "cert_data":     extract_cert_data(raw_bytes, layout_q),
+                    "_cert_no":      clog.get("_numbers"),   # cross-checks the 360 lookup; removed before saving
                 })
             if ok:
                 link = save_quote(q_client, stones_payload, q_expiry)

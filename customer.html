@@ -129,19 +129,12 @@
     .price-block { margin-bottom: 28px; }
     .price-amount {
       font-family: 'Cormorant Garamond', serif;
+      font-variant-numeric: lining-nums; font-feature-settings: "lnum" 1;
       font-size: clamp(27px, 6vw, 36px); font-weight: 400; letter-spacing: -0.02em;
-      line-height: 1; color: #fff;
+      line-height: 1.25; padding: 0.06em 0 0.14em; overflow: visible; color: #fff;
       background: linear-gradient(135deg, #ffffff 30%, #d9bb6c 100%);
       -webkit-background-clip: text; background-clip: text; -webkit-text-fill-color: transparent;
     }
-    .price-currency-badge {
-      display: inline-block;
-      font-size: 10px; letter-spacing: 0.1em; font-weight: 500;
-      text-transform: uppercase;
-      padding: 3px 8px; border-radius: 2px; margin-top: 6px;
-    }
-    .price-currency-badge.usd { background: #0a1828; color: #4a9eff; border: 1px solid #1a3050; }
-    .price-currency-badge.cad { background: #1a0a0a; color: #c9a84c; border: 1px solid #3a1a0a; }
     .price-type-note { font-size: 11px; color: #9a9a9a; margin-top: 4px; letter-spacing: 0.04em; }
 
     /* Specs */
@@ -507,7 +500,6 @@ function render(d, client) {
       priceHtml = `
         <div class="price-block">
           <div class="price-amount">${cur === 'USD' ? 'US$' : 'CA$'}${esc(Math.round(r).toLocaleString('en-CA'))}</div>
-          <span class="price-currency-badge ${cur === 'USD' ? 'usd' : 'cad'}">${cur}</span>
         </div>`;
     }
 

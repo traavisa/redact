@@ -195,7 +195,8 @@ def capture_one(sb_url, key, vendor_url, hint=None, expect_cert=None):
     """Capture with the database cache in front (only captures by the current code are reused).
     Returns the spin_capture result dict, plus 'still' = our hosted copy of the certificate's
     still image when there is one. Frames come only from the certificate's 360 API fields."""
-    spin = known_spin(sb_url, key, vendor_url)
+    synthetic = not str(vendor_url).lower().startswith("http")       # 360 fields but no viewer link: nothing in media_links
+    spin = None if synthetic else known_spin(sb_url, key, vendor_url)
     if spin:
         res = {"ok": True, "spin": spin, "note": f"360 frames reused from an earlier capture ({spin['n']} frames)",
                "facts": ["frames already captured for this viewer by the current capture code"], "video": "",
@@ -206,10 +207,10 @@ def capture_one(sb_url, key, vendor_url, hint=None, expect_cert=None):
     res = dict(sc.capture(sb_url, key, vendor_url, hint, expect_cert))
     res["video"] = ""                                   # never a video file
     if res["ok"]:
-        if not record_spin(sb_url, key, vendor_url, res["spin"]):
+        if not synthetic and not record_spin(sb_url, key, vendor_url, res["spin"]):
             res["facts"] = res["facts"] + ["media_links has no spin columns yet (run the SQL update)"]
         if not res.get("still"):
-            res["still"] = sc.still_by_link(vendor_url)        # the certificate's own still, when the frames came another way
+            res["still"] = "" if synthetic else sc.still_by_link(vendor_url)        # the certificate's own still, when the frames came another way
         if res.get("still"):
             res = _host_still(sb_url, key, res, res["still"])
     if not str(res.get("still") or "").startswith(qm.MEDIA_BASE):
@@ -304,7 +305,7 @@ class SaveJobs:
                 ok = patch_stone(self.sb_url, self.key, self.qid, i, link_saved, res)
                 if not ok:
                     res = {**res, "note": res["note"] + " — but the saved quote couldn't be updated"}
-            _set_status(self.qid, label, _note_text(res), res.get("facts"), res.get("log"))
+            _set_status(self.qid, label, _note_text(res, bool(link_saved)), res.get("facts"), res.get("log"))
             _log("spin-save", {"quote": self.qid, "stone": label, "ok": res.get("ok"), "note": res.get("note")})
             tm = (res.get("log") or {}).get("timing")
             if tm:
@@ -339,10 +340,11 @@ def _result(fut, timeout=None):
         return {"ok": False, "spin": None, "note": f"capture error ({type(e).__name__})", "facts": []}
 
 
-def _note_text(res):
+def _note_text(res, has_link=True):
     if res.get("ok"):
         return res["note"]
-    return f"360 capture failed: {res.get('note')} — using private viewer link"
+    return (f"360 capture failed: {res.get('note')} — " +
+            ("using private viewer link" if has_link else "showing the still image only"))
 
 
 def _set_status(qid, label, note, facts=None, log=None):
