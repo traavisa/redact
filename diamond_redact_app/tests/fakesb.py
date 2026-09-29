@@ -67,6 +67,11 @@ class FakeSupabase:
         if m:
             ok = m.group(2) in self.storage.get(m.group(1), {})
             return Resp(200, content=b"x") if ok else Resp(400, {"statusCode": "404", "error": "not_found"})
+        m = re.match(r"/storage/v1/object/([^/]+)$", path)
+        if m and method == "DELETE":                                  # bulk delete: {"prefixes": [names]}
+            for name in (json.loads(data) if data else {}).get("prefixes", []):
+                self.storage.get(m.group(1), {}).pop(name, None)
+            return Resp(200, [])
         m = re.match(r"/storage/v1/object/([^/]+)/(.+)$", path)
         if m and method == "POST":
             ctype = str((headers or {}).get("Content-Type", "")).split(";")[0].strip()

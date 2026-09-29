@@ -13,6 +13,12 @@
  * top frame, then every 8th frame (dragging works from here, within a second or two), then the
  * rest in the background. Drag / swipe to rotate (vertical swipes still scroll the page), arrow
  * keys when focused, gentle auto-rotate once every frame is in, paused while off-screen.
+ * Auto-rotate pauses while the user touches it and resumes smoothly from the current frame after
+ * 3 s of no interaction; the small pause/play button stops it for good until play is pressed.
+ * Captures from version 6 also have a full-quality set (NNN@hi.webp): once the small set is in,
+ * it loads in the background (frames nearest the current one first) and each frame is swapped in
+ * as it arrives. The canvas is sized for the screen's pixel density, so it is sharp on phones and
+ * retina laptops. Captures with only the small set (v4, v5) work exactly as before.
  * Frame files never change (unique names), so repeat visits come from the browser cache.
  */
 (function () {
@@ -25,6 +31,11 @@
   var PARALLEL = 8;            // frames requested at once (HTTP/2 on our domain)
   var COARSE = 8;              // phase 2: every 8th frame from the top frame
   var WEBP_SINCE = 5;          // capture version from which frames are .webp
+  var HI_SINCE = 6;            // capture version from which NNN@hi.webp (full-quality frames) exist
+  var HI_PARALLEL = 4;         // full-quality frames requested at once (they are bigger)
+  var RESUME_MS = 3000;        // auto-rotate resumes after this long with no interaction
+  var RAMP_S = 0.7;            // ...easing back up to speed over this long
+  var MAX_DPR = 3;
 
   var CSS = '' +
     '.s360{position:relative;width:100%;height:100%;background:#000;overflow:hidden;user-select:none;-webkit-user-select:none;' +
@@ -49,6 +60,12 @@
     'transition:opacity .5s;pointer-events:none;white-space:nowrap}' +
     '.s360-hint svg{width:14px;height:14px}' +
     '.s360-hint.gone{opacity:0}' +
+    '.s360-btn{position:absolute;right:10px;bottom:10px;width:30px;height:30px;padding:0;display:flex;align-items:center;' +
+    'justify-content:center;border-radius:50%;background:rgba(10,10,10,.55);border:1px solid rgba(255,255,255,.18);' +
+    'color:rgba(255,255,255,.8);cursor:pointer;transition:background .2s,color .2s}' +
+    '.s360-btn:hover{background:rgba(10,10,10,.8);color:#d8c48a}' +
+    '.s360-btn:focus-visible{outline:1px solid #c9a84c}' +
+    '.s360-btn svg{width:14px;height:14px;fill:currentColor}' +
     '.s360-badge{position:absolute;top:10px;left:10px;font:600 9px/1 Inter,-apple-system,sans-serif;letter-spacing:.14em;' +
     'color:rgba(255,255,255,.7);padding:4px 6px;background:rgba(10,10,10,.55);border:1px solid rgba(255,255,255,.14);' +
     'border-radius:4px;pointer-events:none}' +
@@ -84,8 +101,13 @@
     this.coarseLeft = 0;
     this.turnStart = top; this.restUntil = 0;
     this.imgs = new Array(n); this.loaded = 0; this.failed = 0;
+    this.hasHi = Number(v) >= HI_SINCE;
+    this.hi = new Array(n); this.hiLoaded = 0; this.hiStarted = false;
     this.pos = top; this.vel = 0; this.auto = !matchMedia('(prefers-reduced-motion: reduce)').matches;
-    this.touched = false; this.visible = true; this.started = false; this.drawn = -1;
+    this.userPaused = !this.auto;     // reduced motion: starts stopped; play is the user's choice
+    this.lastInteract = -1e9; this.ramp = 1;
+    this.touched = false; this.visible = true; this.started = false; this.drawn = -1; this.drawnHi = false;
+    el.__s360 = this;
     this.build();
   }
 
@@ -115,6 +137,12 @@
       'stroke-linejoin="round"><path d="M3 12a9 9 0 0 1 15.5-6.2L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15.5 6.2L3 16"/>' +
       '<path d="M3 21v-5h5"/></svg><span>Drag to rotate</span>';
     el.appendChild(this.hint);
+    this.btn = document.createElement('button');
+    this.btn.type = 'button'; this.btn.className = 's360-btn';
+    this.btn.addEventListener('pointerdown', function (e) { e.stopPropagation(); });
+    this.btn.addEventListener('click', function (e) { e.stopPropagation(); self.toggleAuto(); });
+    el.appendChild(this.btn);
+    this.paintBtn();
 
     this.resize();
     if (window.ResizeObserver) new ResizeObserver(function () { self.resize(); }).observe(el);
@@ -136,6 +164,31 @@
   };
 
   Spinner.prototype.src = function (i) { return MEDIA_BASE + this.id + '/' + pad3(i) + '.' + this.ext; };
+  Spinner.prototype.srcHi = function (i) { return MEDIA_BASE + this.id + '/' + pad3(i) + '@hi.' + this.ext; };
+
+  Spinner.prototype.paintBtn = function () {
+    var paused = this.userPaused;
+    this.btn.setAttribute('aria-label', paused ? 'Play automatic rotation' : 'Pause automatic rotation');
+    this.btn.title = paused ? 'Play' : 'Pause';
+    this.btn.setAttribute('data-state', paused ? 'paused' : 'playing');
+    this.btn.innerHTML = paused ? '<svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>'
+      : '<svg viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></svg>';
+  };
+
+  Spinner.prototype.toggleAuto = function () {
+    this.userPaused = !this.userPaused;
+    if (!this.userPaused) { this.auto = true; this.lastInteract = -1e9; this.ramp = 0; this.retarget(); }
+    this.paintBtn();
+    this.kick();
+  };
+
+  // When auto-rotate starts again from an arbitrary frame it first completes the turn to the top frame
+  Spinner.prototype.retarget = function () {
+    var n = this.n;
+    var end = this.top + Math.ceil((this.pos - this.top) / n) * n;    // the next time round to the top frame
+    if (end - this.pos < 0.5) end += n;
+    this.turnStart = end - n;                                          // (the turn ends at turnStart + n)
+  };
 
   Spinner.prototype.start = function () {
     if (this.started) return;
@@ -183,7 +236,36 @@
     if (done >= this.n) {
       this.loadEl.classList.add('done');
       if (!this.loaded) this.fail();
+      else this.startHi();
     }
+  };
+
+  // Full-quality set: after the small set is in, nearest-to-the-current-frame first, swapped in as it arrives
+  Spinner.prototype.startHi = function () {
+    if (!this.hasHi || this.hiStarted) return;
+    var conn = navigator.connection || {};
+    if (conn.saveData || (navigator.deviceMemory && navigator.deviceMemory <= 2)) return;   // data saver / very low memory
+    this.hiStarted = true;
+    var self = this, n = this.n, cur = ((Math.round(this.pos) % n) + n) % n, queue = [], active = 0, tried = new Uint8Array(n), i;
+    for (i = 0; i < n; i++) if (this.imgs[i]) queue.push(i);
+    queue.sort(function (a, b) {
+      var da = Math.min((a - cur + n) % n, (cur - a + n) % n), db = Math.min((b - cur + n) % n, (cur - b + n) % n);
+      return da - db;
+    });
+    function next() { while (active < HI_PARALLEL && queue.length) load(queue.shift()); }
+    function load(i) {
+      active++;
+      var im = new Image();
+      im.decoding = 'async';
+      im.onload = function () {
+        active--; self.hi[i] = im; self.hiLoaded++;
+        if (self.drawn === i || (self.drawn >= 0 && self.nearest(((Math.round(self.pos) % n) + n) % n) === i)) self.draw(true);
+        next();
+      };
+      im.onerror = function () { active--; if (!tried[i]) { tried[i] = 1; queue.push(i); } next(); };
+      im.src = self.srcHi(i);
+    }
+    next();
   };
 
   Spinner.prototype.fail = function () {
@@ -194,7 +276,7 @@
   };
 
   Spinner.prototype.resize = function () {
-    var r = this.el.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var r = this.el.getBoundingClientRect(), dpr = Math.min(window.devicePixelRatio || 1, MAX_DPR);
     var w = Math.max(1, Math.round(r.width * dpr)), h = Math.max(1, Math.round(r.height * dpr));
     if (this.canvas.width !== w || this.canvas.height !== h) {
       this.canvas.width = w; this.canvas.height = h; this.draw(true);
@@ -216,14 +298,16 @@
   Spinner.prototype.draw = function (force) {
     var n = this.n, i = ((Math.round(this.pos) % n) + n) % n, k = this.nearest(i);
     if (k < 0 || (k === this.drawn && !force)) return;
-    var im = this.imgs[k], c = this.canvas, ctx = this.ctx;
-    var s = Math.min(c.width / im.naturalWidth, c.height / im.naturalHeight);
-    var w = im.naturalWidth * s, h = im.naturalHeight * s;
+    var small = this.imgs[k], im = this.hi[k] || small, c = this.canvas, ctx = this.ctx;
+    // Size from the small frame (same aspect ratio as the full-quality one), whole device pixels
+    var s = Math.min(c.width / small.naturalWidth, c.height / small.naturalHeight);
+    var w = Math.round(small.naturalWidth * s), h = Math.round(small.naturalHeight * s);
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, c.width, c.height);
+    ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = 'high';
-    ctx.drawImage(im, (c.width - w) / 2, (c.height - h) / 2, w, h);
-    this.drawn = k;
+    ctx.drawImage(im, Math.round((c.width - w) / 2), Math.round((c.height - h) / 2), w, h);
+    this.drawn = k; this.drawnHi = !!this.hi[k];
     if (this.poster) { this.poster.classList.add('gone'); this.poster = null; }
   };
 
@@ -236,12 +320,17 @@
       self.raf = 0;
       if (!self.visible) return;                          // resumes when back on screen
       var ready = self.loaded + self.failed >= self.n;
-      if (self.auto && !self.touched && ready && self.loaded && t >= self.restUntil) {
-        self.pos += dt * self.n / TURN_SECONDS;
+      var idle = !self.dragging && t - self.lastInteract >= RESUME_MS && Math.abs(self.vel) < 0.5;
+      if (self.auto && !self.userPaused && idle && ready && self.loaded && t >= self.restUntil) {
+        if (self.ramp === 0) self.retarget();
+        self.ramp = Math.min(1, self.ramp + dt / RAMP_S);
+        self.pos += dt * self.n / TURN_SECONDS * self.ramp * self.ramp * (3 - 2 * self.ramp);
         if (self.pos >= self.turnStart + self.n) {          // back on the top frame: rest there a moment
           self.pos = self.turnStart = self.turnStart + self.n;
           self.restUntil = t + TOP_PAUSE * 1000;
         }
+      } else if (!idle) {
+        self.ramp = 0;                                       // the next start eases in from rest
       }
       if (!self.dragging && Math.abs(self.vel) > 0.01) {  // a little inertia after a flick
         self.pos += self.vel * dt;
@@ -254,6 +343,8 @@
   };
 
   Spinner.prototype.touch = function () {
+    this.lastInteract = performance.now();                  // auto-rotate resumes RESUME_MS after the last interaction
+    this.ramp = 0;
     if (this.touched) return;
     this.touched = true;
     this.hint.classList.add('gone');
@@ -264,6 +355,7 @@
     function framesPerPx() { return self.n / (el.clientWidth * DRAG_TURN || 1); }
     el.addEventListener('pointerdown', function (e) {
       if (e.button && e.button !== 0) return;
+      if (e.target && e.target.closest && e.target.closest('.s360-btn')) return;
       id = e.pointerId; startX = lastX = e.clientX; startY = e.clientY; lastT = performance.now();
       decided = e.pointerType === 'mouse';               // touch: wait to see if it's a vertical scroll
       if (decided) { self.dragging = true; el.classList.add('dragging'); try { el.setPointerCapture(id); } catch (x) {} }
@@ -282,7 +374,7 @@
       self.pos -= dx * framesPerPx();
       var dt = Math.max(8, now - lastT) / 1000, cap = self.n * 1.5;   // flick speed: at most 1.5 turns/s
       self.vel = Math.max(-cap, Math.min(cap, 0.8 * (-dx * framesPerPx() / dt) + 0.2 * self.vel));
-      lastX = e.clientX; lastT = now;
+      lastX = e.clientX; lastT = now; self.lastInteract = now;
       self.draw(false);
       self.kick();
     });
@@ -291,6 +383,7 @@
       id = null;
       if (performance.now() - lastT > 90) self.vel = 0;   // held still before letting go: no flick
       self.dragging = false; el.classList.remove('dragging');
+      self.lastInteract = performance.now();
       self.kick();
     }
     el.addEventListener('pointerup', end);

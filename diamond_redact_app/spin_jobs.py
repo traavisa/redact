@@ -135,7 +135,7 @@ def record_spin(sb_url, key, vendor_url, spin):
     show our spinner). A capture it replaces is kept in old_spin_ids, so share links that
     carry the old frames can still be matched. Returns False if the SQL wasn't run."""
     body = {"spin_id": spin["id"], "spin_frames": spin["n"], "spin_top": spin.get("top", 0),
-            "spin_version": sc.CAPTURE_VERSION}
+            "spin_version": int(spin.get("v") or sc.CAPTURE_VERSION)}
     try:
         r = requests.get(f"{sb_url}/rest/v1/media_links", params={"vendor_url": f"eq.{vendor_url}",
                          "select": "token,spin_id,old_spin_ids"}, headers=_h(key), timeout=10)

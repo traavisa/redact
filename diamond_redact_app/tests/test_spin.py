@@ -130,7 +130,7 @@ def test_pcg_quote_is_captured_from_api_fields(spin_env):
     s = saved["stones"][0]
     assert s["video_url"] == "" and s["media_ref"] == VIEWER
     sp = s["spin"]
-    assert sp["v"] == spin_capture.CAPTURE_VERSION == 5 and sp["n"] == 72
+    assert sp["v"] == spin_capture.CAPTURE_VERSION == 6 and sp["n"] == 72
     # thinned to 72, top_index included, the spinner starts on it
     idx, top_pos = spin_capture.pick(240, 37)
     assert sp["top"] == top_pos and 37 in idx
@@ -138,13 +138,15 @@ def test_pcg_quote_is_captured_from_api_fields(spin_env):
     # only the kept frames are downloaded (never the full 240), top_index among them
     assert sorted(frames) == sorted(f"{FOLDER}/{i}.webp" for i in idx) and f"{FOLDER}/37.webp" in frames
     assert all(re.fullmatch(re.escape(FOLDER) + r"/\d+\.webp", u) for u in seen["frames"])   # own folder only
-    stored = {n: d for n, d in sb.storage["quote-media"].items() if n.startswith(sp["id"] + "/")}
-    assert sorted(stored) == [f"{sp['id']}/{i:03d}.webp" for i in range(72)]
+    stored_all = {n: d for n, d in sb.storage["quote-media"].items() if n.startswith(sp["id"] + "/")}
+    assert sorted(stored_all) == sorted([f"{sp['id']}/{i:03d}.webp" for i in range(72)]
+                                        + [f"{sp['id']}/{i:03d}@hi.webp" for i in range(72)])    # small + full-quality set
+    stored = {n: d for n, d in stored_all.items() if "@hi" not in n}
     for d in stored.values():                                         # WebP, at most 720 px wide, no metadata
         im = Image.open(io.BytesIO(d))
         assert im.format == "WEBP" and im.size[0] <= 720 and not im.info.get("exif") and not im.info.get("icc_profile")
     ups = [h for m, u, h in sb.headers if m == "POST" and f"/quote-media/{sp['id']}/" in u]
-    assert len(ups) == 72 and all(h["Cache-Control"] == "public, max-age=31536000, immutable"
+    assert len(ups) == 144 and all(h["Cache-Control"] == "public, max-age=31536000, immutable"
                                   and h["Content-Type"] == "image/webp" for h in ups)
     assert s["image_url"].startswith(quote_media.MEDIA_BASE)
     assert no_viewer_page_read(sb)
@@ -406,3 +408,72 @@ def test_storage_error_text_is_masked():
     m = spin_capture.storage_error(R())
     assert m.startswith("upload HTTP 400: Bad: ") and "supabase.co" not in m and "0123456789abcdef" not in m
     assert "nivoda" not in m.lower() and "[host]" in m and len(m) < 200
+
+
+# ── Full-quality frames (NNN@hi.webp) ─────────────────────────────────────────
+def _big_jpeg(w, h):
+    b = io.BytesIO()
+    im = Image.effect_noise((w, h), 60).convert("RGB")           # detail, so quality shows in the size
+    im.save(b, "JPEG", quality=95)
+    return b.getvalue()
+
+
+def _store(monkeypatch, sb, src_w, src_h, n=30, fail_hi=False):
+    from fakesb import FakeSupabase
+    data = _big_jpeg(src_w, src_h)
+    monkeypatch.setattr(spin_capture, "_fetch", lambda u: data)
+    monkeypatch.setattr(quote_media, "ALLOW_PRIVATE_HOSTS", True)
+    if fail_hi:
+        real = spin_capture._upload_frame
+
+        def up(sb_url, key, path, d):
+            if "@hi" in path and path.startswith(tuple("0123456789abcdef")) and path.endswith("005@hi.webp"):
+                raise RuntimeError("upload HTTP 500: boom")
+            return real(sb_url, key, path, d)
+        monkeypatch.setattr(spin_capture, "_upload_frame", up)
+    facts, tm = [], {}
+    urls = [f"{HOST}/v360/frames/x/{i}.webp" for i in range(n)]
+    folder, count, top = spin_capture.store_frames(FakeSupabase.__module__ and "https://srlbevzrkovruyerixdi.supabase.co",
+                                                   "k", urls, facts, 3, tm)
+    return folder, count, top, tm, facts
+
+
+def test_hi_set_is_source_resolution_capped_and_higher_quality(env, monkeypatch):
+    sb, api = env
+    folder, n, top, tm, facts = _store(monkeypatch, sb, 2400, 1800)
+    files = {k: v for k, v in sb.storage["quote-media"].items() if k.startswith(folder + "/")}
+    small = {k: v for k, v in files.items() if "@hi" not in k}
+    hi = {k: v for k, v in files.items() if "@hi" in k}
+    assert len(small) == len(hi) == n and sorted(k.replace("@hi", "") for k in hi) == sorted(small)
+    s0, h0 = Image.open(io.BytesIO(small[f"{folder}/000.webp"])), Image.open(io.BytesIO(hi[f"{folder}/000@hi.webp"]))
+    assert s0.size == (720, 540) and h0.size == (1600, 1200)                # 2400 px source: capped at 1600
+    assert h0.format == "WEBP" and not h0.info.get("exif") and not h0.info.get("icc_profile")
+    assert len(hi[f"{folder}/000@hi.webp"]) > 3 * len(small[f"{folder}/000.webp"])
+    assert tm["hi"] is True and tm["hi_bytes"] > 0 and "hi_upload_s" in tm
+    assert any("full-quality frame" in f for f in facts)
+
+
+def test_hi_set_is_not_scaled_down_when_the_source_is_smaller_than_1600(env, monkeypatch):
+    sb, api = env
+    folder, n, top, tm, facts = _store(monkeypatch, sb, 1200, 900)
+    h0 = Image.open(io.BytesIO(sb.storage["quote-media"][f"{folder}/000@hi.webp"]))
+    assert h0.size == (1200, 900)                                           # the source resolution, unchanged
+
+
+def test_failed_hi_upload_leaves_a_plain_small_set(env, monkeypatch):
+    sb, api = env
+    folder, n, top, tm, facts = _store(monkeypatch, sb, 1200, 900, fail_hi=True)
+    files = [k for k in sb.storage["quote-media"] if k.startswith(folder + "/")]
+    assert tm["hi"] is False and not any("@hi" in k for k in files) and len(files) == n     # no half set left behind
+    assert any("full-quality set skipped" in f and "HTTP 500" in f for f in facts)
+
+
+def test_capture_version_is_6_only_with_a_complete_hi_set(spin_env):
+    sb, api, seen = spin_env
+    save("Pure Carbon Group", "LG600000001")
+    sp = sb.tables["quotes"][-1]["stones"][0]["spin"]
+    assert sp["v"] == 6
+    ROW = [r for r in sb.tables["media_links"]]
+    assert spin_capture.HI_SINCE == 6 and spin_capture.WEBP_SINCE == 5
+    js = open(os.path.join(ROOT, "netlify/functions/lib/spin.js")).read()
+    assert "const CAPTURE_VERSION = 6;" in js

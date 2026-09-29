@@ -2,7 +2,7 @@
 // at least 24 frames AND made by the current capture code (version >= TRUSTED_VERSION: the
 // certificate's 360 API fields only; v4 = JPEG frames, v5+ = WebP). Older captures are never
 // served: the stone falls back to its original viewer.
-const CAPTURE_VERSION = 5;     // keep equal to spin_capture.CAPTURE_VERSION (v5 = WebP frames)
+const CAPTURE_VERSION = 6;     // keep equal to spin_capture.CAPTURE_VERSION (v5 = WebP frames, v6 = plus NNN@hi.webp full-quality frames)
 const TRUSTED_VERSION = 4;     // keep equal to spin_capture.TRUSTED_VERSION
 const MIN_FRAMES = 24;
 const ID_RE = /^[a-f0-9]{32}$/;

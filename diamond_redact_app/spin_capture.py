@@ -47,10 +47,13 @@ import quote_media as qm
 # fields with page analysis as a fallback. v4 = the certificate's API fields ONLY (JPEG frames).
 # v5 = the same capture rules, frames stored as WebP (NNN.webp) — the pages use the version
 # to pick the file extension. v4 captures stay trusted: they were made by the same rules.
+# v6 = the same again, plus a full-quality set beside the small one: NNN@hi.webp (source resolution,
+# 1600 px wide at most, WebP q90) for every frame. The spinner loads the hi set only for v6+.
 # netlify/functions/lib/spin.js must carry the same CAPTURE_VERSION and TRUSTED_VERSION.
-CAPTURE_VERSION = 5
+CAPTURE_VERSION = 6
 TRUSTED_VERSION = 4          # only captures made under the API-fields-only rules are shown
 WEBP_SINCE = 5               # captures from this version on are .webp
+HI_SINCE = 6                 # captures from this version on also have NNN@hi.webp (all of them, or the capture is v5)
 
 
 def _commit():
@@ -73,6 +76,9 @@ MAX_FRAMES = 72              # kept frames (5° a frame); more are evenly thinne
 MIN_FRAMES = 24             # fewer is not a real 360 (e.g. a page's shared images)
 FRAME_WIDTH = 720
 WEBP_QUALITY = 80
+HI_WIDTH = 1600              # full-quality set: the source resolution, never wider than this
+HI_QUALITY = 90
+HI_SUFFIX = "@hi"
 WEBP_METHOD = 2              # encoder effort 0-6: 2 is ~20% faster than the default 4, same size
 FRAME_EXT, FRAME_TYPE = "webp", "image/webp"
 DOWNLOAD_WORKERS = 24        # frame downloads at once, shared by every capture (polite to the source)
@@ -346,9 +352,11 @@ def pick(n, top=0, limit=None):
     return idx, idx.index(top)
 
 
-def clean_frame(data, size=None):
-    """Re-encodes one frame from its pixels only (no EXIF/XMP/ICC) as WebP, max FRAME_WIDTH wide.
-    `size` forces every frame to the first frame's size. Returns (bytes, size)."""
+def clean_frame(data, size=None, max_width=None, quality=None):
+    """Re-encodes one frame from its pixels only (no EXIF/XMP/ICC) as WebP, max FRAME_WIDTH wide
+    (or `max_width`; never enlarged). `size` forces every frame to the first frame's size.
+    Returns (bytes, size)."""
+    max_width = max_width or FRAME_WIDTH
     with Image.open(io.BytesIO(data)) as im:
         im.seek(0)
         im = ImageOps.exif_transpose(im)
@@ -360,8 +368,8 @@ def clean_frame(data, size=None):
             flat = im.convert("RGB")
         if size is None:
             w, h = flat.size
-            if w > FRAME_WIDTH:
-                size = (FRAME_WIDTH, max(1, round(h * FRAME_WIDTH / w)))
+            if w > max_width:
+                size = (max_width, max(1, round(h * max_width / w)))
             else:
                 size = (w, h)
         if flat.size != size:
@@ -369,7 +377,7 @@ def clean_frame(data, size=None):
         clean = Image.new("RGB", size)
         clean.paste(flat)
     out = io.BytesIO()
-    clean.save(out, "WEBP", quality=WEBP_QUALITY, method=WEBP_METHOD)
+    clean.save(out, "WEBP", quality=quality or WEBP_QUALITY, method=WEBP_METHOD)
     return out.getvalue(), size
 
 
@@ -500,7 +508,6 @@ def store_frames(sb_url, key, urls, facts, top=0, timing=None):
     done = dict(zip(others, _enc_pool.map(enc, others)))
     done[top_pos] = first
     pos = [i for i in kept if done.get(i)]
-    raw = None
     tm["encode_s"] = round(time.time() - t1, 2)
     new_top = pos.index(top_pos)                          # the spinner starts on top_index
     if len(pos) < max(MIN_FRAMES, len(urls) * (1 - MAX_MISSING)):
@@ -519,7 +526,41 @@ def store_frames(sb_url, key, urls, facts, top=0, timing=None):
     tm["first_view_bytes"] = sum(len(cleaned[j]) for j in first_view(len(cleaned), new_top))
     facts.append(f"stored {len(cleaned)} frame(s), {size[0]}×{size[1]} WebP, {tm['bytes'] // 1024} KB total "
                  f"({tm['bytes'] // len(cleaned) // 1024} KB each; first view {tm['first_view_bytes'] // 1024} KB)")
+    # 4. The full-quality set beside it (same folder, NNN@hi.webp). All or nothing: without every
+    #    frame the capture stays a plain small-set one (v5) and the pages never ask for hi files.
+    tm["hi"] = _store_hi(sb_url, key, folder, [raw[i] for i in pos], new_top, tm, facts)
+    raw = None
     return folder, len(cleaned), new_top
+
+
+def _store_hi(sb_url, key, folder, raws, top_pos, tm, facts):
+    """Encodes every kept frame at the source resolution (HI_WIDTH at most, WebP q90) and uploads it as
+    <folder>/NNN@hi.webp. True only when all of them are stored; otherwise none are left behind."""
+    t = time.time()
+    paths = [f"{folder}/{i:03d}{HI_SUFFIX}.{FRAME_EXT}" for i in range(len(raws))]
+    try:
+        first, hsize = clean_frame(raws[top_pos], None, HI_WIDTH, HI_QUALITY)
+        rest = [i for i in range(len(raws)) if i != top_pos]
+
+        def enc(i):
+            return clean_frame(raws[i], hsize, HI_WIDTH, HI_QUALITY)[0]
+        done = dict(zip(rest, _enc_pool.map(enc, rest)))
+        done[top_pos] = first
+        data = [done[i] for i in range(len(raws))]
+        tm["hi_encode_s"] = round(time.time() - t, 2)
+        t2 = time.time()
+        errs = list(_up_pool.map(lambda pd: _safe_upload(sb_url, key, *pd), zip(paths, data)))
+        tm["hi_upload_s"] = round(time.time() - t2, 2)
+        if any(errs):
+            raise RuntimeError("upload: " + next(e for e in errs if e))
+        tm["hi_bytes"] = sum(len(d) for d in data)
+        facts.append(f"stored {len(data)} full-quality frame(s), {hsize[0]}×{hsize[1]} WebP q{HI_QUALITY}, "
+                     f"{tm['hi_bytes'] // 1024} KB total ({tm['hi_bytes'] // len(data) // 1024} KB each)")
+        return True
+    except Exception as e:
+        _remove(sb_url, key, paths)
+        facts.append("full-quality set skipped, small set kept: " + mask_text(e if isinstance(e, RuntimeError) else type(e).__name__, 160))
+        return False
 
 
 def _safe_upload(sb_url, key, path, data):
@@ -562,7 +603,8 @@ def capture(sb_url, key, viewer_url, hint=None):
             folder, n, top = store_frames(sb_url, key, fs.urls, facts, fs.top, timing)
             log = {"method": fs.source, "frames": n, "source_frames": len(fs.urls),
                    "top_index": fs.top, "top_frame": top, "timing": timing}
-            res = {"ok": True, "spin": {"id": folder, "n": n, "top": top, "v": CAPTURE_VERSION}, "video": "", "facts": facts,
+            v = CAPTURE_VERSION if timing.get("hi") else WEBP_SINCE      # v6 only when every full-quality frame is stored
+            res = {"ok": True, "spin": {"id": folder, "n": n, "top": top, "v": v}, "video": "", "facts": facts,
                    "method": fs.method, "still": fs.still, "log": log,
                    "note": f"360 captured via {fs.method}: {n} frames"
                            + (f" (thinned evenly from {len(fs.urls)})" if n < len(fs.urls) else "")
@@ -582,7 +624,9 @@ def capture(sb_url, key, viewer_url, hint=None):
         tm = res["log"]["timing"]
         tm["total_s"] = res["seconds"]                     # the whole capture, API field checks included
         facts_line = (f"timing: fetch {tm.get('fetch_s', 0):.1f}s · re-encode {tm.get('encode_s', 0):.1f}s · "
-                      f"upload {tm.get('upload_s', 0):.1f}s · total {tm['total_s']:.1f}s")
+                      f"upload {tm.get('upload_s', 0):.1f}s"
+                      + (f" · full-quality encode {tm['hi_encode_s']:.1f}s, upload {tm['hi_upload_s']:.1f}s"
+                         if "hi_upload_s" in tm else "") + f" · total {tm['total_s']:.1f}s")
         res["facts"] = list(res["facts"]) + [facts_line]
     res["note"] = _clean_text(res["note"])
     res["facts"] = [_clean_text(f) for f in res["facts"]]
