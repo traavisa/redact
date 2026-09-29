@@ -264,7 +264,7 @@ def get_logo_img(name):
         return Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA")
     return None
 
-def rehost_media(stones_payload, qid=None, client=""):
+def rehost_media(stones_payload, qid=None, client="", cert_nos=None):
     """Replaces every stone's image/video link, in place, with our own /media/ copy, an
     opaque /v/ viewer link, or nothing (see quote_media.py). Vendor links are never saved.
     When capture is allowed for this client (spin_jobs.capture_allowed: SPIN_ENABLED "true",
@@ -277,6 +277,7 @@ def rehost_media(stones_payload, qid=None, client=""):
     notes = []
     import spin_capture
     hints = [s.pop("_media", None) for s in stones_payload]      # search API media fields, never saved
+    cert_nos = list(cert_nos or [None] * len(stones_payload))    # each stone's report number (cross-check only, never saved)
     for s, hint in zip(stones_payload, hints):
         if hint and not s.get("video_url"):
             s["video_url"] = spin_capture.video_file_from_hint(hint)   # a direct video file, if the API has one
@@ -289,7 +290,7 @@ def rehost_media(stones_payload, qid=None, client=""):
         pairs = [({"url": "", "note": "video couldn't be saved — left out" if v else ""},
                   {"url": "", "note": "image couldn't be saved — left out" if i else ""}) for v, i in items]
     jobs = spin_jobs.SaveJobs(SUPABASE_URL, SUPABASE_KEY, qid or "", client)
-    for n, (s, (vid, img), hint) in enumerate(zip(stones_payload, pairs, hints), 1):
+    for n, (s, (vid, img), hint, cno) in enumerate(zip(stones_payload, pairs, hints, cert_nos), 1):
         s["video_url"] = vid["url"]
         if img["url"]:
             s["image_url"] = img["url"]
@@ -299,7 +300,7 @@ def rehost_media(stones_payload, qid=None, client=""):
         src = vid.get("src") or ""
         if (jobs.allowed and vid.get("how") == "viewer" and src and "youtube" not in src
                 and "too large" not in vid.get("note", "")):
-            jobs.start(n - 1, label, src, vid["url"], hint)   # its result goes in the 360 capture log
+            jobs.start(n - 1, label, src, vid["url"], hint, cno)   # its result goes in the 360 capture log
             notes += quote_media.notes_for(label, ({}, img))
         else:
             notes += quote_media.notes_for(label, (vid, img))
@@ -339,6 +340,7 @@ def save_quote(client, stones_payload, expiry_days):
     # Live Search certificates (cert_attach.py): links are popped here, never saved. A stone
     # gets a pdf_url only when its redaction was verified; anything else becomes a note.
     cert_jobs = [s.pop("_cert", None) for s in stones_payload]
+    cert_nos = [(j or {}).get("cert_no") or None for j in cert_jobs]
     cert_notes, cert_logs = [], []
     if any(j is not None for j in cert_jobs):
         try:
@@ -348,7 +350,7 @@ def save_quote(client, stones_payload, expiry_days):
                                                            SUPABASE_URL, SUPABASE_KEY)
         except Exception as e:
             cert_notes = [f"Certificates not attached: unexpected problem ({type(e).__name__})"]
-    notes, jobs = rehost_media(stones_payload, qid, client)
+    notes, jobs = rehost_media(stones_payload, qid, client, cert_nos)
     st.session_state.media_notes = notes + cert_notes
     st.session_state.cert_log = cert_logs
     st.session_state.capture_qid = qid if jobs.jobs else None
@@ -647,15 +649,15 @@ with tab2:
         with st.spinner(f"Processing {len(stones_ready)} diamond(s)…"):
             stones_payload=[]; ok=True
             for s in stones_ready:
-                try:
-                    raw_bytes = s["file"].read()
-                    redacted, layout_q = cert_attach.redact_for_quote(raw_bytes, cert_type_q, client_logo)
-                except Exception as e:
-                    st.error(f"Redaction failed for ···{s['cert_last4']}: {e}"); ok=False; break
-                fname   = f"{gen_id(6)}_{s['cert_last4']}.pdf"
-                pdf_url = upload_pdf(redacted, fname)
-                if not pdf_url:
-                    st.error(f"Upload failed for ···{s['cert_last4']}"); ok=False; break
+                raw_bytes = s["file"].read()
+                # The same certificate code as Live Search: layout detection, redaction, verification
+                # (fail closed), then stored under a random name on our own domain.
+                clog = cert_attach.process({"data": raw_bytes, "lab": cert_type_q, "cert_no": "",
+                                            "last4": s["cert_last4"]}, client_logo, SUPABASE_URL, SUPABASE_KEY)
+                if not clog.get("pdf_url"):
+                    st.error(f"Redaction failed for ···{s['cert_last4']}: {clog.get('reason') or clog.get('note')}")
+                    ok=False; break
+                pdf_url, layout_q = clog["pdf_url"], clog["layout"]
                 stones_payload.append({
                     "cert_last4":    s["cert_last4"],
                     "orig_filename": s["file"].name,

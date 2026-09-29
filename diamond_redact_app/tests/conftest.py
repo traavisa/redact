@@ -25,3 +25,10 @@ def fake_api(monkeypatch):
                             lambda self, q, variables=None, token=None: api.post(self, q, variables, token))
         return api, stone_source.Client("https://api.test/graphql", "user", "pw", {})
     return make
+
+
+@pytest.fixture(autouse=True)
+def _fresh_certificate_cache():
+    import cert_attach
+    cert_attach._dl_cache.clear()
+    yield

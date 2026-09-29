@@ -109,10 +109,10 @@ def test_image_only_certificate(tmp_path, monkeypatch):
     try:
         log = C.process({"url": base + "/c.jpg", "cert_no": "2141438167", "lab": "GIA"}, F.logo(), "sb", "k",
                         uploader=uploader)
-        assert log["pdf_url"] == "" and "image (JPG/PNG), not a PDF" in log["note"]
+        assert log["pdf_url"] == "" and "not a PDF (the certificate is an image" in log["note"]
         log = C.process({"url": base + "/c.html", "cert_no": "2141438167", "lab": "GIA"}, F.logo(), "sb", "k",
                         uploader=uploader)
-        assert log["pdf_url"] == "" and "isn't a PDF file" in log["note"]
+        assert log["pdf_url"] == "" and "no PDF provided, online report-check link only" in log["note"] and log["reason"] == "no PDF provided, online report-check link only"
         log = C.process({"url": base + "/c.pdf", "cert_no": "2141438167", "lab": "GIA"}, F.logo(), "sb", "k",
                         uploader=uploader)
         assert log["verification"] == "passed" and log["pdf_url"]
@@ -123,6 +123,7 @@ def test_image_only_certificate(tmp_path, monkeypatch):
         srv.shutdown()
     # private addresses are refused outside tests
     monkeypatch.setattr(quote_media, "ALLOW_PRIVATE_HOSTS", False)
+    C._dl_cache.clear()
     log = C.process({"url": base + "/c.pdf", "cert_no": "2141438167"}, F.logo(), "sb", "k", uploader=uploader)
     assert log["pdf_url"] == "" and "public address" in log["note"]
 

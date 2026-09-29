@@ -191,7 +191,7 @@ def version_check(force=False):
     return res
 
 
-def capture_one(sb_url, key, vendor_url, hint=None):
+def capture_one(sb_url, key, vendor_url, hint=None, expect_cert=None):
     """Capture with the database cache in front (only captures by the current code are reused).
     Returns the spin_capture result dict, plus 'still' = our hosted copy of the certificate's
     still image when there is one. Frames come only from the certificate's 360 API fields."""
@@ -201,13 +201,15 @@ def capture_one(sb_url, key, vendor_url, hint=None):
                "facts": ["frames already captured for this viewer by the current capture code"], "video": "",
                "log": {"method": "reused an earlier capture by the current code", "frames": spin["n"],
                        "source_frames": None, "top_index": None, "top_frame": spin.get("top", 0)}}
-        still = sc.still_from_hint(hint)
+        still = sc.still_from_hint(hint) or sc.still_by_link(vendor_url)
         return _host_still(sb_url, key, res, still) if still else res
-    res = dict(sc.capture(sb_url, key, vendor_url, hint))
+    res = dict(sc.capture(sb_url, key, vendor_url, hint, expect_cert))
     res["video"] = ""                                   # never a video file
     if res["ok"]:
         if not record_spin(sb_url, key, vendor_url, res["spin"]):
             res["facts"] = res["facts"] + ["media_links has no spin columns yet (run the SQL update)"]
+        if not res.get("still"):
+            res["still"] = sc.still_by_link(vendor_url)        # the certificate's own still, when the frames came another way
         if res.get("still"):
             res = _host_still(sb_url, key, res, res["still"])
     if not str(res.get("still") or "").startswith(qm.MEDIA_BASE):
@@ -274,11 +276,11 @@ class SaveJobs:
         self.allowed = capture_allowed(client)
         self.jobs = []                  # (index, label, link_saved, future)
 
-    def start(self, index, label, vendor_url, link_saved, hint=None):
+    def start(self, index, label, vendor_url, link_saved, hint=None, expect_cert=None):
         """Queues one stone's capture. Returns at once: nothing here touches the network."""
         if not self.allowed:                            # capture off for this quote: as if never asked
             return
-        fut = _pool.submit(_checked_capture, self.sb_url, self.key, vendor_url, hint)
+        fut = _pool.submit(_checked_capture, self.sb_url, self.key, vendor_url, hint, expect_cert)
         self.jobs.append((index, label, link_saved, fut))
         _set_status(self.qid, label, PENDING)
 
@@ -316,12 +318,12 @@ class SaveJobs:
 PENDING = "capturing 360 frames…"
 
 
-def _checked_capture(sb_url, key, vendor_url, hint):
+def _checked_capture(sb_url, key, vendor_url, hint, expect_cert=None):
     """The version gate, then the capture — both in the background, so a save never waits."""
     ok, why = version_check()
     if not ok:                                          # keep the /v/ link; never capture with old code
         return {"ok": False, "spin": None, "note": f"skipped — {why}", "facts": [why]}
-    return capture_one(sb_url, key, vendor_url, hint)
+    return capture_one(sb_url, key, vendor_url, hint, expect_cert)
 
 
 def progress(qid):

@@ -19,6 +19,8 @@ import traceback
 
 import streamlit as st
 
+import cert_attach
+import pricing
 import stone_source as src
 
 AI_MODEL = "claude-sonnet-5"
@@ -161,6 +163,9 @@ def _init_state(default_markup, default_rate):
     ss.setdefault("ls_rate", float(default_rate))
     ss.setdefault("ls_notes", {})
     ss.setdefault("ls_picked", set())
+    ss.setdefault("ls_over", {})          # sid -> what was typed in the stone's "Client price (CAD)" box
+    ss.setdefault("ls_cert_up", {})       # sid -> {"name", "data"}: a certificate PDF uploaded for the stone
+    ss.setdefault("ls_cert_chk", {})      # (sid, source) -> (ok, reason, layout): certificate pre-checks
 
 
 # ── AI helpers (Anthropic) ────────────────────────────────────────────────────
@@ -1036,7 +1041,9 @@ def _toggle_pick(sid, key):
 
 def _clear_picks():
     st.session_state.ls_picked = set()
-    for k in [k for k in st.session_state if str(k).startswith(("ls_pk_", "ls_tbl_"))]:
+    st.session_state["ls_over"] = {}                   # per-stone price overrides and uploaded certificates go with them
+    st.session_state["ls_cert_up"] = {}
+    for k in [k for k in st.session_state if str(k).startswith(("ls_pk_", "ls_tbl_", "ls_ov_", "ls_ovr_", "ls_cup_", "ls_cupx_"))]:
         del st.session_state[k]
 
 
@@ -1055,6 +1062,11 @@ def _new_search():
     ss["ls_req"] = ""
     ss["ls_lk_text"] = ""
     ss["ls_notes"] = {}
+    ss["ls_over"] = {}                                 # per-stone price overrides
+    ss["ls_cert_up"] = {}                              # uploaded certificates
+    ss["ls_cert_chk"] = {}
+    for k in [k for k in ss if str(k).startswith(("ls_ov_", "ls_ovr_", "ls_cup_", "ls_cupx_"))]:
+        del ss[k]
     ss["ls_ver"] = ss.get("ls_ver", 0) + 1            # the range sliders are re-created at their defaults
     for k in NEW_SEARCH_CLEARS:
         ss[k] = None
@@ -1517,11 +1529,14 @@ def _card(s, section):
         with c3:
             if pv:
                 usd_ct = f" · US${pv['usd_ct']:,.0f}/ct" if pv["usd_ct"] else ""
-                client_ct = f"{_fmt_money(pv['client_ct'])}/ct" if pv["client_ct"] else ""
+                f = _final(s)
+                ct = s.get("carat") or 0
+                client_ct = f"{_fmt_money(f['price'] / ct)}/ct" if (f["price"] and ct) else ""
+                custom = ' <span class="ls-badge">custom</span>' if f["custom"] else ""
                 st.markdown(
                     f'<div class="ls-price">Cost <b>{_fmt_money(pv["cost"])}</b><br>'
                     f'<span style="opacity:.6">US${pv["usd"]:,.0f} total{usd_ct}</span><br>'
-                    f'Client <b>{_fmt_money(pv["client"])}</b><br>'
+                    f'Client <b>{_fmt_money(f["price"])}</b>{custom}<br>'
                     f'<span style="opacity:.6">{client_ct}</span></div>', unsafe_allow_html=True)
             else:
                 st.caption("No price")
@@ -1701,8 +1716,8 @@ def _section(rows, section, view):
         "Depth %": s.get("depth_pct"), "Table %": s.get("table_pct"),
         "Cost CAD": round(s["pv"]["cost"]) if s["pv"] else None,
         "Cost USD": round(s["pv"]["usd"]) if s["pv"] else None,
-        "Client CAD": round(s["pv"]["client"]) if s["pv"] else None,
-        "Client CAD/ct": round(s["pv"]["client_ct"]) if s["pv"] and s["pv"]["client_ct"] else None,
+        "Client CAD": _final(s)["price"] if s["pv"] else None,
+        "Client CAD/ct": round(_final(s)["price"] / s["carat"]) if s["pv"] and s.get("carat") and _final(s)["price"] else None,
         "Differs": "; ".join(b for _, b in s["devs"]),
         "Notes": "; ".join(x for x in [availability_badge(s)] + list(s.get("xbadges") or []) if x),
         **({"Stock #": s.get("stock_no") or ""} if s.get("lookup") else {}),
@@ -1719,8 +1734,26 @@ def _section(rows, section, view):
         (ss.ls_picked.add if add else ss.ls_picked.discard)(s["sid"])
 
 
-def _quote_payload(s, show_price):
+def _final(s):
+    """The stone's price with its own override (if any) applied to the main markup — see pricing.py."""
+    ss = st.session_state
+    pv = s.get("pv")
+    key = f"ls_ov_{s['sid']}"
+    text = ss[key] if key in ss else (ss.get("ls_over") or {}).get(s["sid"], "")
+    return pricing.final(pv["cost"] if pv else None, float(ss.get("ls_markup") or 0.0), text)
+
+
+def _cert_job(s, up=None):
+    """The certificate job for cert_attach: the stone's certificate link, or the PDF uploaded for it."""
+    job = {"url": s.get("cert_file") or "", "cert_no": s.get("cert_no") or "", "lab": norm_lab(s.get("lab"))}
+    if up:
+        job["data"] = up["data"]
+    return job
+
+
+def _quote_payload(s, show_price, final=None, cert_up=None):
     pv = s["pv"]
+    final = final or _final(s)
     lab = norm_lab(s.get("lab"))
     fancy = not norm_colour(s.get("color"))
     colour, _, _, meas, r = _spec_bits(s)
@@ -1742,15 +1775,132 @@ def _quote_payload(s, show_price):
         "video_url":     s.get("video") or "",
         "image_url":     s.get("image") or "",
         "pdf_url":       "",
-        "price":         str(int(round(pv["client"]))) if (show_price and pv) else "",
+        "price":         pricing.quote_price(final, show_price),      # the one final figure: never cost, markup or margin
         "currency":      "CAD",
         "price_type":    "stone",
         "cert_data":     {k: v for k, v in cert_data.items() if v},
         "ls_ref":        s["sid"],   # internal only; the share page's server strips unknown fields
         "_media":        s.get("media") or None,   # 360/video fields for capture; removed before saving
         # certificate file: redacted + verified on save (cert_attach.py); popped before saving
-        "_cert":         {"url": s.get("cert_file") or "", "cert_no": s.get("cert_no") or "", "lab": lab},
+        "_cert":         _cert_job(s, cert_up),
     }
+
+
+def _reset_override(sid):
+    ss = st.session_state
+    ss["ls_ov_" + sid] = ""
+    ss.ls_over.pop(sid, None)
+
+
+def _remove_cert_upload(sid):
+    st.session_state.ls_cert_up.pop(sid, None)
+
+
+def _cert_sig(s, up):
+    return (s["sid"], ("up", len(up["data"]), hash(up["data"])) if up else ("url", s.get("cert_file") or ""))
+
+
+def _cert_checks(chosen):
+    """Pre-checks each selected stone's certificate (download, lab, numbers, layout) so a failure is
+    known before saving, and the stone can get an Upload button. Results are remembered; the
+    downloads run several at a time. Returns {sid: (ok, reason, layout)}."""
+    ss = st.session_state
+    cache = ss.ls_cert_chk
+    todo = [s for s in chosen[:MAX_CERT_CHECKS] if _cert_sig(s, ss.ls_cert_up.get(s["sid"])) not in cache]
+    if todo:
+        from concurrent.futures import ThreadPoolExecutor
+        jobs = [_cert_job(s, ss.ls_cert_up.get(s["sid"])) for s in todo]      # built here: threads can't read session state
+        sigs = [_cert_sig(s, ss.ls_cert_up.get(s["sid"])) for s in todo]
+        with st.spinner(f"Checking {len(todo)} certificate(s)…"):
+            with ThreadPoolExecutor(max_workers=8) as ex:
+                res = list(ex.map(cert_attach.precheck, jobs))
+        for sig, r in zip(sigs, res):
+            cache[sig] = r
+    return {s["sid"]: cache.get(_cert_sig(s, ss.ls_cert_up.get(s["sid"]))) for s in chosen}
+
+
+def _stone_label(s):
+    return (f"{s.get('carat') or 0:.2f} ct {shape_group(s['shape'])} "
+            f"···{''.join(filter(str.isdigit, s.get('cert_no', '')))[-4:]}")
+
+
+def _stone_panel(s, check):
+    """One selected stone: its own client price and its certificate. Returns its final price dict."""
+    ss = st.session_state
+    sid, pv = s["sid"], s["pv"]
+    key = "ls_ov_" + sid
+    ss.setdefault(key, ss.ls_over.get(sid, ""))
+    with st.container(border=True):
+        st.markdown(f"**{_esc(_stone_label(s))}** · {_esc(s.get('lab') or '')}", unsafe_allow_html=True)
+        default = pricing.final(pv["cost"] if pv else None, float(ss.ls_markup), "")["default"]
+        c1, c2 = st.columns([2, 3])
+        with c1:
+            st.text_input("Client price (CAD)", key=key, placeholder=f"{default:,.0f}" if default is not None else "no price",
+                          help="Leave empty for the default (main markup). Type a price like 4500, or a markup "
+                               "for this stone only like 32%.")
+        typed = ss[key]
+        if typed.strip():
+            ss.ls_over[sid] = typed
+        else:
+            ss.ls_over.pop(sid, None)
+        f = pricing.final(pv["cost"] if pv else None, float(ss.ls_markup), typed)
+        with c2:
+            if f["custom"]:
+                st.markdown('<span class="ls-badge">custom</span>' + (f" {_esc(f['note'])}" if f["note"] else ""),
+                            unsafe_allow_html=True)
+                st.button("Reset to default", key="ls_ovr_" + sid, on_click=_reset_override, args=(sid,))
+            elif default is not None:
+                st.caption(f"Default: {_fmt_money(default)} (markup {ss.ls_markup:g}%)")
+            if f["error"]:
+                st.caption(f"⚠️ {f['error']} — the default price is used.")
+            if f["margin"] is not None:      # internal screen only: never saved
+                st.caption(f"Margin {_fmt_money(f['margin'])} · {f['margin_pct']:+.1f}% over cost "
+                           f"(cost {_fmt_money(pv['cost'])})")
+        if f["below_cost"]:
+            st.warning(f"Below cost: {_fmt_money(f['price'])} is under the {_fmt_money(pv['cost'])} this stone costs. "
+                       "You can still save it.")
+        _cert_panel(s, check)
+    return f
+
+
+def accept_cert_upload(s, name, data):
+    """(ok, why): an uploaded certificate is kept for the stone (and attached when the quote is saved)
+    only when its lab, numbers and layout check out; the same detection and redaction rules as every
+    certificate then apply on save, ending in the fail-closed verification."""
+    ok, why, layout = cert_attach.precheck(_cert_job(s, {"data": data}))
+    if ok:
+        st.session_state.ls_cert_up[s["sid"]] = {"name": str(name or "certificate.pdf"), "data": data}
+    return ok, why
+
+
+def _cert_panel(s, check):
+    ss = st.session_state
+    sid = s["sid"]
+    up = ss.ls_cert_up.get(sid)
+    if up:
+        ok, why, layout = check or (False, "not checked", "")
+        st.caption(f"📄 Uploaded certificate: {up['name']} — {layout} layout, redacted and verified when the quote is saved")
+        st.button("Remove uploaded certificate", key=f"ls_cupx_{sid}", on_click=_remove_cert_upload, args=(sid,))
+        return
+    if check is None:
+        st.caption("📄 Certificate: checked when the quote is saved")
+    elif check[0]:
+        st.caption(f"📄 Certificate: found ({check[2]}) — redacted and verified when the quote is saved")
+        return
+    else:
+        st.warning(f"📄 Certificate can't be pulled automatically: {check[1]}")
+    f = st.file_uploader("Upload certificate (PDF)", type="pdf", key=f"ls_cup_{sid}",
+                         help="Goes through the same layout detection, redaction (client logo in place of the QR code) "
+                              "and verification as every certificate, and is attached when the quote is saved.")
+    if f is not None:
+        ok, why = accept_cert_upload(s, f.name, f.getvalue())
+        if ok:
+            st.rerun()
+        else:
+            st.error(f"This PDF can't be used: {why}")
+
+
+MAX_CERT_CHECKS = 60
 
 
 def _quote_box(rows, deps):
@@ -1759,12 +1909,15 @@ def _quote_box(rows, deps):
     st.markdown('<div class="section-label">Approve into quote</div>', unsafe_allow_html=True)
     by_sid = {s["sid"]: s for s in rows}
     chosen = [by_sid[sid] for sid in list(ss.ls_picked) if sid in by_sid]
+    finals, checks = {}, {}
     if not chosen:
         st.caption("Tick **Add to quote** on the stones you want, then choose the client here.")
     else:
-        st.caption(f"{len(chosen)} stone(s) selected: " + ", ".join(
-            f"{s.get('carat') or 0:.2f} ct {shape_group(s['shape'])} ···{''.join(filter(str.isdigit, s.get('cert_no', '')))[-4:]}"
-            for s in chosen))
+        st.caption(f"{len(chosen)} stone(s) selected. Each has its own client price (the main markup is the default) "
+                   "and certificate.")
+        checks = _cert_checks(chosen)
+        for s in chosen:
+            finals[s["sid"]] = _stone_panel(s, checks.get(s["sid"]))
     q_client = deps["client_selector"]("ls_client", "ls_client_sel")
     a, b = st.columns(2)
     with a:
@@ -1773,7 +1926,7 @@ def _quote_box(rows, deps):
         show_price = st.checkbox("Show client price (CAD) on quote", value=True, key="ls_show_price")
     if st.button(f"🔗  Add to quote ({len(chosen)} stone{'s' if len(chosen) != 1 else ''})", type="primary",
                  use_container_width=True, key="ls_add_quote", disabled=not chosen):
-        payload = [_quote_payload(s, show_price) for s in chosen]
+        payload = [_quote_payload(s, show_price, finals.get(s["sid"]), ss.ls_cert_up.get(s["sid"])) for s in chosen]
         with st.spinner("Creating quote and copying media…"):
             link = deps["save_quote"](q_client, payload, exp)
         if link:
@@ -1799,7 +1952,8 @@ def _quote_box(rows, deps):
             with st.expander("Certificate log — one line per stone", expanded=False):
                 st.dataframe([{"Stone": c.get("stone"), "Source": c.get("source"), "Lab/format": c.get("lab_format"),
                                "Redaction": c.get("redaction"), "Verification": c.get("verification"),
-                               "Attached": "yes" if c.get("pdf_url") else "no", "Note": c.get("note")}
+                               "Attached": "yes" if c.get("pdf_url") else "no",
+                               "Why not": c.get("reason") or c.get("note")}
                               for c in ss.cert_log], hide_index=True, use_container_width=True)
 
 

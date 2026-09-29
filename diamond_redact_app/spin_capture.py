@@ -8,11 +8,15 @@ https://quote.alldiamondeverything.com/media/<uuid>/NNN.webp. Nothing a client l
 from a vendor. (Captures made by v4 are <uuid>/NNN.jpg; the pages pick the extension from the
 capture's version.) Each capture logs its timing: frame fetch, re-encode, upload and total.
 
-Where the frames come from — ONLY the certificate's 360 API fields (v360 / product_videos:
-url, frame_count, top_index):
-  - the stone's own API fields, passed in as `hint` (Live Search / direct lookup), or
-  - for a stone without them whose viewer link is /diamond/<certificate id>/video/<w>/<h>,
-    the same API fields fetched from the search API by that certificate ID (CERT_LOOKUP).
+Where the frames come from — ONLY the certificate's 360 fields (v360, and product_videos entries
+of type "360": url, frame_count, top_index), tried in this order, the same for every stone
+whatever screen it came from (Live Search results or a pasted viewer link):
+  a. the stone's own search-result fields, passed in as `hint`;
+  b. the main API by certificate ID (CERT_LOOKUP);
+  c. the viewer's public data endpoint by certificate ID (public_lookup): structured data
+     only, no sign-in.
+The certificate ID is read from the viewer link (/diamond/<id>/… with or without further
+segments or a query string). Each step logs why it failed, and which one succeeded.
 Frames are <url>/<n>.webp (or .jpg / .png), n = 0 … frame_count-1, all inside that one
 folder. Frame 0 and the last frame are checked before anything is used.
 Viewer pages are NEVER read or parsed, and no video file is ever taken from one. When the
@@ -27,6 +31,7 @@ Nothing identifying goes into file names: only the random folder and 000.webp, 0
 """
 import io
 import json
+import os
 import re
 import threading
 import time
@@ -233,17 +238,19 @@ def _int0(v):
 
 
 def _v360_candidates(hint):
-    """(where, {url, frame_count, top_index}) from the certificate's 360 fields."""
+    """(where, {url, frame_count, top_index}) from the 360 fields: v360, and product_videos entries
+    of type "360" — on the certificate and on the stone itself."""
     hint = hint or {}
     c = hint.get("certificate") if isinstance(hint.get("certificate"), dict) else {}
     out = []
     for where, v in (("certificate.v360", c.get("v360")), ("v360", hint.get("v360"))):
         if isinstance(v, dict):
             out.append((where, v))
-    pv = c.get("product_videos")
-    for v in (pv if isinstance(pv, list) else [pv] if isinstance(pv, dict) else []):
-        if isinstance(v, dict) and str(v.get("type") or "360").strip().lower() in ("360", "v360"):
-            out.append(("certificate.product_videos", v))
+    for where, pv in (("certificate.product_videos", c.get("product_videos")),
+                      ("product_videos", hint.get("product_videos"))):
+        for v in (pv if isinstance(pv, list) else [pv] if isinstance(pv, dict) else []):
+            if isinstance(v, dict) and str(v.get("type") or "360").strip().lower() in ("360", "v360"):
+                out.append((where, v))
     return [(w, v) for w, v in out if isinstance(v.get("url"), str) and v.get("url") and v.get("frame_count") is not None]
 
 
@@ -295,49 +302,162 @@ def _from_v360(hint, facts, method):
     return None
 
 
-# /diamond/<certificate id>/video/<w>/<h>: the ID is the search API's certificate ID. The page
-# itself is never read; the certificate's 360 API fields are fetched by that ID instead.
-_CERT_VIEWER = re.compile(r"^/diamond/([^/]+)/video/\d+/\d+/?$", re.I)
+# ── Certificate ID from a viewer link ─────────────────────────────────────────
+_CERT_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{7,63}")
 
 
-def _from_cert_lookup(viewer_url, facts):
+def cert_id_from_link(url):
+    """The certificate ID in a viewer link: the path segment after "diamond", wherever the link
+    goes on from there (/video/500/500/autoplay, a query string, a fragment, no scheme…).
+    '' when the link has none. The page itself is never read."""
     try:
-        m = _CERT_VIEWER.search(urlparse(str(viewer_url)).path)
+        segs = [x for x in urlparse(str(url or "").strip()).path.split("/") if x]
     except Exception:
-        m = None
-    if not m:
-        return None
-    facts.append("viewer link carries a certificate ID: looking up its 360 API fields")
-    if CERT_LOOKUP is None:
-        raise CaptureFailed("certificate lookup unavailable (search API not configured)")
+        return ""
+    for i, seg in enumerate(segs[:-1]):
+        if seg.lower() == "diamond" and _CERT_ID.fullmatch(segs[i + 1]):
+            return segs[i + 1]
+    return ""
+
+
+# ── The certificate's 360 fields, three ways (never a viewer page) ────────────
+# (a) the stone's own search-result fields   (b) the main API by certificate ID
+# (c) the viewer's own public data endpoint: structured JSON, no sign-in.
+# CERT_LOOKUP (b) is set by the app: cert_id -> (hint dict or None, reason).
+PUBLIC_URL = os.environ.get("LOUPE_PUBLIC_URL", "").strip() or "https://g.nivoda.com/graphql-public-loupe360"
+PUBLIC_QUERY = """query ($cert_id: ID!) {
+  certificate: certificate_by_cert_id(cert_id: $cert_id) {
+    id shape certNumber image
+    v360 { top_index frame_count url }
+    product_videos { id url display_index loupe360_url type top_index frame_count }
+  }
+}"""
+PUBLIC_MAX_BYTES = 1024 * 1024
+
+
+def public_lookup(cert_id):
+    """(hint or None, reason): the certificate's 360 fields and still image from the public data
+    endpoint. Sends only the query above with the certificate ID; reads only the JSON answer."""
+    if not _CERT_ID.fullmatch(str(cert_id or "")):
+        return None, "no certificate ID"
     try:
-        hint, reason = CERT_LOOKUP(m.group(1))
+        r = _http.post(PUBLIC_URL, json={"query": PUBLIC_QUERY, "variables": {"cert_id": str(cert_id)}},
+                       headers={"User-Agent": qm.UA, "Accept": "application/json"},
+                       timeout=(8, 15), allow_redirects=False, stream=True)
+    except requests.Timeout:
+        return None, "public endpoint timed out"
+    except requests.RequestException as e:
+        return None, f"public endpoint unreachable ({type(e).__name__})"
+    with r:
+        if r.status_code != 200:
+            return None, f"public endpoint HTTP {r.status_code}"
+        raw = b""
+        try:
+            for chunk in r.iter_content(64 * 1024):
+                raw += chunk
+                if len(raw) > PUBLIC_MAX_BYTES:
+                    return None, "public endpoint answer too large"
+        except requests.RequestException as e:
+            return None, f"public endpoint interrupted ({type(e).__name__})"
+    try:
+        body = json.loads(raw)
+    except ValueError:
+        return None, "public endpoint answer isn't JSON"
+    if not isinstance(body, dict):
+        return None, "public endpoint answer isn't JSON"
+    c = (body.get("data") or {}).get("certificate") if isinstance(body.get("data"), dict) else None
+    if not isinstance(c, dict):
+        errs = body.get("errors")
+        msg = mask_text(errs[0].get("message") if isinstance(errs, list) and errs and isinstance(errs[0], dict) else "", 100)
+        return None, "public endpoint: " + (msg or "no certificate with that ID")
+    cm = {k: c[k] for k in ("id", "certNumber", "image", "v360", "product_videos") if c.get(k) not in (None, "", [], {})}
+    return ({"certificate": cm} if cm else None), ("ok" if cm else "certificate has no media")
+
+
+def still_by_link(viewer_url):
+    """The certificate's still image for a viewer link, from the public endpoint ('' if none)."""
+    cid = cert_id_from_link(viewer_url)
+    if not cid:
+        return ""
+    try:
+        hint, _ = (PUBLIC_LOOKUP or public_lookup)(cid)
+    except Exception:
+        return ""
+    return still_from_hint(hint)
+
+
+def _cert_no_conflict(hint, expect):
+    """'' unless the lookup's certificate number is known and differs from the stone's."""
+    got = re.sub(r"\D", "", str(((hint or {}).get("certificate") or {}).get("certNumber") or ""))
+    want = re.sub(r"\D", "", str(expect or ""))
+    return "" if not got or not want or got == want else "its certificate number isn't this stone's"
+
+
+def _via_lookup(name, fn, cert_id, expect, facts):
+    """One lookup route: fetch the 360 fields by certificate ID, then the same frame checks."""
+    try:
+        hint, reason = fn(cert_id)
     except Exception as e:
-        hint, reason = None, f"certificate lookup error ({type(e).__name__})"
-    facts.append(f"certificate lookup: {'found 360 fields' if hint else reason}")
+        hint, reason = None, f"lookup error ({type(e).__name__})"
     if not hint:
-        raise CaptureFailed(reason if reason.startswith("certificate") else f"certificate lookup: {reason}")
-    fs = _from_v360(hint, facts, "API fields (certificate lookup)")
-    if fs is None:
-        raise CaptureFailed("certificate lookup: its 360 fields gave no usable frames")
-    return fs
+        facts.append(f"{name}: failed — {mask_text(reason)}")
+        return None
+    if not _v360_candidates(hint):
+        facts.append(f"{name}: answered, but no v360 / product_videos 360 entry with url + frame_count")
+        return None
+    bad = _cert_no_conflict(hint, expect)
+    if bad:
+        facts.append(f"{name}: rejected — {bad}")
+        return None
+    return _from_v360(hint, facts, name)
 
 
 # ── Public API ────────────────────────────────────────────────────────────────
-def find_frames(viewer_url, hint=None):
-    """Returns (FrameSet or None, facts[list of str]). Only the certificate's 360 API fields
-    are used; a viewer page is never read."""
+def find_frames(viewer_url, hint=None, expect_cert=None):
+    """Returns (FrameSet or None, facts[list of str]). The 360 fields come from, in order:
+    (a) the stone's own search-result fields, (b) the main API by certificate ID, (c) the public
+    endpoint. Both v360 and product_videos (type 360) are checked at each step, every step
+    that fails says why, and a viewer page is never read."""
     facts = []
-    try:
-        fs = _from_v360(hint, facts, "API fields")
-        if fs is None and not _v360_candidates(hint):
-            fs = _from_cert_lookup(viewer_url, facts)
-            if fs is None:
-                facts.append("no 360 API fields for this stone (url / frame_count) — viewer pages are never read")
-        return fs, facts
-    except CaptureFailed as e:
-        facts.append(str(e))
+    cert_id = cert_id_from_link(viewer_url)
+    facts.append(f"viewer link: certificate ID {cert_id}" if cert_id
+                 else "viewer link: no certificate ID found in it")
+    # (a) the stone's own fields
+    a_why = ""
+    if _v360_candidates(hint):
+        n0 = len(facts)
+        fs = _from_v360(hint, facts, "step a (stone's own search-result fields)")
+        if fs:
+            return fs, facts
+        a_why = facts[-1].split(": ", 1)[-1] if len(facts) > n0 else "its frames didn't check out"
+        facts.append(f"step a: failed — {a_why}")
+    else:
+        facts.append("step a (stone's own search-result fields): none — no v360 / product_videos 360 entry "
+                     "with url + frame_count")
+    if not cert_id:
+        facts.append("steps b and c skipped: no certificate ID to look up")
+        facts.append(f"no 360 frames: the stone's own fields failed ({a_why}) and its link carries no certificate ID "
+                     "for another route" if a_why else
+                     "no 360 fields for this stone: it has none of its own and its link carries no certificate ID "
+                     "— viewer pages are never read")
         return None, facts
+    # (b) the main API by certificate ID
+    if CERT_LOOKUP is None:
+        facts.append("step b (main API by certificate ID): not available — search API not configured")
+    else:
+        fs = _via_lookup("step b (main API by certificate ID)", CERT_LOOKUP, cert_id, expect_cert, facts)
+        if fs:
+            return fs, facts
+    # (c) the public data endpoint
+    fs = _via_lookup("step c (public 360 endpoint)", PUBLIC_LOOKUP or public_lookup, cert_id, expect_cert, facts)
+    if fs:
+        return fs, facts
+    facts.append("no 360 frames from any route (stone's own fields, main API, public endpoint) — "
+                 "viewer pages are never read")
+    return None, facts
+
+
+PUBLIC_LOOKUP = None       # tests can replace the public endpoint call (cert_id -> (hint, reason))
 
 
 def pick(n, top=0, limit=None):
@@ -581,7 +701,7 @@ def own_folder(fs):
     return bool(base) and all(re.fullmatch(re.escape(base) + r"/\d{1,4}\.(webp|jpg|png)", u) for u in fs.urls)
 
 
-def capture(sb_url, key, viewer_url, hint=None):
+def capture(sb_url, key, viewer_url, hint=None, expect_cert=None):
     """Captures one stone from its certificate's 360 API fields. Returns dict(ok, spin={'id','n',
     'top','v'} | None, video='' (never a video), note=<one-line diagnostic>, facts=[...],
     log={method, frames, source_frames, top_index, top_frame} on success). Never raises."""
@@ -591,11 +711,11 @@ def capture(sb_url, key, viewer_url, hint=None):
     t0 = time.time()
     timing = {}                                        # filled by store_frames, kept when a capture fails
     try:
-        fs, facts = find_frames(viewer_url, hint)
+        fs, facts = find_frames(viewer_url, hint, expect_cert)
         if fs is None:
             # The last fact is the most specific reason
             res = {"ok": False, "spin": None, "video": "", "facts": facts,
-                   "note": facts[-1] if facts else "no 360 API fields for this stone"}
+                   "note": facts[-1] if facts else "no 360 fields for this stone"}
         elif not own_folder(fs):
             raise CaptureFailed("frames aren't all from the stone's own v360 folder")
         else:

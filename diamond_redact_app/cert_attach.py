@@ -23,6 +23,7 @@ Log lines ("[cert] …") carry the last 4 digits only.
 import io
 import json
 import re
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -46,43 +47,81 @@ class Skip(Exception):
 
 
 # ── 1-2. Download ─────────────────────────────────────────────────────────────
+# Every failure says exactly why, in the words the certificate log shows.
+def _skip(reason):
+    return Skip("Certificate not attached: " + reason)
+
+
 def download(url):
-    """Returns the PDF bytes, or raises Skip with the reason."""
+    """Returns the PDF bytes, or raises Skip with the exact reason (e.g. 'download HTTP 403',
+    'no PDF provided, online report-check link only', 'not a PDF')."""
     url = str(url or "").strip()
     if not url.lower().startswith(("http://", "https://")):
-        raise Skip("Certificate not attached: the certificate link isn't a web address")
+        raise _skip("the certificate link isn't a web address")
     try:
         if not qm._public_host(url):
-            raise Skip("Certificate not attached: the certificate link isn't a public address")
+            raise _skip("the certificate link isn't a public address")
     except qm.Broken:
-        raise Skip("Certificate not attached: the certificate link doesn't work (host not found)")
+        raise _skip("the certificate link doesn't work (host not found)")
     try:
         r = requests.get(url, stream=True, timeout=TIMEOUT, allow_redirects=True,
                          headers={"User-Agent": qm.UA, "Accept": "application/pdf,*/*"})
     except requests.RequestException as e:
-        raise Skip(f"Certificate not attached: couldn't download it ({type(e).__name__})")
+        raise _skip(f"couldn't download it ({type(e).__name__})")
     with r:
         if r.status_code >= 400:
-            raise Skip(f"Certificate not attached: download failed (HTTP {r.status_code})")
+            raise _skip(f"download HTTP {r.status_code}")
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
         buf = io.BytesIO()
         start = time.monotonic()
         try:
             for chunk in r.iter_content(256 * 1024):
                 buf.write(chunk)
                 if buf.tell() > MAX_BYTES:
-                    raise Skip("Certificate not attached: the file is too large")
+                    raise _skip("the file is too large")
                 if time.monotonic() - start > DEADLINE:
-                    raise Skip("Certificate not attached: the download took too long")
+                    raise _skip("the download took too long")
         except requests.RequestException as e:
-            raise Skip(f"Certificate not attached: download interrupted ({type(e).__name__})")
+            raise _skip(f"download interrupted ({type(e).__name__})")
     data = buf.getvalue()
-    head = data[:1024]
-    if b"%PDF-" in head:
+    if b"%PDF-" in data[:1024]:
         return data
     if qm._sniff(data[:16]) == "image":
-        raise Skip("Certificate not attached: the certificate is an image (JPG/PNG), not a PDF, "
-                   "so it can't be redacted")
-    raise Skip("Certificate not attached: the certificate link isn't a PDF file")
+        raise _skip("not a PDF (the certificate is an image, JPG/PNG, so it can't be redacted)")
+    head = data[:2048].lstrip().lower()
+    if ctype in ("text/html", "application/xhtml+xml") or head.startswith((b"<!doctype html", b"<html", b"<?xml", b"<head")):
+        raise _skip("no PDF provided, online report-check link only")
+    raise _skip("not a PDF")
+
+
+_dl_cache = {}                       # url -> (time, bytes or None, Skip message)
+_dl_lock = threading.Lock()
+DL_TTL_OK, DL_TTL_FAIL, DL_CACHE_MAX = 600, 90, 24
+
+
+def download_cached(url):
+    """download(), remembered briefly so checking a stone when it is selected and again when the
+    quote is saved doesn't fetch the file twice (a failure is only remembered for a minute or so)."""
+    now = time.monotonic()
+    with _dl_lock:
+        hit = _dl_cache.get(url)
+        if hit and now - hit[0] < (DL_TTL_OK if hit[1] else DL_TTL_FAIL):
+            if hit[1]:
+                return hit[1]
+            raise Skip(hit[2])
+    try:
+        data = download(url)
+    except Skip as e:
+        data, msg = None, str(e)
+    else:
+        msg = ""
+    with _dl_lock:
+        if len(_dl_cache) >= DL_CACHE_MAX:
+            _dl_cache.pop(min(_dl_cache, key=lambda k: _dl_cache[k][0]), None)
+        _dl_cache[url] = (now, data, msg)
+    if data is None:
+        raise Skip(msg)
+    return data
 
 
 # ── 3. Lab / format ───────────────────────────────────────────────────────────
@@ -326,109 +365,134 @@ def upload(sb_url, key, pdf_bytes):
     return CERT_BASE + name
 
 
-# ── Create quote: one uploaded certificate ────────────────────────────────────
-def resolve_layout(data, selected):
-    """(layout, numbers) for a certificate uploaded in Create quote under the card `selected`
-    ('IGI', 'GIA' or 'GIA Colour'). The selected type's own layout is used exactly as before,
-    unless the file doesn't fit it and does fit one of the newer layouts (IGI Photo for an IGI
-    card, GIA Dossier for a GIA card) — then that one, with the numbers found in its text."""
+# ── The one certificate path: Live Search stones, uploads there, and Create quote uploads ──────────
+# job: {"url": <certificate link> | "data": <uploaded PDF bytes>, "cert_no": <the stone's report
+# number, or "" when it is only known from the PDF (Create quote)>, "lab": "GIA" | "IGI" | "",
+# "last4": <label for the log when cert_no is unknown>}
+PREFIX = "Certificate not attached: "
+
+
+def _lab_hint(job):
+    lab = str((job or {}).get("lab") or "").strip()
+    return "GIA" if lab.upper().startswith("GIA") else lab      # the Create quote cards: "GIA Colour" is a GIA
+
+
+def analyse(data, job, log=None):
+    """Reads the PDF: lab/format, the numbers that must not survive, the layout that covers them.
+    Returns (layout, numbers). Raises Skip with the exact reason."""
+    log = log if log is not None else {}
     try:
         doc = fitz.open(stream=data, filetype="pdf")
     except Exception:
-        return selected, set()
+        raise _skip("the PDF can't be read")
     try:
-        if doc.needs_pass or doc.is_encrypted or doc.page_count < 1:
-            return selected, set()
-        text = doc[0].get_text()
-        numbers = sensitive_numbers(text, "") | set(re.findall(r"\d{8,}", text))
-        up = " ".join(text.upper().split())
+        ctype, why = detect(doc, _lab_hint(job))
+        if not ctype:
+            log["lab_format"] = "unsupported"
+            raise _skip(f"unsupported certificate ({why})")
+        log["lab_format"] = ctype
+        text = "\n".join(p.get_text() for p in doc)
+        core = digits(job.get("cert_no"))
+        numbers = sensitive_numbers(text, job.get("cert_no"))
+        if core:
+            if core not in digits(text):
+                raise _skip("the certificate's number doesn't match the stone")
+        else:                                        # number only known from the PDF: every long number counts
+            numbers |= set(re.findall(r"\d{8,}", text))
         if not numbers:
-            return selected, numbers
-        if selected == "IGI":
-            layout, why = pick_layout(doc[0], "IGI", numbers)
-            return (layout if not why else "IGI"), numbers
-        if selected in ("GIA", "GIA Colour") and "DIAMOND DOSSIER" in up:
-            why = check_layout(doc[0], "GIA Dossier", numbers)
-            if not why:
-                return "GIA Dossier", numbers
-            # a Diamond Dossier is never redacted with the full-size GIA zones
-            raise Skip(f"unsupported GIA Diamond Dossier layout ({why})")
-        return selected, numbers
+            raise _skip("no report number found to redact")
+        layout, why = pick_layout(doc[0], ctype, numbers)
+        if why:
+            log["lab_format"] = f"{ctype} (unsupported layout)"
+            raise _skip(f"unsupported layout ({why})")
+        log["lab_format"] = layout
+        return layout, numbers
     finally:
         doc.close()
 
 
-def redact_for_quote(data, selected, logo_img):
-    """(redacted_pdf, layout). The three original layouts redact exactly as they always did.
-    A newer layout is also stripped of metadata and verified (fail closed): raises Skip with
-    the reason when the numbers or the QR code weren't safely removed."""
-    layout, numbers = resolve_layout(data, selected)
-    if layout not in certs.LAYOUT_META:
-        return certs.redact_pdf(data, selected, logo_img), selected
+def prepare(data, job, logo_img, log=None):
+    """The whole redaction for one PDF: analyse, redact (certs.redact_pdf: numbers masked, QR
+    code replaced by the client's logo, barcode blanked where the layout has one), strip
+    metadata, and verify — FAIL CLOSED. Returns (redacted_bytes, layout); raises Skip."""
+    log = log if log is not None else {}
+    layout, numbers = analyse(data, job, log)
+    log["layout"] = layout
     red = strip(certs.redact_pdf(data, layout, logo_img))
+    log["redaction"] = "applied"
     fails = verify(red, numbers, layout, logo_img)
+    log["verification"] = "passed" if not fails else "FAILED: " + ", ".join(fails)
     if fails:
-        raise Skip("redaction couldn't be verified (" + ", ".join(fails) + ")")
+        raise Skip(NOT_VERIFIED)
     return red, layout
+
+
+def redact_for_quote(data, selected, logo_img, cert_no=""):
+    """(redacted_pdf, layout) for a certificate uploaded on the card `selected` ('IGI', 'GIA', 'GIA
+    Colour'): the same analyse / redact / verify as every Live Search certificate."""
+    return prepare(data, {"lab": selected, "cert_no": cert_no}, logo_img)
+
+
+def precheck(job, fetch=None):
+    """(ok, reason, layout): can this certificate be attached automatically? Downloads (or takes the
+    uploaded PDF) and checks lab, numbers and layout. No logo, no storing. Never raises."""
+    fetch = fetch or download_cached
+    try:
+        if job.get("data"):
+            data = job["data"]
+        elif job.get("url"):
+            data = fetch(job["url"])
+        else:
+            raise _skip("no certificate file in the stone data")
+        layout, _ = analyse(data, job)
+        return True, "", layout
+    except Skip as e:
+        return False, reason_of(e), ""
+    except Exception as e:
+        return False, f"unexpected problem ({type(e).__name__})", ""
+
+
+def reason_of(e):
+    t = str(e)
+    return t[len(PREFIX):] if t.startswith(PREFIX) else t
 
 
 # ── One stone ─────────────────────────────────────────────────────────────────
 def process(job, logo_img, sb_url, key, uploader=None, fetch=None):
-    """job: {"url", "cert_no", "lab"}. Returns a log dict: source, lab_format, redaction,
-    verification, pdf_url ('' when not attached), cert_type, note."""
-    uploader, fetch = uploader or upload, fetch or download
-    last4 = digits((job or {}).get("cert_no"))[-4:]
+    """job: see above. Returns a log dict: source, lab_format, redaction, verification, pdf_url
+    ('' when not attached), cert_type, layout, reason (why not, in a few words), note."""
+    uploader, fetch = uploader or upload, fetch or download_cached
+    job = job or {}
+    last4 = digits(job.get("cert_no"))[-4:] or str(job.get("last4") or "")
     log = {"stone": f"···{last4}" if last4 else "?", "source": "none", "lab_format": "-",
-           "redaction": "not applied", "verification": "-", "pdf_url": "", "cert_type": "", "note": ""}
+           "redaction": "not applied", "verification": "-", "pdf_url": "", "cert_type": "", "layout": "",
+           "reason": "", "note": ""}
     try:
-        if not (job or {}).get("url"):
-            raise Skip("Certificate not attached: no certificate file in the stone data")
-        log["source"] = "found"
-        data = fetch(job["url"])
-        log["source"] = "found (PDF)"
-        try:
-            doc = fitz.open(stream=data, filetype="pdf")
-        except Exception:
-            raise Skip("Certificate not attached: the PDF can't be read")
-        try:
-            ctype, why = detect(doc, job.get("lab"))
-            if not ctype:
-                log["lab_format"] = "unsupported"
-                raise Skip(f"Certificate not attached: unsupported certificate ({why})")
-            log["lab_format"] = ctype
-            text = "\n".join(p.get_text() for p in doc)
-            numbers = sensitive_numbers(text, job.get("cert_no"))
-            core = digits(job.get("cert_no"))
-            if core and core not in digits(text):
-                raise Skip("Certificate not attached: the certificate's number doesn't match the stone")
-            if not numbers:
-                raise Skip("Certificate not attached: no report number found to redact")
-            layout, why = pick_layout(doc[0], ctype, numbers)
-            if why:
-                log["lab_format"] = f"{ctype} (unsupported layout)"
-                raise Skip(f"Certificate not attached: unsupported layout ({why})")
-            log["lab_format"] = layout
-        finally:
-            doc.close()
-        red = strip(certs.redact_pdf(data, layout, logo_img))
-        log["redaction"] = "applied"
-        fails = verify(red, numbers, layout, logo_img)
-        log["verification"] = "passed" if not fails else "FAILED: " + ", ".join(fails)
-        if fails:
-            raise Skip(NOT_VERIFIED)
+        if job.get("data"):
+            data = job["data"]
+            log["source"] = "uploaded PDF"
+        elif job.get("url"):
+            log["source"] = "found"
+            data = fetch(job["url"])
+            log["source"] = "found (PDF)"
+        else:
+            raise _skip("no certificate file in the stone data")
+        red, layout = prepare(data, job, logo_img, log)
         log["pdf_url"] = uploader(sb_url, key, red)
         log["cert_type"] = certs.lab_of(layout)
     except Skip as e:
         log["note"] = str(e)
+        log["reason"] = reason_of(e)
     except Exception as e:
-        log["note"] = f"Certificate not attached: unexpected problem ({type(e).__name__})"
+        log["note"] = PREFIX + f"unexpected problem ({type(e).__name__})"
+        log["reason"] = f"unexpected problem ({type(e).__name__})"
         if log["redaction"] == "applied" and log["verification"] == "-":
             log["verification"] = "FAILED: error"
     return log
 
 
 def attach_all(stones, jobs, logo_img, sb_url, key, workers=4, **kw):
-    """Processes certificate jobs (one per stone; None = not a Live Search stone) and sets
+    """Processes certificate jobs (one per stone; None = no certificate job) and sets
     pdf_url on the stones that pass. Returns (notes, logs). Never raises."""
     todo = [(i, j) for i, j in enumerate(jobs) if j is not None]
     if not todo:
@@ -437,8 +501,8 @@ def attach_all(stones, jobs, logo_img, sb_url, key, workers=4, **kw):
         with ThreadPoolExecutor(max_workers=workers) as ex:
             logs = list(ex.map(lambda t: process(t[1], logo_img, sb_url, key, **kw), todo))
     except Exception as e:
-        logs = [{"stone": "?", "note": f"Certificate not attached: unexpected problem ({type(e).__name__})",
-                 "pdf_url": ""} for _ in todo]
+        logs = [{"stone": "?", "note": PREFIX + f"unexpected problem ({type(e).__name__})",
+                 "reason": f"unexpected problem ({type(e).__name__})", "pdf_url": ""} for _ in todo]
     notes = []
     for (i, _), lg in zip(todo, logs):
         if lg.get("pdf_url"):

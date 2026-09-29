@@ -152,7 +152,7 @@ def test_pcg_quote_is_captured_from_api_fields(spin_env):
     assert no_viewer_page_read(sb)
     t = texts(at)
     assert "360 capture log" in t and "360 processing: 1 of 1 done" in t
-    assert "method: API fields (certificate.v360)" in t
+    assert "method: step a" in t
     assert "72 frames (thinned evenly from 240)" in t
     assert re.search(r"top\\?_index 37 \(frame %d of the spinner, where it starts\)" % top_pos, t)
     assert re.search(r"time: fetch [\d.]+s, re-encode [\d.]+s, upload [\d.]+s, total [\d.]+s", t)
@@ -235,7 +235,7 @@ def test_off_by_default_even_for_pcg(spin_env, monkeypatch):
 
 
 @pytest.mark.parametrize("number, why", [
-    ("LG600000002", "no 360 API fields"),
+    ("LG600000002", "no 360 fields"),
     ("LG600000003", "under the 24-frame minimum"),
 ])
 def test_missing_or_short_api_fields_keep_the_viewer_link(spin_env, number, why):
@@ -273,7 +273,7 @@ def test_viewer_page_is_never_read(monkeypatch):
     monkeypatch.setattr(spin_capture.requests, "get", lambda *a, **k: calls.append(a) or (_ for _ in ()).throw(AssertionError))
     spin_capture._cache.clear()
     res = spin_capture.capture("https://db.test", "k", "https://viewer.test/page.html?x=1", None)
-    assert not res["ok"] and "no 360 API fields" in res["note"] and not calls
+    assert not res["ok"] and "no 360 fields" in res["note"] and not calls
     for name in ("_from_page", "_analyse", "_from_hint", "_VIDEO_FILE", "_get_text"):
         assert not hasattr(spin_capture, name), name
 
