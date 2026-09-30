@@ -39,7 +39,7 @@ def test_new_client_is_set_up_like_the_others():
     a = src("app.py")
     assert '"Spence": CLIENT_Spence_B64,' in a                                     # CLIENT_LOGOS
     order = re.search(r"CLIENT_ORDER = \[(.*?)\]", a).group(1)
-    assert order.strip().endswith('"Spence"') and order.count('"Spence"') == 1     # CLIENT_ORDER
+    assert '"Spence", "Pure Diamond"' in order and order.count('"Spence"') == 1     # CLIENT_ORDER
     b64 = _app_logo_b64("Spence")
     png = base64.b64decode(b64)
     assert Image.open(io.BytesIO(png)).format == "PNG"
@@ -487,9 +487,9 @@ def test_client_logo_function_order_database_then_builtin_then_pure_carbon():
     q = open(os.path.join(ROOT, "quote.html")).read()
     pcg = re.search(r'"Pure Carbon Group": "data:image/png;base64,([A-Za-z0-9+/=]+)"', q).group(1)
     assert d["nope"]["status"] == 200 and d["nope"]["b64"] == pcg               # unknown: Pure Carbon
-    # a client added in the app wins over a built-in one of the same name
+    # an in-app record with a built-in client's name never replaces the built-in logo
     d = _clients_run([{"name": "Spence", "logo_b64": ZED}])
-    assert d["spence"]["b64"] == ZED
+    assert d["spence"]["b64"] == _app_logo_b64("Spence")
     # database down or table empty: built-in and Pure Carbon still work
     d = _clients_run([], down=True)
     assert d["spence"]["b64"] == _app_logo_b64("Spence") and d["zed-and-co"]["b64"] == pcg
@@ -536,8 +536,7 @@ def test_client_added_in_the_app_gets_its_logo_on_certificates_and_order_matches
     sb, api = env
     st.cache_data.clear()                                                       # the app caches the client list for 5 minutes
     sb.tables["custom_clients"].append({"name": "Zed & Co", "logo_b64": ZED})
-    sb.tables["custom_clients"].append({"name": "Spence", "logo_b64": ZED})       # overrides the built-in, as on the pages
-    for who in ("Zed & Co", "Spence"):
+    for who in ("Zed & Co",):
         sb.storage["certificates"].clear()
         at = boot()
         at.session_state["ls_client_sel"] = who

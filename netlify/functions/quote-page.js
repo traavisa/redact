@@ -1,6 +1,8 @@
 const { createClient } = require('@supabase/supabase-js');
 const fs = require('fs');
 const path = require('path');
+const { slugOf } = require('./lib/clients');
+const { iconTags } = require('./lib/icons');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
@@ -27,12 +29,14 @@ exports.handler = async function (event) {
 
   let title = 'Diamond Options';
   let description = 'View your diamond selection.';
+  let slug = '';
 
   if (id) {
     try {
       const { data } = await supabase.from('quotes').select('client,stones').eq('id', id).single();
       if (data) {
         const client = data.client || '';
+        slug = slugOf(client);
         const shapes = shapesLabel(data.stones);
         title = client ? `${client} Diamond Options` : 'Diamond Options';
         if (shapes) title += ` — ${shapes}`;
@@ -53,7 +57,8 @@ exports.handler = async function (event) {
   <meta name="twitter:title" content="${escapeHtml(title)}" />
   <meta name="twitter:description" content="${escapeHtml(description)}" />`;
 
-  const out = html.replace(
+  // Favicon + home-screen icon: this quote's client logo (square, from our domain); Pure Carbon's if none
+  const out = html.replace(/<link rel="icon" id="favicon"[^>]*>/, iconTags(slug)).replace(
     '<title>Diamond Options</title>',
     `<title>${escapeHtml(title)}</title>\n  ${metaBlock}`
   );

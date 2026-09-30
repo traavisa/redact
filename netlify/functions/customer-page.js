@@ -10,6 +10,7 @@ const fs = require('fs');
 const path = require('path');
 
 const { slugOf, lookup } = require('./lib/clients');
+const { iconTags } = require('./lib/icons');
 
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
@@ -41,10 +42,12 @@ exports.handler = async function (event) {
       meta += `\n  <meta property="og:image" content="${escapeHtml(`https://${host}/client-logo/${slug}`)}" />`;
     }
     html = html
-      .replace('<link rel="icon" id="favicon" href="data:,">', `<link rel="icon" id="favicon" href="${store.logo}">`)
       .replace('const STORE_LOGO = null;', `const STORE_LOGO = ${JSON.stringify(store.logo)};`)
       .replace('const STORE_NAME = null;', `const STORE_NAME = ${JSON.stringify(store.name).replace(/</g, '\\u003c')};`);
   }
+
+  // Favicon + home-screen icon: this client's logo (square, from our domain); Pure Carbon's if unknown
+  html = html.replace(/<link rel="icon" id="favicon"[^>]*>/, iconTags(store ? slug : ''));
 
   html = html.replace(
     '<title>Diamond Selection</title>',

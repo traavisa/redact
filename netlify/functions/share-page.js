@@ -1,5 +1,6 @@
 // Old customer share links (/s/<id>) are retired.
 // This page loads NO share data and never contacts the database.
+const { iconTags } = require('./lib/icons');
 const PAGE = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -8,6 +9,7 @@ const PAGE = `<!DOCTYPE html>
   <meta name="robots" content="noindex">
   <meta name="referrer" content="no-referrer">
   <title>Link no longer active</title>
+  ${iconTags('')}
   <style>
     html, body { margin: 0; min-height: 100%; background: #0c0c0c; color: #e8e8e0;
       font-family: -apple-system, 'Inter', 'Segoe UI', sans-serif; }

@@ -1,6 +1,7 @@
-// Client logos. Order: (1) clients added in the app ("Add a new client", table custom_clients,
-// read with the server-side key, never sent as a table), (2) the built-in logos in quote.html's
-// CLIENT_LOGOS list, (3) Pure Carbon Group. Logos are served from our own domain
+// Client logos. Order: (1) the built-in logos in quote.html's CLIENT_LOGOS list (a built-in client's
+// logo can't be replaced by an in-app record with the same name), (2) clients added in the app
+// ("Add a new client", table custom_clients, read with the server-side key, never sent as a table),
+// (3) Pure Carbon Group. Logos are served from our own domain
 // (/client-logo/<slug>) or inlined into the page; nothing comes from a vendor/supplier host.
 const fs = require('fs');
 const path = require('path');
@@ -62,7 +63,7 @@ async function custom() {
 async function lookup(slug) {
   slug = String(slug || '');
   if (!slug) return null;
-  return (await custom())[slug] || builtin()[slug] || null;
+  return builtin()[slug] || (await custom())[slug] || null;
 }
 
 // Like lookup, but always has a logo: unknown clients get Pure Carbon Group's.

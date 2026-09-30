@@ -6,7 +6,7 @@
   <meta name="referrer" content="no-referrer">
   <meta name="robots" content="noindex">
   <title>Diamond Selection</title>
-  <link rel="icon" id="favicon" href="data:,">
+  <link rel="icon" id="favicon" href="/client-logo/pure-carbon-group/icon-32.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@300;400;500;600&family=Inter:wght@300;400;500&display=swap" rel="stylesheet">
   <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
@@ -356,9 +356,14 @@ function showExpired(client) {
 
 // Only our own media, viewer and certificate storage can be shown on this page
 function mediaFile(f) { return typeof f === 'string' && MEDIA_FILE_RE.test(f) ? f : ''; }
+// Tells the viewer whose logo to use as its icon (the store's slug, same rule as the server's)
+function viewerClient() {
+  const s = String(STORE_NAME || '').toLowerCase().replace(/&/g, 'and').replace(/['\u2019]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+  return s ? '&c=' + s : '';
+}
 function videoUrl(st) {
   // plain=1 hides the viewer's own logo/name so only the store's branding shows
-  if (typeof st.w === 'string' && /^[a-z2-9]{8,32}$/.test(st.w)) return VIEWER_LINK_BASE + st.w + '?plain=1';
+  if (typeof st.w === 'string' && /^[a-z2-9]{8,32}$/.test(st.w)) return VIEWER_LINK_BASE + st.w + '?plain=1' + viewerClient();
   // Older customer links (made before media was re-hosted)
   if (typeof st.u === 'string' && /^https?:\/\//i.test(st.u)) {
     try { return VIEWER_BASE + btoa(st.u) + '&plain=1'; } catch (e) { return null; }
@@ -396,7 +401,7 @@ async function resolveSpinFallbacks(root) {
     if (d && d.spin && window.Spin360 && Spin360.valid(d.spin)) {
       el.removeAttribute('data-fallback-id'); el.__s360 = Spin360.mount(el, d.spin);
     } else if (d && /^[a-z2-9]{8,32}$/.test(String(d.token || ''))) {
-      el.outerHTML = `<iframe src="${VIEWER_LINK_BASE + d.token}?plain=1" allowfullscreen allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe>`;
+      el.outerHTML = `<iframe src="${VIEWER_LINK_BASE + d.token}?plain=1${viewerClient()}" allowfullscreen allow="autoplay; fullscreen" referrerpolicy="no-referrer"></iframe>`;
     } else if (img) {
       el.outerHTML = `<img src="${esc(img)}" alt="">`;
     } else {
@@ -437,7 +442,6 @@ function setBrand(client) {
     const img = document.getElementById(id);
     if (logo) { img.src = logo; img.hidden = false; }
   });
-  if (logo) document.getElementById('favicon').href = logo;
   document.getElementById('header-name').textContent = client;
   document.getElementById('footer-name').textContent = client;
   document.title = client ? client + ' — Diamond Selection' : 'Diamond Selection';
