@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { slugOf } = require('./lib/clients');
 const { iconTags } = require('./lib/icons');
+const { ogTags, origin } = require('./lib/og');
 
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
 
@@ -15,7 +16,7 @@ function escapeHtml(str) {
 function shapesLabel(stones) {
   const shapes = (stones || []).map((s) => (s.cert_data && s.cert_data.shape) || '').filter(Boolean);
   if (!shapes.length) return '';
-  const unique = [...new Set(shapes)];
+  const unique = [...new Map(shapes.map((s) => [s.toLowerCase(), s.toLowerCase().replace(/\b[a-z]/g, (c) => c.toUpperCase())])).values()];   // same shape in any letter case counts once
   if (unique.length === 1) {
     const shape = unique[0];
     return shapes.length > 1 && !shape.toLowerCase().endsWith('s') ? `${shape}s` : shape;
@@ -30,32 +31,40 @@ exports.handler = async function (event) {
   let title = 'Diamond Options';
   let description = 'View your diamond selection.';
   let slug = '';
+  let expired = false;
 
   if (id) {
     try {
-      const { data } = await supabase.from('quotes').select('client,stones').eq('id', id).single();
+      const { data } = await supabase.from('quotes').select('client,stones,expires_at').eq('id', id).single();
       if (data) {
         const client = data.client || '';
+        expired = new Date(data.expires_at) < new Date();
         slug = slugOf(client);
         const shapes = shapesLabel(data.stones);
-        title = client ? `${client} Diamond Options` : 'Diamond Options';
-        if (shapes) title += ` — ${shapes}`;
-        const n = (data.stones || []).length;
-        description = shapes
-          ? `${n} diamond${n === 1 ? '' : 's'} selected — ${shapes}`
-          : `${n} diamond${n === 1 ? '' : 's'} selected`;
+        if (expired) {                                   // expired: neutral, nothing about the quote
+          title = 'Diamond Options';
+          description = 'This link has expired.';
+        } else {
+          title = client ? `${client} Diamond Options` : 'Diamond Options';
+          if (shapes) title += ` \u2014 ${shapes}`;
+          const n = (data.stones || []).length;
+          description = shapes
+            ? `${n} diamond${n === 1 ? '' : 's'} selected \u2014 ${shapes}`
+            : `${n} diamond${n === 1 ? '' : 's'} selected`;
+        }
       }
     } catch (e) {
       // fall back to defaults on any lookup failure
     }
   }
 
-  const metaBlock = `<meta property="og:title" content="${escapeHtml(title)}" />
-  <meta property="og:description" content="${escapeHtml(description)}" />
-  <meta property="og:type" content="website" />
-  <meta name="twitter:card" content="summary" />
-  <meta name="twitter:title" content="${escapeHtml(title)}" />
-  <meta name="twitter:description" content="${escapeHtml(description)}" />`;
+  // Server-side (crawlers don't run JavaScript): title, description and a 1200x630 preview image
+  const base = origin(event);
+  const metaBlock = ogTags({
+    title, description, siteName: 'Pure Carbon Group',
+    image: `${base}/og/${id && /^[a-z0-9]{4,32}$/i.test(id) ? 'q/' + id : 'neutral'}.jpg`,
+    url: id ? `${base}/q/${encodeURIComponent(id)}` : '',
+  });
 
   // Favicon + home-screen icon: this quote's client logo (square, from our domain); Pure Carbon's if none
   const out = html.replace(/<link rel="icon" id="favicon"[^>]*>/, iconTags(slug)).replace(

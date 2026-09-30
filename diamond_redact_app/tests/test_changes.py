@@ -75,7 +75,7 @@ def test_quote_page_has_the_logo_and_share_page_carries_only_it():
     body = d["body"]
     assert 'const STORE_NAME = "Spence"' in body and "Spence — Diamond Selection" in body
     assert 'const STORE_LOGO = "data:image/png;base64,' + _app_logo_b64("Spence")[:40] in body
-    assert "https://quote.alldiamondeverything.com/client-logo/spence" in body       # link preview image (our domain)
+    assert "https://quote.alldiamondeverything.com/og/c/spence.jpg" in body       # link preview image (our domain, 1200x630 card)
     assert "Nash Jewellers" not in body and "Bijouterie" not in body                # no other client's name
     assert not SUPPLIER.search(re.sub(r"https?://\S+", "", body))
 
@@ -503,7 +503,7 @@ def test_share_page_and_link_preview_for_a_client_added_in_the_app():
     body = d["share"]
     assert 'const STORE_NAME = "Zed & Co"' in body and "Zed &amp; Co — Diamond Selection" in body
     assert f'const STORE_LOGO = "data:image/png;base64,{ZED}"' in body
-    assert "https://quote.alldiamondeverything.com/client-logo/zed-and-co" in body
+    assert "https://quote.alldiamondeverything.com/og/c/zed-and-co.jpg" in body
     assert "Other" not in body and "Nash Jewellers" not in body                  # only this client
     assert not SUPPLIER.search(re.sub(r"https?://\S+", "", body))
     # a built-in client's share page is unchanged apart from the preview image source

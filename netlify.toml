@@ -10,6 +10,15 @@
 [functions."client-logo"]
   included_files = ["quote.html"]
 
+[functions."og-image"]
+  included_files = ["quote.html"]
+
+# Link-preview images (1200x630): /og/q/<quote id>.jpg, /og/c/<client>.jpg, /og/neutral.jpg
+[[redirects]]
+  from = "/og/*"
+  to = "/.netlify/functions/og-image/:splat"
+  status = 200
+
 [[redirects]]
   from = "/q/*"
   to = "/.netlify/functions/quote-page/:splat"

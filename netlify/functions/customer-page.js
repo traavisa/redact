@@ -11,6 +11,7 @@ const path = require('path');
 
 const { slugOf, lookup } = require('./lib/clients');
 const { iconTags } = require('./lib/icons');
+const { ogTags, origin } = require('./lib/og');
 
 function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, (c) => ({
@@ -28,19 +29,15 @@ exports.handler = async function (event) {
     if (hit) { slug = p; store = hit; break; }
   }
 
+  // Link preview (server-side): same 1200x630 card style as the quote pages, this client's logo and name
+  const base = origin(event);
   let title = 'Diamond Selection';
-  let meta = `<meta property="og:title" content="Diamond Selection" />
-  <meta property="og:description" content="Diamonds selected for you." />`;
+  let meta = ogTags({ title, description: 'Diamonds selected for you.', image: `${base}/og/neutral.jpg`, siteName: 'Pure Carbon Group' });
 
   if (store) {
-    title = `${store.name} — Diamond Selection`;
-    meta = `<meta property="og:title" content="${escapeHtml(title)}" />
-  <meta property="og:description" content="${escapeHtml(`Diamonds selected for you by ${store.name}.`)}" />
-  <meta property="og:site_name" content="${escapeHtml(store.name)}" />`;
-    const host = (event.headers && (event.headers['x-forwarded-host'] || event.headers.host)) || '';
-    if (host) {                                      // link-preview image: this client's logo, from our own domain
-      meta += `\n  <meta property="og:image" content="${escapeHtml(`https://${host}/client-logo/${slug}`)}" />`;
-    }
+    title = `${store.name} \u2014 Diamond Selection`;
+    meta = ogTags({ title, description: `Diamonds selected for you by ${store.name}.`, siteName: store.name,
+      image: `${base}/og/c/${encodeURIComponent(slug)}.jpg`, alt: `${store.name} \u2014 Diamond Selection` });
     html = html
       .replace('const STORE_LOGO = null;', `const STORE_LOGO = ${JSON.stringify(store.logo)};`)
       .replace('const STORE_NAME = null;', `const STORE_NAME = ${JSON.stringify(store.name).replace(/</g, '\\u003c')};`);
@@ -51,7 +48,7 @@ exports.handler = async function (event) {
 
   html = html.replace(
     '<title>Diamond Selection</title>',
-    `<title>${escapeHtml(title)}</title>\n  ${meta}\n  <meta property="og:type" content="website" />\n  <meta name="twitter:card" content="summary" />`
+    `<title>${escapeHtml(title)}</title>\n  ${meta}`
   );
 
   return {
