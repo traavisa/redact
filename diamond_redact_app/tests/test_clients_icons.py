@@ -204,7 +204,7 @@ const hrefs = (html) => [...html.matchAll(/<link rel="(?:icon|apple-touch-icon)"
 def _run_icons(rows, extra_slugs=()):
     builtin = ["pure-carbon-group", "nash-jewellers", "nfr", "cavalier", "foe-and-dear", "harlings", "rodan", "janinas",
                "ijl", "gem-by-carati", "vena-nova", "touch-of-gold", "bijouterie-italienne", "perrara", "bell-diamonds",
-               "barclays", "spence", "pure-diamond"]
+               "barclays", "spence", "pure-diamond", "idar-jewellers"]
     return _node(ICON_JS % (json.dumps(rows), json.dumps(builtin + list(extra_slugs))))
 
 
@@ -277,7 +277,7 @@ def test_icons_are_square_padded_not_stretched_and_fall_back_only_without_a_usab
 def test_every_built_in_client_logo_makes_a_usable_icon():
     slugs = ["pure-carbon-group", "nash-jewellers", "nfr", "cavalier", "foe-and-dear", "harlings", "rodan", "janinas",
              "ijl", "gem-by-carati", "vena-nova", "touch-of-gold", "bijouterie-italienne", "perrara", "bell-diamonds",
-             "barclays", "spence", "pure-diamond"]
+             "barclays", "spence", "pure-diamond", "idar-jewellers"]
     d = _run_icons([])
     unusable = [s for s in slugs if d["icons"][f"/client-logo/{s}/icon-180.png"]["src"] != "client"]
     assert unusable == []
