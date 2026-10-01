@@ -14,6 +14,7 @@ Rules this module follows:
 import datetime
 import html
 import json
+import logging
 import re
 import traceback
 
@@ -21,7 +22,10 @@ import streamlit as st
 
 import cert_attach
 import pricing
+import request_learning as rl
 import stone_source as src
+
+log = logging.getLogger("diamond_tools")
 
 AI_MODEL = "claude-sonnet-5"
 MAX_SCAN = 500              # stones fetched per search (cheapest first), 10 pages of 50
@@ -297,8 +301,46 @@ PARSE_SYSTEM = (
     "- Output JSON only.")
 
 
-def ai_parse_request(api_key, text):
-    return _ai_call(api_key, PARSE_SYSTEM, "Client request:\n\n" + text, PARSE_SCHEMA)
+def ai_parse_request(api_key, text, rules="", examples=None):
+    """rules: the dealer's house rules (authoritative); examples: saved worked examples
+    ({"request_text", "criteria"} rows). Both are optional: without them it parses as before."""
+    system = rl.system_prompt(PARSE_SYSTEM, rules,
+                              rl.format_examples(examples or [], criteria_for_prompt))
+    return _ai_call(api_key, system, "Client request:\n\n" + text, PARSE_SCHEMA)
+
+
+# Form fields the parser fills, by the friendly name used in saved examples and the correction log.
+FIELD_NAMES = {
+    "ls_type": "type", "ls_shapes": "shapes", "ls_ct_min": "carat_min", "ls_ct_max": "carat_max",
+    "ls_col_mode": "colour_mode", "ls_col": "colour_range", "ls_fancy_col": "fancy_colour",
+    "ls_fancy_int": "fancy_intensity", "ls_cla": "clarity_range", "ls_cut": "cut_min", "ls_pol": "polish_min",
+    "ls_sym": "symmetry_min", "ls_flo": "fluorescence", "ls_labs": "labs", "ls_pr_min": "price_min",
+    "ls_pr_max": "price_max", "ls_pr_basis": "price_basis", "ls_ratio_min": "ratio_min",
+    "ls_ratio_max": "ratio_max", "ls_depth_min": "depth_min", "ls_depth_max": "depth_max",
+    "ls_table_min": "table_min", "ls_table_max": "table_max", "ls_as_grown": "as_grown_only",
+    "ls_length_min": "length_min", "ls_length_max": "length_max", "ls_width_min": "width_min",
+    "ls_width_max": "width_max", "ls_height_min": "height_min", "ls_height_max": "height_max",
+}
+
+
+def _norm(v):
+    if isinstance(v, (list, tuple)):
+        return [_norm(x) for x in v]
+    if isinstance(v, float):
+        return round(v, 4)
+    return v
+
+
+def criteria_snapshot():
+    """The current value of every parsed form field (JSON-friendly)."""
+    ss = st.session_state
+    return {k: _norm(ss.get(k, DEFAULTS.get(k))) for k in FIELD_NAMES}
+
+
+def criteria_for_prompt(snap):
+    """A saved snapshot as {friendly name: value}, leaving out fields still at their default."""
+    return {FIELD_NAMES[k]: v for k, v in snap.items()
+            if k in FIELD_NAMES and v != _norm(DEFAULTS.get(k)) and v not in (None, [], "")}
 
 
 PICKS_SCHEMA = {"type": "object", "additionalProperties": False, "required": ["picks"],
@@ -321,13 +363,14 @@ def ai_top_picks(api_key, criteria_text, stones):
 
 
 # ── Parse result -> form ──────────────────────────────────────────────────────
-def apply_parse(result):
+def apply_parse(result, rules_active=False, request_text=""):
     """Validated AI output -> form widget state. Unknown/invalid values are ignored.
-    Returns (n_filled, notes). Never triggers a search."""
+    Returns (n_filled, notes). Never triggers a search. Remembers what was parsed (to spot later
+    edits). rules_active: the house rules were in the prompt (natural with no lab then means GIA)."""
     ss = st.session_state
     for k, v in DEFAULTS.items():                 # a new request starts from a clean form
         ss[k] = list(v) if isinstance(v, list) else v
-    notes, filled = {}, 0
+    notes, filled, set_keys = {}, 0, []
 
     def get(name):
         f = result.get(name) if isinstance(result, dict) else None
@@ -339,6 +382,7 @@ def apply_parse(result):
         nonlocal filled
         ss[key] = value
         filled += 1
+        set_keys.append(key)
         if interp:
             notes[key] = note or "Interpreted from the request, confirm"
 
@@ -415,8 +459,17 @@ def apply_parse(result):
             ss[f"ls_{dim}_min"], ss[f"ls_{dim}_max"] = hi, lo
     # The IGI default only makes sense for lab-grown: a natural request that names no lab searches any lab
     if ss.ls_type == "Natural" and not get("labs")[0]:
-        ss.ls_labs = []
+        if rules_active:      # house default: natural with no lab named -> GIA
+            ss.ls_labs = ["GIA"]
+            notes["ls_labs"] = "natural, no lab named → GIA, defaults rule"
+        else:
+            ss.ls_labs = []
     ss["ls_notes"] = notes
+    ss["ls_parsed"] = criteria_snapshot()                 # to see later what was edited
+    ss["ls_parsed_keys"] = [k for k in dict.fromkeys(set_keys) if k in FIELD_NAMES]
+    ss["ls_parsed_req"] = request_text
+    ss["ls_corr_done"] = {}
+    ss["ls_ex_saved"] = None
     ss["ls_ver"] = ss.get("ls_ver", 0) + 1       # re-create the range sliders with the new values
     return filled, notes
 
@@ -1048,7 +1101,8 @@ def _clear_picks():
 
 
 NEW_SEARCH_CLEARS = ("ls_results", "ls_picks_ai", "ls_diag", "ls_lookup", "ls_lookup_diag", "ls_parse_msg",
-                     "ls_parse_err", "ls_last_link")
+                     "ls_parse_err", "ls_last_link", "ls_parsed", "ls_parsed_keys", "ls_parsed_req",
+                     "ls_corr_done", "ls_ex_saved")
 
 
 def _new_search():
@@ -1074,6 +1128,200 @@ def _new_search():
     _clear_picks()
     for k in [k for k in ss if str(k).startswith(("ls_sort", "ls_view", "ls_show_n"))]:
         del ss[k]
+
+
+# ── House rules, saved examples, correction log (Supabase; see request_learning.py) ───────────────
+def _store(deps):
+    sb = deps.get("supabase")
+    return rl.Store(*sb) if sb else None
+
+
+def _load_rules(deps):
+    """Read the saved rules into session state; returns True when they could be read."""
+    ss = st.session_state
+    try:
+        store = _store(deps)
+        if store is None:
+            raise RuntimeError("no database configured")
+        saved = store.load_rules()
+        ss["ls_rules_saved"] = rl.DEFAULT_RULES if saved is None else saved
+        ss["ls_rules_ok"] = True
+    except Exception as e:
+        log.warning("live-search: request rules could not be loaded: %s", e)
+        ss["ls_rules_saved"] = rl.DEFAULT_RULES
+        ss["ls_rules_ok"] = False
+    return ss["ls_rules_ok"]
+
+
+def _load_examples(deps):
+    ss = st.session_state
+    try:
+        store = _store(deps)
+        if store is None:
+            raise RuntimeError("no database configured")
+        ss["ls_examples"] = store.load_examples()
+        ss["ls_examples_ok"] = True
+    except Exception as e:
+        log.warning("live-search: saved examples could not be loaded: %s", e)
+        ss["ls_examples"], ss["ls_examples_ok"] = [], False
+    return ss["ls_examples_ok"]
+
+
+def _load_corrections(deps):
+    ss = st.session_state
+    try:
+        ss["ls_corr_rows"] = _store(deps).load_corrections()
+        ss["ls_corr_ok"] = True
+    except Exception as e:
+        log.warning("live-search: correction log could not be loaded: %s", e)
+        ss["ls_corr_rows"], ss["ls_corr_ok"] = [], False
+
+
+def _learn_init(deps):
+    """Once per session: load rules, examples and the correction log (a failure never blocks anything)."""
+    ss = st.session_state
+    if "ls_rules_ok" not in ss:
+        _load_rules(deps)
+        _load_examples(deps)
+        _load_corrections(deps)
+    ss.setdefault("ls_rules_ta", ss.get("ls_rules_saved", rl.DEFAULT_RULES))
+
+
+def _parse_inputs(deps, text):
+    """(rules, similar examples, warnings) for one parse. Whatever can't be loaded is left out,
+    logged, and reported in the warnings; the request is then read without it."""
+    ss = st.session_state
+    warns = []
+    if not ss.get("ls_rules_ok"):
+        if _load_rules(deps) and ss.get("ls_rules_ta") == rl.DEFAULT_RULES:
+            ss["ls_rules_ta"] = ss["ls_rules_saved"]
+    rules = ss.get("ls_rules_ta", "") if ss.get("ls_rules_ok") else ""
+    if not ss.get("ls_rules_ok"):
+        warns.append("request rules couldn't be loaded")
+    if not _load_examples(deps):
+        warns.append("saved examples couldn't be loaded")
+    return rules, rl.similar_examples(text, ss.get("ls_examples") or []), warns
+
+
+def _edited_fields():
+    """[(key, parsed, now)] for the fields the parser filled that now hold something else."""
+    ss = st.session_state
+    parsed = ss.get("ls_parsed")
+    if not parsed:
+        return []
+    now = criteria_snapshot()
+    return [(k, parsed[k], now[k]) for k in (ss.get("ls_parsed_keys") or []) if now[k] != parsed[k]]
+
+
+def _log_corrections(deps):
+    """Record (once per value) each parser-filled field that was changed before searching."""
+    ss = st.session_state
+    done = ss.get("ls_corr_done")
+    if done is None:
+        return
+    rows = []
+    for k, was, now in _edited_fields():
+        sig = json.dumps(now)
+        if done.get(k) != sig:
+            rows.append((k, sig, {"field": FIELD_NAMES[k], "parsed_value": json.dumps(was),
+                                  "final_value": sig, "request_text": ss.get("ls_parsed_req") or "",
+                                  "created_at": rl.now()}))
+    if not rows:
+        return
+    try:
+        _store(deps).add_corrections([r[2] for r in rows])
+        done.update({k: sig for k, sig, _ in rows})
+    except Exception as e:
+        log.warning("live-search: corrections could not be logged: %s", e)
+
+
+def _save_example(deps):
+    ss = st.session_state
+    snap = criteria_snapshot()
+    try:
+        _log_corrections(deps)
+        _store(deps).add_example(ss.get("ls_parsed_req") or "", snap)
+        ss["ls_ex_saved"] = snap
+        ss["ls_ex_msg"] = "Saved as an example."
+        _load_examples(deps)
+    except Exception as e:
+        log.warning("live-search: example could not be saved: %s", e)
+        ss["ls_ex_msg"] = "Couldn't save the example (database problem). Try again."
+
+
+def _delete_example(deps, ex_id):
+    try:
+        _store(deps).delete_example(ex_id)
+        _load_examples(deps)
+    except Exception as e:
+        log.warning("live-search: example could not be deleted: %s", e)
+        st.session_state["ls_ex_msg"] = "Couldn't delete the example (database problem)."
+
+
+def _save_rules(deps):
+    ss = st.session_state
+    try:
+        _store(deps).save_rules(ss.get("ls_rules_ta", ""))
+        ss["ls_rules_saved"], ss["ls_rules_ok"] = ss.get("ls_rules_ta", ""), True
+        ss["ls_rules_msg"] = "Rules saved."
+    except Exception as e:
+        log.warning("live-search: request rules could not be saved: %s", e)
+        ss["ls_rules_msg"] = "Couldn't save the rules (database problem). Your edits are still in the box."
+
+
+def _reset_rules():
+    st.session_state["ls_rules_ta"] = rl.DEFAULT_RULES
+    st.session_state["ls_rules_msg"] = "Default rules restored in the box. Click Save rules to keep them."
+
+
+def _settings_panel(deps):
+    ss = st.session_state
+    with st.expander("Request settings: rules, examples, corrections"):
+        st.markdown("**Request rules**")
+        st.caption("Included in every Read request as authoritative rules that override the defaults.")
+        if not ss.get("ls_rules_ok"):
+            st.warning("The saved rules couldn't be loaded, so requests are read without them for now. "
+                       "The box shows the standard rules; Save rules to store them.")
+        st.text_area("Request rules", key="ls_rules_ta", height=420, label_visibility="collapsed")
+        a, b, _ = st.columns([1, 1, 3])
+        with a:
+            if st.button("Save rules", type="primary", key="ls_rules_save"):
+                _save_rules(deps)
+                st.rerun()
+        with b:
+            st.button("Reset to standard", key="ls_rules_reset", on_click=_reset_rules)
+        if ss.get("ls_rules_msg"):
+            st.caption(ss.ls_rules_msg)
+
+        st.markdown("**Saved examples**")
+        if not ss.get("ls_examples_ok"):
+            st.warning("Saved examples couldn't be loaded.")
+        elif not ss.get("ls_examples"):
+            st.caption("None yet. After Read request, edit a field and use “Save as example”.")
+        if ss.get("ls_ex_msg"):
+            st.caption(ss.ls_ex_msg)
+        for ex in ss.get("ls_examples") or []:
+            a, b = st.columns([6, 1])
+            with a:
+                st.markdown(f"“{_esc(ex.get('request_text'))}”")
+                st.caption(json.dumps(criteria_for_prompt(ex.get("criteria") or {}), ensure_ascii=False))
+            with b:
+                st.button("Delete", key=f"ls_exdel_{ex.get('id')}", on_click=_delete_example,
+                          args=(deps, ex.get("id")))
+
+        st.markdown("**Common corrections**")
+        st.caption("Fields Read request filled that you then changed before searching.")
+        if st.button("Refresh", key="ls_corr_refresh"):
+            _load_corrections(deps)
+        if not ss.get("ls_corr_ok"):
+            st.warning("The correction log couldn't be loaded.")
+        pairs, fields = rl.top_corrections(ss.get("ls_corr_rows") or [])
+        if pairs:
+            st.dataframe([{"Field": f, "Parsed": was, "You changed it to": now, "Times": n}
+                          for (f, was, now), n in pairs], hide_index=True, use_container_width=True)
+            st.caption("By field: " + ", ".join(f"{f} ×{n}" for f, n in fields))
+        elif ss.get("ls_corr_ok"):
+            st.caption("No corrections recorded yet.")
 
 
 def render(deps):
@@ -1122,6 +1370,7 @@ def _render(deps):
     if mode == MODES[1]:
         _lookup_mode(client, ai_key, divisor, deps)
         return
+    _learn_init(deps)
 
     # ── A. Request parsing ────────────────────────────────────────────────
     st.markdown('<div class="section-label">Client request (optional)</div>', unsafe_allow_html=True)
@@ -1130,9 +1379,12 @@ def _render(deps):
     if st.button("Read request", type="primary", key="ls_read", disabled=not (ai_key and req.strip())):
         with st.spinner("Reading the request…"):
             try:
-                n, notes = apply_parse(ai_parse_request(ai_key, req.strip()))
+                rules, examples, warns = _parse_inputs(deps, req.strip())
+                n, notes = apply_parse(ai_parse_request(ai_key, req.strip(), rules=rules, examples=examples),
+                                       rules_active=bool(rules.strip()), request_text=req.strip())
                 ss.ls_parse_msg = (f"Filled {n} field(s) from the request"
                                    + (f" — {len(notes)} interpreted (amber): please confirm." if notes else ".")
+                                   + (f" Read without: {', '.join(warns)}." if warns else "")
                                    + " Nothing has been searched yet.")
                 ss.ls_parse_err = None
             except AIError as e:
@@ -1147,6 +1399,7 @@ def _render(deps):
         if ss.get("ls_notes") and st.button("Clear highlights", type="primary", key="ls_clr_notes"):
             ss.ls_notes = {}
             st.rerun()
+    _settings_panel(deps)
     st.markdown('<hr class="divider">', unsafe_allow_html=True)
 
     # ── B. Criteria form ──────────────────────────────────────────────────
@@ -1256,7 +1509,16 @@ def _render(deps):
     crit = read_criteria()
     fx = flex_state()
     auto = ss.pop("ls_autosearch", False)       # a flex offer button asks for a fresh search
-    if st.button("🔍  Search", type="primary", use_container_width=True, key="ls_search") or auto:
+    snap = criteria_snapshot() if ss.get("ls_parsed") else None
+    if snap is not None and snap != ss.ls_parsed and snap != ss.get("ls_ex_saved"):
+        st.button("Save as example", key="ls_ex_save", on_click=_save_example, args=(deps,),
+                  help="Stores the original request and the criteria as they are now, to guide "
+                       "future readings of similar requests.")
+    if ss.get("ls_ex_msg") and ss.get("ls_parsed"):
+        st.caption(ss.ls_ex_msg)
+    searching = st.button("🔍  Search", type="primary", use_container_width=True, key="ls_search")
+    if searching or auto:
+        _log_corrections(deps)
         client.reset_diag()
         q, plan, schema, error, retry, minfo = None, [], {}, None, None, None
         with st.spinner("Searching live stones…"):

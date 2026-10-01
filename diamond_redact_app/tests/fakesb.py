@@ -40,7 +40,8 @@ class Resp:
 class FakeSupabase:
     def __init__(self, quotes=(), files=(), block_reads=False):
         self.tables = {"quotes": [dict(q) for q in quotes], "custom_clients": [], "redact_history": [],
-                       "media_links": []}
+                       "media_links": [], "request_settings": [], "request_examples": [],
+                       "request_corrections": []}
         self.storage = {"quote-media": {f: b"x" for f in files}, "certificates": {}}
         self.block_reads = block_reads
         self.calls = []
@@ -98,8 +99,21 @@ class FakeSupabase:
             lim = int(q.get("limit", 100000))
             return Resp(200, json.loads(json.dumps(out[off:off + lim])))
         if method == "POST":
-            rows.append(dict(body, created_at=body.get("created_at", "2026-09-26T00:00:00Z")))
+            if table == "request_settings" and any(r.get("key") == body.get("key") for r in rows):   # upsert
+                [r.update(body) for r in rows if r.get("key") == body.get("key")]
+                return Resp(201, [])
+            for b in (body if isinstance(body, list) else [body]):
+                row = dict(b, created_at=b.get("created_at", "2026-09-26T00:00:00Z"))
+                if table.startswith("request_") and table != "request_settings":
+                    row["id"] = f"id{len(rows) + 1}-{len(self.calls)}"
+                rows.append(row)
             return Resp(201, [])
+        if method == "DELETE":
+            if self.block_reads:
+                return Resp(401, {"message": "permission denied"})
+            keep = [r for r in rows if not all(str(r.get(k)) == v[3:] for k, v in q.items() if str(v).startswith("eq."))]
+            rows[:] = keep
+            return Resp(204, None)
         if method == "PATCH":
             hit = [r for r in rows if all(str(r.get(k)) == v[3:] for k, v in q.items() if str(v).startswith("eq."))]
             for r in hit:

@@ -853,4 +853,5 @@ with tab_ls:
         "show_capture_status": show_capture_status,
         "add_history": add_history,
         "client_selector": client_selector,
+        "supabase": (SUPABASE_URL, SUPABASE_KEY),
     })

@@ -259,7 +259,7 @@ def _parse_result(**stated):
 def test_read_request_fills_dimensions_and_overrides_defaults(env, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
     result = {}
-    monkeypatch.setattr(ls, "ai_parse_request", lambda key, text: result["r"])
+    monkeypatch.setattr(ls, "ai_parse_request", lambda key, text, **kw: result["r"])
     at = boot()
     # "GIA natural, at least 7mm wide"
     result["r"] = _parse_result(type="natural", labs=["GIA"], width_min=7)
@@ -285,7 +285,7 @@ def test_read_request_fills_dimensions_and_overrides_defaults(env, monkeypatch):
     result["r"] = _parse_result(type="natural")
     at.text_area(key="ls_req").input("natural round").run()
     at.button(key="ls_read").click().run()
-    assert at.radio(key="ls_type").value == "Natural" and at.multiselect(key="ls_labs").value == []
+    assert at.radio(key="ls_type").value == "Natural" and at.multiselect(key="ls_labs").value == ["GIA"]   # house rule: natural -> GIA
     # swapped or absurd values are handled
     result["r"] = _parse_result(width_min=8, width_max=6, length_min=0.1, height_min=500)
     at.text_area(key="ls_req").input("x").run()
@@ -320,7 +320,7 @@ def _assert_fresh(at, markup=33.0, rate=1.5):
 
 def test_new_search_resets_the_criteria_results_picks_and_notes(env, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
-    monkeypatch.setattr(ls, "ai_parse_request", lambda key, text: _parse_result(
+    monkeypatch.setattr(ls, "ai_parse_request", lambda key, text, **kw: _parse_result(
         type="natural", labs=["GIA"], width_min=(7, "at least 7 wide, confirm")))
     monkeypatch.setattr(ls, "ai_top_picks", lambda key, crit, stones: {"picks": [
         {"ref": "E1", "reason": "best value"}]})
