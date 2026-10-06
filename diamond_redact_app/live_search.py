@@ -28,6 +28,7 @@ import stone_source as src
 log = logging.getLogger("diamond_tools")
 
 AI_MODEL = "claude-sonnet-5"
+PARSE_MAX_TOKENS = 4000      # Read request answer; one automatic retry at double this if it is cut off
 MAX_SCAN = 500              # stones fetched per search (cheapest first), 10 pages of 50
 
 # ── Vocabulary ────────────────────────────────────────────────────────────────
@@ -188,12 +189,22 @@ def _ai_call(api_key, system, user, schema, max_tokens=4000):
     msgs = [{"role": "user", "content": user}]
 
     def run(sys_text, **extra):
-        r = client.messages.create(model=AI_MODEL, max_tokens=max_tokens, system=sys_text,
-                                   messages=msgs, **extra)
-        if r.stop_reason == "refusal":
-            raise AIError("The assistant declined this request.")
-        if r.stop_reason == "max_tokens":
-            raise AIError("The assistant's answer was cut off. Try a shorter request.")
+        limit = max_tokens
+        for attempt in (1, 2):
+            r = client.messages.create(model=AI_MODEL, max_tokens=limit, system=sys_text,
+                                       messages=msgs, **extra)
+            u = getattr(r, "usage", None)
+            log.info("live-search ai: stop_reason=%s input_tokens=%s output_tokens=%s max_tokens=%s attempt=%s",
+                     r.stop_reason, getattr(u, "input_tokens", None), getattr(u, "output_tokens", None),
+                     limit, attempt)
+            if r.stop_reason == "refusal":
+                raise AIError("The assistant declined this request.")
+            if r.stop_reason == "max_tokens" and attempt == 1:
+                limit = max_tokens * 2          # cut off: one automatic retry with more room
+                continue
+            if r.stop_reason == "max_tokens":
+                raise AIError("Couldn't read this request, please try again.")
+            break
         text = "".join(b.text for b in r.content if getattr(b, "type", "") == "text").strip()
         m = re.search(r"\{.*\}", text, re.S)
         if not m:
@@ -231,10 +242,8 @@ def _field_schema(kind, opts=None):
         v = {"type": "number"}
     else:
         v = {"type": "boolean"}
-    return {"type": "object", "additionalProperties": False,
-            "required": ["stated", "value", "interpreted", "note"],
-            "properties": {"stated": {"type": "boolean"}, "value": v,
-                           "interpreted": {"type": "boolean"}, "note": {"type": "string"}}}
+    return {"type": "object", "additionalProperties": False, "required": ["value"],
+            "properties": {"value": v, "note": {"type": "string"}}}
 
 
 PARSE_FIELDS = [   # (name, kind, options, description)
@@ -272,19 +281,19 @@ PARSE_FIELDS = [   # (name, kind, options, description)
     ("height_max", "number", None, "maximum depth (height) in mm — NOT depth %"),
 ]
 PARSE_SCHEMA = {"type": "object", "additionalProperties": False,
-                "required": [f[0] for f in PARSE_FIELDS],
+                "required": [],      # compact: only fields with a value are returned
                 "properties": {f[0]: _field_schema(f[1], f[2]) for f in PARSE_FIELDS}}
 PARSE_SYSTEM = (
     "You read a jeweller's diamond request and map it onto a fixed search form for a diamond "
-    "wholesaler in Canada. For EVERY form field return an object {stated, value, interpreted, note}.\n"
-    "- stated=false when the request does not state it and it cannot be reasonably inferred. "
-    "Then value is a placeholder that will be ignored, interpreted=false, note=\"\". Never invent values.\n"
-    "- stated=true and interpreted=false when the request gives the value directly (e.g. 'GIA', 'oval', "
-    "'G colour', 'under $8k').\n"
-    "- stated=true and interpreted=true when you had to turn vague wording into a value "
-    "(e.g. '1.5ish' -> carat 1.40–1.60, 'near colourless' -> G–J, 'eye clean' -> SI1 or better, "
-    "'no fluoro' -> None). The note must say what you assumed and end with ', confirm' "
-    "(e.g. '1.5ish → 1.40–1.60, confirm'). Keep notes under 80 characters.\n"
+    "wholesaler in Canada. Be COMPACT: return a JSON object containing ONLY the form fields that have a "
+    "value. Omit every field the request does not state and that cannot be reasonably inferred "
+    "(never return nulls, blanks or placeholders, and never invent values). Each returned field is "
+    "{value, note}.\n"
+    "- Leave note out when the request gives the value directly (e.g. 'GIA', 'oval', 'G colour', 'under $8k').\n"
+    "- Add a note when you had to turn vague wording into a value (e.g. '1.5ish' -> carat 1.40–1.60, "
+    "'near colourless' -> G–J, 'eye clean' -> SI1 or better, 'no fluoro' -> None). A field with a note is "
+    "shown to the user as interpreted. Keep every note under 10 words and end it with ', confirm' "
+    "(e.g. '1.5ish → 1.40–1.60, confirm').\n"
     "- Single values: 'G colour' means colour_best=G and colour_worst=G; 'G or better' means "
     "colour_best=D, colour_worst=G. Same pattern for clarity.\n"
     "- Prices are in Canadian dollars. A budget from a jeweller for their customer is usually the "
@@ -293,11 +302,13 @@ PARSE_SYSTEM = (
     "- Sizes are in millimetres: length is the longer side, width the shorter side, height (depth in mm) "
     "the stone's depth. 'at least 7mm wide' -> width_min=7 (stated, not interpreted); 'up to 9mm long' -> "
     "length_max=9. 'X x Y' or 'X by Y' means length X and width Y; 'around/about/approx' -> that size "
-    "+/-0.2mm (interpreted; e.g. 'around 9 x 7' -> length 8.8-9.2, width 6.8-7.2, note '9 x 7 mm +/-0.2, confirm'). "
+    "+/-0.2mm (interpreted; e.g. 'around 9 x 7' -> length 8.8-9.2, width 6.8-7.2, note '9 x 7 mm +/-0.2, confirm'); "
+    "the same applies to a third number (X x Y x Z = length x width x depth in mm, so 'approx 5.14x4.97x3.50mm' "
+    "gives length 4.94-5.34, width 4.77-5.17, height 3.30-3.70). "
     "A single size with no 'x' (e.g. '6.5mm round') is both length and width, +/-0.15 (interpreted). "
     "Depth in percent stays depth_min/depth_max; only a depth in mm is height_min/height_max.\n"
     "- IGI reports are usually lab-grown and GIA/HRD/AGS reports usually natural: if a lab is named but the "
-    "type is not, set type from that with interpreted=true and a note ending ', confirm'.\n"
+    "type is not, set type from that with a short note ending ', confirm'.\n"
     "- Output JSON only.")
 
 
@@ -306,7 +317,7 @@ def ai_parse_request(api_key, text, rules="", examples=None):
     ({"request_text", "criteria"} rows). Both are optional: without them it parses as before."""
     system = rl.system_prompt(PARSE_SYSTEM, rules,
                               rl.format_examples(examples or [], criteria_for_prompt))
-    return _ai_call(api_key, system, "Client request:\n\n" + text, PARSE_SCHEMA)
+    return _ai_call(api_key, system, "Client request:\n\n" + text, PARSE_SCHEMA, max_tokens=PARSE_MAX_TOKENS)
 
 
 # Form fields the parser fills, by the friendly name used in saved examples and the correction log.
@@ -374,9 +385,10 @@ def apply_parse(result, rules_active=False, request_text=""):
 
     def get(name):
         f = result.get(name) if isinstance(result, dict) else None
-        if not isinstance(f, dict) or not f.get("stated") or f.get("value") is None:
+        if not isinstance(f, dict) or not f.get("stated", True) or f.get("value") is None:
             return None, False, ""
-        return f["value"], bool(f.get("interpreted")), str(f.get("note") or "")[:160]
+        note = str(f.get("note") or "")[:160]
+        return f["value"], bool(f.get("interpreted", bool(note))), note
 
     def setk(key, value, interp, note):
         nonlocal filled

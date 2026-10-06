@@ -299,7 +299,7 @@ def test_read_request_prompt_asks_for_sizes():
     assert {"length_min", "length_max", "width_min", "width_max", "height_min", "height_max"} <= fields
     p = ls.PARSE_SYSTEM
     assert "at least 7mm wide" in p and "around 9 x 7" in p and "width_min=7" in p
-    assert set(ls.PARSE_SCHEMA["required"]) == fields
+    assert set(ls.PARSE_SCHEMA["properties"]) == fields and ls.PARSE_SCHEMA["required"] == []   # compact output
 
 
 def _assert_fresh(at, markup=33.0, rate=1.5):

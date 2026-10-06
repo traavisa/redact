@@ -36,11 +36,11 @@ RULES_PROMPT = (
     "\n\nHOUSE RULES (from the dealer; AUTHORITATIVE — they override every default, assumption and "
     "example in these instructions, and you must apply them exactly):\n"
     "{rules}\n\n"
-    "Every value you set by applying a house rule must have stated=true, interpreted=true and a note "
-    "of the form '<what the request said> → <value>, <rule name> rule', e.g. '3ct → 3.00–3.10, size rule', "
-    "'ex/ex/ex cushion → polish/symmetry EX, cut blank, grade rule', 'no type given → lab-grown, IGI, defaults rule'. "
-    "For house-rule values use this note form INSTEAD of ending with ', confirm'. A value you leave "
-    "unstated because a rule says to leave it blank (e.g. cut) stays stated=false.")
+    "Every value you set by applying a house rule gets a SHORT note (under 10 words) of the form "
+    "'<request wording> → <value>, <rule name> rule', e.g. '3ct → 3.00–3.10, size rule', "
+    "'ex/ex/ex cushion → polish/sym EX, grade rule', 'no type → lab-grown, IGI, defaults rule'. "
+    "For house-rule values use this note INSTEAD of ending with ', confirm'. A field a rule says to leave "
+    "blank (e.g. cut) is simply omitted.")
 EXAMPLES_PROMPT = (
     "\n\nWORKED EXAMPLES: past requests from this dealer with the criteria they finally settled on "
     "after correcting earlier readings. Use them as guidance for similar wording; where an example "

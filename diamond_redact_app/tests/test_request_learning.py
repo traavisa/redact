@@ -231,3 +231,120 @@ def test_failed_correction_log_write_never_blocks_the_search(env, monkeypatch):
     at.number_input(key="ls_ct_max").set_value(3.3).run()
     at.button(key="ls_search").click().run()
     assert not at.exception, at.exception
+
+
+# ── Compact output, max_tokens retry ─────────────────────────────────────────
+import sys
+import types
+
+import pytest
+
+
+def stub_anthropic(monkeypatch, replies):
+    """A fake `anthropic` package: each messages.create() returns the next (stop_reason, text) reply."""
+    calls = []
+
+    class Err(Exception):
+        pass
+
+    class Messages:
+        def create(self, **kw):
+            calls.append(kw)
+            stop, text = replies[min(len(calls), len(replies)) - 1]
+            return types.SimpleNamespace(
+                stop_reason=stop, content=[types.SimpleNamespace(type="text", text=text)],
+                usage=types.SimpleNamespace(input_tokens=1200, output_tokens=len(text) // 4))
+
+    mod = types.SimpleNamespace(
+        Anthropic=lambda **kw: types.SimpleNamespace(messages=Messages()), BadRequestError=Err,
+        AuthenticationError=Err, RateLimitError=Err, APITimeoutError=Err, APIConnectionError=Err,
+        APIStatusError=Err)
+    monkeypatch.setitem(sys.modules, "anthropic", mod)
+    return calls
+
+
+PRINCESS = ("Natural .73ct princess cut / Approx measurements 5.14x4.97x3.50mm / GH color.")
+PRINCESS_JSON = json.dumps({   # what a compact answer looks like: only fields with values
+    "type": {"value": "natural"}, "shapes": {"value": ["Princess"]},
+    "labs": {"value": ["GIA"], "note": "natural, no lab → GIA, defaults rule"},
+    "carat_min": {"value": 0.68, "note": ".73 → 0.68–0.83, size rule"},
+    "carat_max": {"value": 0.83, "note": ".73 → 0.68–0.83, size rule"},
+    "colour_best": {"value": "G"}, "colour_worst": {"value": "H"},
+    "length_min": {"value": 4.94, "note": "approx 5.14 → ±0.2, confirm"},
+    "length_max": {"value": 5.34, "note": "approx 5.14 → ±0.2, confirm"},
+    "width_min": {"value": 4.77, "note": "approx 4.97 → ±0.2, confirm"},
+    "width_max": {"value": 5.17, "note": "approx 4.97 → ±0.2, confirm"},
+    "height_min": {"value": 3.3, "note": "approx 3.50 → ±0.2, confirm"},
+    "height_max": {"value": 3.7, "note": "approx 3.50 → ±0.2, confirm"}})
+
+
+def test_prompt_and_schema_ask_for_compact_output():
+    assert ls.PARSE_SCHEMA["required"] == []
+    f = ls.PARSE_SCHEMA["properties"]["carat_min"]
+    assert f["required"] == ["value"] and set(f["properties"]) == {"value", "note"}
+    p = ls.PARSE_SYSTEM
+    assert "ONLY the form fields that have a value" in p and "under 10 words" in p and "5.14x4.97x3.50" in p
+    assert "under 10 words" in rl.RULES_PROMPT
+    assert ls.PARSE_MAX_TOKENS >= 4000
+
+
+def test_compact_answer_fills_the_princess_request_with_defaults_and_approx_dimensions(env, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    calls = stub_anthropic(monkeypatch, [("end_turn", PRINCESS_JSON)])
+    at = boot()
+    read(at, PRINCESS)
+    assert not at.exception
+    assert calls[0]["max_tokens"] == 4000 and PRINCESS in calls[0]["messages"][0]["content"]
+    assert "HOUSE RULES" in calls[0]["system"]
+    assert (at.radio(key="ls_type").value, at.multiselect(key="ls_labs").value,
+            at.multiselect(key="ls_shapes").value) == ("Natural", ["GIA"], ["Princess"])
+    assert (at.number_input(key="ls_ct_min").value, at.number_input(key="ls_ct_max").value) == (0.68, 0.83)
+    assert at.session_state["ls_col"] == ("G", "H")
+    g = lambda k: at.number_input(key=k).value
+    assert (g("ls_length_min"), g("ls_length_max"), g("ls_width_min"), g("ls_width_max"),
+            g("ls_height_min"), g("ls_height_max")) == (4.94, 5.34, 4.77, 5.17, 3.3, 3.7)
+    notes = at.session_state["ls_notes"]
+    assert "size rule" in notes["ls_ct_min"] and "ls_length_min" in notes and "ls_col" not in notes   # G-H stated, not amber
+    assert at.session_state["ls_cut"] == "Any"                                                        # unknowns stay blank
+    assert not [q for q in api_queries(env)]
+
+
+def api_queries(env):
+    return [q for q in env[1].queries if "diamonds_by_query" in q]
+
+
+def test_long_multi_line_request_is_read(env, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    long_req = "\n".join(["Hi team, hope you're well. Looking for a few options for a client:"]
+                         + [f"- Option {i}: natural {1 + i / 10:.2f}ct round, F-G, VS, GIA, 3EX, budget ${9000 + i * 500}"
+                            for i in range(25)] + ["Thanks!"])
+    calls = stub_anthropic(monkeypatch, [("end_turn", json.dumps({
+        "type": {"value": "natural"}, "shapes": {"value": ["Round"]}, "labs": {"value": ["GIA"]},
+        "carat_min": {"value": 1.0, "note": "1.00 → 1.00–1.10, size rule"}, "carat_max": {"value": 1.1}}))])
+    at = boot()
+    read(at, long_req)
+    assert long_req in calls[0]["messages"][0]["content"]
+    assert at.number_input(key="ls_ct_min").value == 1.0 and at.multiselect(key="ls_labs").value == ["GIA"]
+    assert "Couldn't read" not in texts(at)
+
+
+def test_cut_off_answer_is_retried_once_with_more_room_then_succeeds(env, monkeypatch, caplog):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    calls = stub_anthropic(monkeypatch, [("max_tokens", '{"type": {"value": "nat'), ("end_turn", PRINCESS_JSON)])
+    with caplog.at_level("INFO", logger="diamond_tools"):
+        at = boot()
+        read(at, PRINCESS)
+    assert [c["max_tokens"] for c in calls] == [4000, 8000]
+    assert at.multiselect(key="ls_shapes").value == ["Princess"] and not at.session_state["ls_parse_err"]
+    assert "stop_reason=max_tokens" in caplog.text and "stop_reason=end_turn" in caplog.text
+    assert "output_tokens=" in caplog.text and "input_tokens=1200" in caplog.text
+
+
+def test_still_cut_off_after_the_retry_shows_the_plain_message(env, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "k")
+    calls = stub_anthropic(monkeypatch, [("max_tokens", '{"type": ')])
+    at = boot()
+    read(at, PRINCESS)
+    assert len(calls) == 2
+    assert "Couldn't read this request, please try again." in texts(at)
+    assert "cut off" not in texts(at) and "shorter" not in texts(at)
